@@ -61,8 +61,18 @@ const lockfile = join(repoRoot, "runtime", "pnpm-lock.yaml");
 const installArgs = existsSync(lockfile)
   ? ["install", "--prod", "--frozen-lockfile", "--store-dir", storeDir]
   : ["install", "--prod", "--store-dir", storeDir];
-const res = spawnSync("pnpm", installArgs, { cwd: join(repoRoot, "runtime"), env, stdio: "inherit" });
-if (res.status !== 0) fail("pnpm install failed");
+// On Windows the pnpm shim is a .cmd file; spawnSync only resolves it through
+// a shell (cmd.exe handles PATHEXT/.cmd). Args are fixed strings — no injection.
+const res = spawnSync("pnpm", installArgs, {
+  cwd: join(repoRoot, "runtime"),
+  env,
+  stdio: "inherit",
+  shell: process.platform === "win32",
+});
+if (res.status !== 0) {
+  const detail = res.error ? ` (${res.error.message})` : ` (exit ${res.status})`;
+  fail(`pnpm install failed${detail}`);
+}
 
 // Verify the installed version matches the manifest.
 const installedPkgPath = join(
