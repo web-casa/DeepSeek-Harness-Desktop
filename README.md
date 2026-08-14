@@ -42,18 +42,22 @@
 ## 目录结构
 
 ```
-crates/dsh-sidecar/        Rust 监督器（独立 crate，三平台可编译）
-runtime/                   pin 版本 + npm package-lock + 脚本白名单（node-pty/koffi 等）
+Cargo.toml                  cargo workspace 根（单 Cargo.lock、release profile）
+crates/dsh-sidecar/         Rust 监督器（独立 crate，三平台可编译）
+runtime/                    pin 版本 + npm package-lock + 脚本白名单（node-pty/koffi 等）
 scripts/                   下载 Node / 准备 runtime / 构建 sidecar / 端到端冒烟
 src/                       bootstrap 前端（Svelte 5 + Vite）
 src-tauri/                 Tauri 壳：状态机、ACL 化命令、capabilities、打包配置
-.github/workflows/         test.yml（三平台冒烟）· release.yml（NSIS/DMG 打包）
+deny.toml                  cargo-deny 供应链策略（license/advisory/bans/sources）
+supply-chain/              cargo-vet 审核记录（audits/config/imports）
+.github/workflows/         test / release / codeql / dependency-review
 ```
 
 ## 开发
 
 ```bash
 pnpm install                       # 前端 + tauri CLI
+pnpm check && pnpm check:scripts   # 前端 svelte-check + 脚本 tsc 类型检查
 pnpm runtime:all                   # 下载 Node + 准备 Harness runtime + 构建 sidecar
 pnpm runtime:verify                # 端到端冒烟（sidecar→node→dsh web→HTTP 200→无孤儿）
 pnpm tauri dev                     # 桌面开发模式
@@ -61,6 +65,20 @@ pnpm icons                         # 从 icon-source.png 重新生成平台图�
 ```
 
 > 本机若 `~/.cargo` 不可写，请设置 `CARGO_HOME=<repo>/.tmp/cargo-home` 再构建。
+
+### 质量门
+
+| 层 | 工具 | 门槛 |
+|---|---|---|
+| 前端 | `tsc --noEmit` + `svelte-check` | 0 error（含 Node 原生 TS 构建脚本的独立 `tsconfig.scripts.json`） |
+| Rust 测试 | `cargo nextest` | sidecar 25 + Tauri 状态机 10（含 proptest 性质测试、平台集成测试、NDJSON golden 契约） |
+| Rust 覆盖率 | `cargo llvm-cov` | sidecar ≥ 50%（platform.rs 96.7%）、Tauri ≥ 25%（重点覆盖进程生命周期/状态机，不追全局 KPI） |
+| Rust 静态分析 | `cargo fmt --check` + `clippy -D warnings` | unwrap/expect/panic/todo/unimplemented/dbg_macro 一律 deny（测试模块豁免） |
+| 供应链 | `cargo-deny` | advisories（yanked=deny）/ licenses / bans / sources（unknown=deny） |
+| 供应链审计 | `cargo-vet --locked` | 490 个第三方 crate 显式豁免基线；新增 crate 必须审核或豁免 |
+| 安全扫描 | CodeQL | rust + javascript-typescript + actions（push/PR/周 cron） |
+| PR 依赖门禁 | Dependency Review | fail-on-severity low + GPL/AGPL/LGPL 拒绝（依赖图启用后生效） |
+| 安装包 | `verify-bundle.ts` + `checksums.ts` | 7z/hdiutil 内容断言 + 内置 manifest 与仓库版本一致 + SHA-256 产物 |
 
 ### 脚本说明（Node ≥ 24 原生跑 TS，零依赖）
 
