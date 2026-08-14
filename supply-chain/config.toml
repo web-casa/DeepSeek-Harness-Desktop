@@ -4,13 +4,6 @@
 [cargo-vet]
 version = "0.10"
 
-# Community audit registries: real third-party audits replace exemptions
-# wherever they exist (imports.lock is generated and committed by cargo vet).
-# Mozilla's registry carries the largest aggregated set; Bytecode Alliance's
-# wasmtime registry covers the Rust-ecosystem core crates. URLs are pinned to
-# commit SHAs so a re-import cannot silently absorb upstream audit changes;
-# CI only ever runs `cargo vet --locked` (offline, uses the committed lock).
-
 [imports.google]
 url = "https://raw.githubusercontent.com/google/supply-chain/2a67b488aa2a4d123e68d95edd1f1916bb3f937e/audits.toml"
 
