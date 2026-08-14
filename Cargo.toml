@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/dsh-sidecar"]
+
+# Release profile shared by the Tauri shell and the sidecar (member-level
+# profiles are ignored inside a workspace).
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

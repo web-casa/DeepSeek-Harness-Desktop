@@ -23,11 +23,6 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
-[profile.release]
-lto = true
-strip = true
-codegen-units = 1
-
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

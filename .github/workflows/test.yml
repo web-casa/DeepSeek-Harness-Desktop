@@ -48,7 +48,7 @@ jobs:
           cargo check --target x86_64-pc-windows-msvc --manifest-path crates/dsh-sidecar/Cargo.toml
           cargo check --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml
 
-      - name: Tauri shell tests (nextest: state machine + proptests)
+      - name: "Tauri shell tests (nextest: state machine + proptests)"
         run: |
           # tauri-build asserts the bundle resources path exists; the smoke
           # job stages the real runtime — the unit job only needs the dir.

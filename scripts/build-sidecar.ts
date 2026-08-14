@@ -48,7 +48,15 @@ const args = [
   "--manifest-path",
   join(repoRoot, "crates/dsh-sidecar/Cargo.toml"),
 ];
-const res = spawnSync("cargo", args, { stdio: "inherit" });
+// The repo is a cargo workspace: default target dir would move to the root.
+// Pin it so the staged binary path stays deterministic.
+const res = spawnSync("cargo", args, {
+  stdio: "inherit",
+  env: {
+    ...process.env,
+    CARGO_TARGET_DIR: join(repoRoot, "crates/dsh-sidecar/target"),
+  },
+});
 if (res.status !== 0) fail("cargo build failed");
 
 const exe = process.platform === "win32" || triple.includes("windows") ? ".exe" : "";

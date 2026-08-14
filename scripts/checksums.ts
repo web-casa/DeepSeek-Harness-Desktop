@@ -12,7 +12,7 @@ if (bundleType !== "nsis" && bundleType !== "dmg") {
   fail("usage: node scripts/checksums.ts --bundle <nsis|dmg>");
 }
 
-const bundleDir = join(repoRoot, "src-tauri", "target", "release", "bundle", bundleType);
+const bundleDir = join(repoRoot, "target", "release", "bundle", bundleType);
 if (!existsSync(bundleDir)) {
   fail(`bundle dir missing at ${bundleDir} — run the bundle build first`);
 }

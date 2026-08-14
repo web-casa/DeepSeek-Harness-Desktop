@@ -35,7 +35,7 @@ const config = JSON.parse(
   readFileSync(join(repoRoot, "src-tauri", "tauri.conf.json"), "utf8"),
 ) as { productName?: string };
 const productName = config.productName ?? "DeepSeek Harness Desktop";
-const bundleDir = join(repoRoot, "src-tauri", "target", "release", "bundle", bundleType);
+const bundleDir = join(repoRoot, "target", "release", "bundle", bundleType);
 
 function findArtifact(): string {
   if (!existsSync(bundleDir)) {

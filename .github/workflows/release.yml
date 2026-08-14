@@ -21,12 +21,12 @@ jobs:
             os: windows-latest
             bundle: nsis
             artifact: deepseek-harness-desktop-windows-x64
-            glob: src-tauri/target/release/bundle/nsis/*-setup.exe
+            glob: target/release/bundle/nsis/*-setup.exe
           - target: macos-arm64
             os: macos-14
             bundle: dmg
             artifact: deepseek-harness-desktop-macos-arm64
-            glob: src-tauri/target/release/bundle/dmg/*.dmg
+            glob: target/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
