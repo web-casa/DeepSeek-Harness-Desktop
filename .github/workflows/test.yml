@@ -22,6 +22,12 @@ jobs:
         with:
           version: 11
 
+      # Tauri shell system deps (compiling src-tauri requires webkit2gtk-4.1).
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
       - name: Sidecar unit tests
         run: cargo test --manifest-path crates/dsh-sidecar/Cargo.toml
 
@@ -30,6 +36,16 @@ jobs:
           rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
           cargo check --target x86_64-pc-windows-msvc --manifest-path crates/dsh-sidecar/Cargo.toml
           cargo check --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml
+
+      - name: Tauri shell tests (compiles src-tauri + state-machine tests)
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust formatting & clippy
+        run: |
+          cargo fmt --check --manifest-path crates/dsh-sidecar/Cargo.toml
+          cargo fmt --check --manifest-path src-tauri/Cargo.toml
+          cargo clippy --manifest-path crates/dsh-sidecar/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Frontend install & build
         run: pnpm install --frozen-lockfile && pnpm build

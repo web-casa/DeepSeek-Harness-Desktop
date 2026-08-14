@@ -205,6 +205,18 @@ h1 {
   word-break: break-all;
 }
 
+.notice-box {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #e3c077;
+  background: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.3);
+  border-radius: 8px;
+  padding: 10px 12px;
+  user-select: text;
+  word-break: break-all;
+}
+
 .actions {
   display: flex;
   gap: 8px;

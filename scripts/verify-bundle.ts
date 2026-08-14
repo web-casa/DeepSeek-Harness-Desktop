@@ -38,6 +38,9 @@ const productName = config.productName ?? "DeepSeek Harness Desktop";
 const bundleDir = join(repoRoot, "src-tauri", "target", "release", "bundle", bundleType);
 
 function findArtifact(): string {
+  if (!existsSync(bundleDir)) {
+    fail(`bundle dir missing at ${bundleDir} — run the bundle build first`);
+  }
   const suffix = bundleType === "nsis" ? "-setup.exe" : ".dmg";
   const candidates = readdirSync(bundleDir).filter((f) => f.endsWith(suffix));
   if (candidates.length !== 1) {

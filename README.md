@@ -93,10 +93,17 @@ pnpm icons                         # 从 icon-source.png 重新生成平台图�
 
 | 场景 | 清理路径 |
 |---|---|
-| 正常退出 / 关闭应用 | Tauri `RunEvent::Exit` → shutdown 命令 → 优雅停止（unix: SIGTERM 进程组；win: CTRL_BREAK）→ 超时后强杀 |
+| 正常退出 / 关闭应用 | Tauri `RunEvent::Exit` → shutdown 命令 → 优雅停止（unix: SIGTERM 进程组；win: CTRL_C → node SIGINT → dsh 优雅退出）→ 超时后强杀 |
 | 应用崩溃（无信号波及 sidecar） | sidecar stdin EOF 检测 → 强杀整棵树 → exit 0 |
 | 整组信号（如终端 Ctrl+C / `timeout`） | sidecar 的 SIGTERM/SIGINT/SIGHUP 处理器 → 清理后 exit 0 |
-| sidecar 被 SIGKILL | unix 上无法兜底（已知边界）；Windows 由 Job Object `KILL_ON_JOB_CLOSE` 全兜底 |
+| Windows 强杀兜底 | Job Object `KILL_ON_JOB_CLOSE`；优雅失败时 2 秒后 `TerminateJobObject` |
+| 备注 | Windows 的优雅路径依赖 sidecar 启动时分配的隐藏控制台 + 子进程继承（`platform.rs`）；无控制台时优雅不可达，自动落入强杀兜底 |
+
+### 许可与第三方归属
+
+- 本项目代码：MIT（见 `LICENSE`）。
+- 安装包内置原版 DeepSeek Harness（MIT，随包附其 LICENSE/README）与 npm 依赖树；
+  `prepare-harness` 会把每个顶层依赖的 LICENSE 收集到包内 `runtime/harness/licenses/`。
 
 ## CI
 

@@ -18,7 +18,10 @@ pub fn get_status(runtime: State<'_, Runtime>) -> Value {
 
 #[tauri::command]
 pub fn get_diagnostics(runtime: State<'_, Runtime>) -> Value {
-    let s = runtime.state.lock().unwrap();
+    let s = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tail_start = s.logs.len().saturating_sub(200);
     serde_json::json!({
         "status": s.status,
@@ -34,12 +37,24 @@ pub fn get_diagnostics(runtime: State<'_, Runtime>) -> Value {
 
 #[tauri::command]
 pub fn get_logs(runtime: State<'_, Runtime>) -> Vec<(String, String)> {
-    runtime.state.lock().unwrap().logs.clone()
+    runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .logs
+        .clone()
 }
 
 #[tauri::command]
 pub fn get_versions(runtime: State<'_, Runtime>) -> Value {
-    serde_json::to_value(&runtime.state.lock().unwrap().versions).unwrap_or(Value::Null)
+    serde_json::to_value(
+        &runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .versions,
+    )
+    .unwrap_or(Value::Null)
 }
 
 #[tauri::command]
@@ -49,13 +64,19 @@ pub fn restart(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String
     if !child_alive(&runtime) {
         let respawned = respawn_sidecar(&app);
         if let Err(e) = respawned {
-            let mut s = runtime.state.lock().unwrap();
+            let mut s = runtime
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             s.last_error = Some(e.clone());
             s.status = crate::harness::Status::Crashed;
             return Err(e);
         }
         reset_restart_attempts(&runtime);
-        let mut s = runtime.state.lock().unwrap();
+        let mut s = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         s.last_error = None;
         return Ok(());
     }
@@ -64,14 +85,20 @@ pub fn restart(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String
         &runtime,
         &serde_json::json!({"id": CMD_ID_RESTART, "command": "restart"}),
     ) {
-        let mut s = runtime.state.lock().unwrap();
+        let mut s = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         s.last_error = Some(error.clone());
         s.status = crate::harness::Status::Crashed;
         return Err(error);
     }
 
     reset_restart_attempts(&runtime);
-    let mut s = runtime.state.lock().unwrap();
+    let mut s = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     s.last_error = None;
     s.status = crate::harness::Status::Starting;
     Ok(())
@@ -83,7 +110,11 @@ pub fn shutdown(runtime: State<'_, Runtime>) -> Result<(), String> {
         // Keep the real status (Stopped/Idle stays what it is) — only the
         // message explains why nothing happened.
         let error = "sidecar 未运行，无需停止".to_string();
-        runtime.state.lock().unwrap().last_error = Some(error.clone());
+        runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_error = Some(error.clone());
         return Err(error);
     }
 
@@ -91,7 +122,10 @@ pub fn shutdown(runtime: State<'_, Runtime>) -> Result<(), String> {
         &runtime,
         &serde_json::json!({"id": CMD_ID_SHUTDOWN, "command": "shutdown"}),
     ) {
-        let mut s = runtime.state.lock().unwrap();
+        let mut s = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         s.last_error = Some(error.clone());
         s.status = crate::harness::Status::Crashed;
         return Err(error);

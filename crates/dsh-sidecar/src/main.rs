@@ -34,6 +34,56 @@ use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(100);
 const FORCE_GRACE: Duration = Duration::from_secs(5);
+const MAX_LINE: usize = 8192;
+
+/// Quote one argument for the Windows command line (CommandLineToArgvW
+/// semantics). Pure string logic — unit-tested on every platform even though
+/// only the Windows spawn path consumes it.
+pub fn quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "\"\"".to_string();
+    }
+    if !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat_n('\\', backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
+    out
+}
+
+/// Cap a single log line: `BufReader::lines` reads unbounded, and whatever we
+/// forward is amplified through the supervisor and the Tauri logs ring.
+fn truncate_line(line: String) -> String {
+    if line.len() <= MAX_LINE {
+        return line;
+    }
+    let mut out = String::with_capacity(MAX_LINE + 24);
+    out.push_str(&line[..MAX_LINE]);
+    out.push_str("… [line truncated]");
+    out
+}
+
+/// A child output line tagged with the generation of the child that produced
+/// it — stale lines from a previous child are dropped by the main loop.
+type LineEvent = (u64, &'static str, String);
 const NO_CONSOLE_GRACE: Duration = Duration::from_secs(2);
 
 /// Set by OS signal handlers: any termination signal becomes a clean tree
@@ -56,7 +106,7 @@ fn install_signal_handlers() {
     // supervisor loop's syscalls from being interrupted by stray signals.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = on_termination_signal as usize;
+        action.sa_sigaction = on_termination_signal as *const () as usize;
         action.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&mut action.sa_mask);
         libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
@@ -104,61 +154,62 @@ pub fn parse_command(line: &str) -> Result<(Option<u64>, Command), String> {
         .get("command")
         .and_then(|c| c.as_str())
         .ok_or_else(|| "missing \"command\"".to_string())?;
-    let cmd = match name {
-        "start" => {
-            let node = v
-                .get("node")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| "start: missing \"node\"".to_string())?
-                .to_string();
-            let script = v
-                .get("script")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| "start: missing \"script\"".to_string())?
-                .to_string();
-            let args = v
-                .get("args")
-                .and_then(|a| a.as_array())
-                .ok_or_else(|| "start: \"args\" must be an array".to_string())?
-                .iter()
-                .map(|x| {
-                    x.as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| "start: args must be strings".to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let cwd = v
-                .get("cwd")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| "start: missing \"cwd\"".to_string())?
-                .to_string();
-            let env = v
-                .get("env")
-                .and_then(|e| e.as_object())
-                .map(|o| {
-                    o.iter()
-                        .map(|(k, val)| {
-                            val.as_str()
-                                .map(|v| (k.clone(), v.to_string()))
-                                .ok_or_else(|| format!("start: env value for {k:?} must be a string"))
+    let cmd =
+        match name {
+            "start" => {
+                let node = v
+                    .get("node")
+                    .and_then(|s| s.as_str())
+                    .ok_or_else(|| "start: missing \"node\"".to_string())?
+                    .to_string();
+                let script = v
+                    .get("script")
+                    .and_then(|s| s.as_str())
+                    .ok_or_else(|| "start: missing \"script\"".to_string())?
+                    .to_string();
+                let args = v
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .ok_or_else(|| "start: \"args\" must be an array".to_string())?
+                    .iter()
+                    .map(|x| {
+                        x.as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| "start: args must be strings".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let cwd = v
+                    .get("cwd")
+                    .and_then(|s| s.as_str())
+                    .ok_or_else(|| "start: missing \"cwd\"".to_string())?
+                    .to_string();
+                let env =
+                    v.get("env")
+                        .and_then(|e| e.as_object())
+                        .map(|o| {
+                            o.iter()
+                                .map(|(k, val)| {
+                                    val.as_str().map(|v| (k.clone(), v.to_string())).ok_or_else(
+                                        || format!("start: env value for {k:?} must be a string"),
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()
                         })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?
-                .unwrap_or_default();
-            Command::Start {
-                node,
-                script,
-                args,
-                cwd,
-                env,
+                        .transpose()?
+                        .unwrap_or_default();
+                Command::Start {
+                    node,
+                    script,
+                    args,
+                    cwd,
+                    env,
+                }
             }
-        }
-        "shutdown" => Command::Shutdown,
-        "restart" => Command::Restart,
-        "status" => Command::Status,
-        other => return Err(format!("unknown command {other:?}")),
-    };
+            "shutdown" => Command::Shutdown,
+            "restart" => Command::Restart,
+            "status" => Command::Status,
+            other => return Err(format!("unknown command {other:?}")),
+        };
     Ok((id, cmd))
 }
 
@@ -201,7 +252,7 @@ struct Running {
 }
 
 impl Running {
-    fn spawn(spec: &SpawnSpec, tx: &Sender<(u64, &'static str, String)>) -> Result<Self, String> {
+    fn spawn(spec: &SpawnSpec, tx: &Sender<LineEvent>) -> Result<Self, String> {
         let gen = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         let mut child =
             PlatformChild::spawn(spec).map_err(|e| format!("failed to spawn node: {e}"))?;
@@ -228,7 +279,13 @@ impl Running {
                 let tx = tx.clone();
                 thread::spawn(move || {
                     for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                        if !line.is_empty() && tx.send((gen, stream, line)).is_err() {
+                        if line.is_empty() {
+                            continue;
+                        }
+                        // Cap amplification: a single unbounded harness line
+                        // must not balloon through the supervisor's queues.
+                        let line = truncate_line(line);
+                        if tx.send((gen, stream, line)).is_err() {
                             break;
                         }
                     }
@@ -245,15 +302,15 @@ impl Running {
 
 fn main() {
     install_signal_handlers();
+    // Windows: a hidden console lets the child inherit one, which is what
+    // makes GenerateConsoleCtrlEvent(CTRL_C) reachable for graceful stop.
+    platform::ensure_hidden_console();
     let ready_timeout = env_ms("DSH_READY_TIMEOUT_MS", 120_000);
     let shutdown_grace = env_ms("DSH_SHUTDOWN_GRACE_MS", 10_000);
 
     emit(json!({"type":"sidecar","version":env!("CARGO_PKG_VERSION")}));
 
-    let (line_tx, line_rx): (
-        Sender<(u64, &'static str, String)>,
-        Receiver<(u64, &'static str, String)>,
-    ) = channel();
+    let (line_tx, line_rx): (Sender<LineEvent>, Receiver<LineEvent>) = channel();
     let (cmd_tx, cmd_rx): (Sender<String>, Receiver<String>) = channel();
 
     // stdin reader: commands in. Parent death is detected via channel
@@ -616,5 +673,35 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("must be a string"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn quotes_plain_args_verbatim() {
+        assert_eq!(quote_arg("node.exe"), "node.exe");
+        assert_eq!(quote_arg("--port"), "--port");
+    }
+
+    #[test]
+    fn quotes_args_with_spaces() {
+        assert_eq!(quote_arg("DeepSeek Harness"), "\"DeepSeek Harness\"");
+    }
+
+    #[test]
+    fn quotes_empty_args() {
+        assert_eq!(quote_arg(""), "\"\"");
+    }
+
+    #[test]
+    fn escapes_embedded_quotes() {
+        assert_eq!(quote_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
+    }
+
+    #[test]
+    fn handles_backslashes_before_quotes_and_at_end() {
+        assert_eq!(quote_arg("a\\\"b"), "\"a\\\\\\\"b\"");
+        assert_eq!(
+            quote_arg("C:\\Program Files\\"),
+            "\"C:\\Program Files\\\\\""
+        );
     }
 }

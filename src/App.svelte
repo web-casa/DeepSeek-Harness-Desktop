@@ -29,8 +29,9 @@
   let busy = $state(false);
   let logsOpen = $state(false);
   let toast = $state<string | null>(null);
-
-  let unlisten: (() => void) | null = null;
+  // Suppresses the brief "已停止" flash while a user-initiated restart
+  // passes through the sidecar's stopping → stopped → starting sequence.
+  let restartInFlight = $state(false);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -42,11 +43,20 @@
   };
 
   function apply(p: StatusPayload) {
+    if (restartInFlight && p.status === "stopped") {
+      // Keep showing the starting view; the sidecar will emit `starting`
+      // (or `ready`) right after and clear the flag there.
+      lastError = p.lastError;
+      return;
+    }
     status = p.status;
     url = p.url;
     pid = p.pid;
     lastError = p.lastError;
     if (p.versions) versions = p.versions;
+    if (p.status === "starting" || p.status === "running") {
+      restartInFlight = false;
+    }
   }
 
   function showToast(message: string) {
@@ -58,10 +68,12 @@
 
   async function doRestart() {
     busy = true;
+    restartInFlight = true;
     try {
       await restart();
       showToast("已请求重新启动");
     } catch (e) {
+      restartInFlight = false;
       showToast(`操作失败：${e}`);
     }
     busy = false;
@@ -96,6 +108,7 @@
     }
   }
 
+  // Initial data load (async onMount is fine here — no cleanup needed).
   onMount(async () => {
     try {
       const [st, ver, lg] = await Promise.all([getStatus(), getVersions(), getLogs()]);
@@ -104,11 +117,23 @@
       logs = lg;
     } catch {
       inTauri = false;
-      return;
     }
-    unlisten = await onEvent((p) => apply(p));
+  });
+
+  // Event subscription in a $effect: async onMount cannot return a cleanup
+  // (Svelte ignores non-function returns), so the listener would never be
+  // unbound. Effects handle async registration + cancellation properly.
+  $effect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    onEvent((p) => apply(p)).then((fn) => {
+      if (cancelled) fn();
+      else unlistenFn = fn;
+    });
     return () => {
-      unlisten?.();
+      cancelled = true;
+      unlistenFn?.();
     };
   });
 
@@ -123,10 +148,12 @@
 
   function stepClass(target: "check" | "start" | "ready"): string {
     if (status === "running") return "done";
-    if (status === "crashed" && target !== "check") return "fail";
-    if (target === "check") return status === "starting" || status === "stopping" || status === "running" ? "done" : "active";
-    if (target === "start") return status === "starting" ? "active" : "done";
-    return status === "starting" ? "active" : "done";
+    if (status === "crashed") return target === "check" ? "done" : "fail";
+    if (status === "idle") return target === "check" ? "active" : "";
+    // starting / stopping: runtime check done, dsh web step active, readiness pending
+    if (target === "check") return "done";
+    if (target === "start") return "active";
+    return "";
   }
 
   let booting = $derived(status === "idle" || status === "starting" || status === "stopping");
@@ -171,6 +198,10 @@
 
     {#if status === "crashed" && lastError}
       <div class="error-box">{lastError}</div>
+    {/if}
+
+    {#if status === "starting" && lastError}
+      <div class="notice-box">{lastError}</div>
     {/if}
 
     {#if status === "running" && url}

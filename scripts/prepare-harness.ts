@@ -16,11 +16,34 @@ import {
   writeFileSync,
   copyFileSync,
   renameSync,
+  mkdirSync,
+  readdirSync,
 } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoRoot, runtimeDir, harnessDir, readManifest, fail, ok, info } from "./lib/common.ts";
 import { materialize } from "./lib/materialize.ts";
+
+// Collect every top-level package's license file into licenses/<name> so the
+// installer carries third-party attribution for the whole dependency tree.
+function collectLicenses(nodeModules: string, outDir: string): void {
+  let collected = 0;
+  for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
+    const pkgDir = join(nodeModules, entry.name);
+    const candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING"];
+    for (const file of candidates) {
+      const src = join(pkgDir, file);
+      if (existsSync(src)) {
+        const destDir = join(outDir, entry.name);
+        mkdirSync(destDir, { recursive: true });
+        copyFileSync(src, join(destDir, file));
+        collected += 1;
+        break;
+      }
+    }
+  }
+  info(`collected ${collected} third-party license files into licenses/`);
+}
 
 const manifest = readManifest();
 const runtimePkgPath = join(repoRoot, "runtime", "package.json");
@@ -43,9 +66,25 @@ const env: NodeJS.ProcessEnv = {
   XDG_CACHE_HOME: join(repoRoot, ".tmp", "xdg-cache"),
   npm_config_cache: join(repoRoot, ".tmp", "npm-cache"),
 };
+
+// The runtime/.npmrc allowlist (allow-scripts/strict-allow-scripts) requires
+// npm >= 11.17. Older npm silently IGNORES unknown config keys — the allowlist
+// would fail open and every dependency script would run unreviewed.
+const npmVersionRes = spawnSync("npm", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
+const npmVersion = (npmVersionRes.stdout ?? "").trim();
+const [vMajor = "0", vMinor = "0"] = npmVersion.split(".").map((p) => Number.parseInt(p, 10) || 0);
+if (npmVersionRes.status !== 0 || vMajor < 11 || (vMajor === 11 && vMinor < 17)) {
+  fail(
+    `npm ${npmVersion || "not found"} is too old: strict-allow-scripts requires npm >= 11.17. ` +
+      "Upgrade Node (npm ships with it) before preparing the runtime.",
+  );
+}
+
 // npm ci: clean, reproducible install from the committed package-lock.json.
 // On Windows the npm shim is a .cmd file; spawnSync resolves it via a shell.
-const res = spawnSync("npm", ["ci", "--omit=dev", "--cache", env.npm_config_cache], {
+// The cache path travels via npm_config_cache — no --cache CLI flag needed
+// (and no argument quoting issues with spaces in the repo path).
+const res = spawnSync("npm", ["ci", "--omit=dev"], {
   cwd: join(repoRoot, "runtime"),
   env,
   stdio: "inherit",
@@ -87,12 +126,17 @@ try {
   }
   copyFileSync(runtimePkgPath, join(staging, "package.json"));
 
-  // Attribution: LICENSE from the dsh package; per-dependency notices come in P3.
+  // Attribution: dsh's own license/readme at the top level, plus a per-package
+  // license tree so the installer carries third-party notices.
   const dshDir = join(staging, "node_modules", "@deepseek-ai", "dsh");
   for (const file of ["LICENSE", "THIRD_PARTY_NOTICES.md", "README.zh.md", "README.md"]) {
     const src = join(dshDir, file);
     if (existsSync(src)) materialize(src, join(staging, file));
   }
+  collectLicenses(
+    join(staging, "node_modules"),
+    join(staging, "licenses"),
+  );
 
   // A copy of the manifest travels with the bundle so About/diagnostics can
   // report exact versions without network access.

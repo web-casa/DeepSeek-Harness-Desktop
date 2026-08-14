@@ -59,7 +59,11 @@ pub fn resolve(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
     };
 
     let dsh_home = if let Ok(h) = std::env::var("DSH_HOME") {
-        PathBuf::from(h)
+        let home = PathBuf::from(&h);
+        if h.is_empty() || !home.is_absolute() {
+            return Err("DSH_HOME must be a non-empty absolute path".to_string());
+        }
+        home
     } else {
         app.path()
             .app_data_dir()

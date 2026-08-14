@@ -68,7 +68,14 @@ async function downloadOnce(url: string, dest: string): Promise<void> {
       const { done, value } = await reader.read();
       if (done) break;
       received += value.byteLength;
-      out.write(Buffer.from(value));
+      const buf = Buffer.from(value);
+      // Respect backpressure: a slow disk must not buffer the whole archive.
+      if (!out.write(buf)) {
+        await new Promise<void>((resolve, reject) => {
+          out.once("drain", resolve);
+          out.once("error", reject);
+        });
+      }
       if (total > 0 && received % (16 * 1024 * 1024) < 64 * 1024) {
         process.stdout.write(`\r  ${((received / total) * 100).toFixed(0)}% (${(received / 1048576).toFixed(0)} MB)`);
       }

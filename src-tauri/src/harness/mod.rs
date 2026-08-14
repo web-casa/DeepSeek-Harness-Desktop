@@ -68,7 +68,9 @@ pub(crate) const CMD_ID_EXIT_SHUTDOWN: u64 = 900;
 
 /// Send a raw command line through the sidecar stdin, if available.
 fn send_restart(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
-    let mut stdin = stdin.lock().unwrap();
+    let mut stdin = stdin
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(stdin) = stdin.as_mut() {
         let _ = writeln!(stdin, "{{\"id\":{CMD_ID_RESTART},\"command\":\"restart\"}}");
         let _ = stdin.flush();
@@ -92,7 +94,9 @@ fn schedule_auto_restart(
             return;
         }
         {
-            let mut s = state_c.lock().unwrap();
+            let mut s = state_c
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             s.status = Status::Starting;
         }
         send_restart(&stdin_c);
@@ -100,7 +104,9 @@ fn schedule_auto_restart(
 }
 
 fn log_line(state: &Mutex<SharedState>, stream: &str, line: &str) {
-    let mut s = state.lock().unwrap();
+    let mut s = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     s.logs.push((stream.to_string(), line.to_string()));
     if s.logs.len() > MAX_LOGS {
         let excess = s.logs.len() - MAX_LOGS;
@@ -109,14 +115,18 @@ fn log_line(state: &Mutex<SharedState>, stream: &str, line: &str) {
 }
 
 fn set_error(state: &Mutex<SharedState>, message: impl Into<String>) {
-    let mut s = state.lock().unwrap();
+    let mut s = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     s.last_error = Some(message.into());
     s.status = Status::Crashed;
 }
 
 /// Ask the sidecar for a status refresh (carries the real pid).
 fn refresh_pid(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
-    let mut stdin = stdin.lock().unwrap();
+    let mut stdin = stdin
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(stdin) = stdin.as_mut() {
         let _ = writeln!(stdin, "{{\"id\":{CMD_ID_STATUS},\"command\":\"status\"}}");
         let _ = stdin.flush();
@@ -186,11 +196,18 @@ fn apply_state_event(
         }
         "sidecar" => {
             if let Some(v) = ev.get("version").and_then(|v| v.as_str()) {
-                state.lock().unwrap().versions.sidecar = v.to_string();
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .versions
+                    .sidecar = v.to_string();
             }
         }
         "starting" => {
-            state.lock().unwrap().status = Status::Starting;
+            state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .status = Status::Starting;
         }
         "ready" => {
             let url = ev
@@ -199,7 +216,9 @@ fn apply_state_event(
                 .unwrap_or("")
                 .to_string();
             {
-                let mut s = state.lock().unwrap();
+                let mut s = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 s.status = Status::Running;
                 s.url = Some(url.clone());
                 s.last_error = None;
@@ -210,11 +229,16 @@ fn apply_state_event(
             effects.push(SideEffect::OpenWindow(url));
         }
         "stopping" => {
-            state.lock().unwrap().status = Status::Stopping;
+            state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .status = Status::Stopping;
         }
         "stopped" => {
             {
-                let mut s = state.lock().unwrap();
+                let mut s = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 s.status = Status::Stopped;
                 s.pid = None;
             }
@@ -227,9 +251,19 @@ fn apply_state_event(
             }
             let attempts = restart_attempts.fetch_add(1, Ordering::SeqCst) + 1;
             if attempts <= MAX_RESTART_ATTEMPTS {
-                state.lock().unwrap().last_error = Some(format!(
-                    "Harness 进程异常退出 (code {code:?})，正在自动重启（第 {attempts}/{MAX_RESTART_ATTEMPTS} 次）…"
-                ));
+                {
+                    let mut s = state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    s.last_error = Some(format!(
+                        "Harness 进程异常退出 (code {code:?})，正在自动重启（第 {attempts}/{MAX_RESTART_ATTEMPTS} 次）…"
+                    ));
+                    // During the backoff window the old URL is dead — surface
+                    // "starting" instead of a stale "running" with a dead port.
+                    s.status = Status::Starting;
+                    s.url = None;
+                    s.pid = None;
+                }
                 effects.push(SideEffect::ScheduleAutoRestart(attempts));
             } else {
                 set_error(
@@ -249,7 +283,10 @@ fn apply_state_event(
         }
         "status" => {
             if let Some(pid) = ev.get("pid").and_then(|v| v.as_u64()) {
-                state.lock().unwrap().pid = Some(pid as u32);
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pid = Some(pid as u32);
             }
         }
         "log" => {
@@ -273,6 +310,18 @@ fn handle_event(
     restart_attempts: &Arc<AtomicU32>,
     ev: &Value,
 ) {
+    // Log lines flow by the thousands during agent runs; the snapshot payload
+    // does not contain logs, so broadcasting it per line is pure IPC noise.
+    if ev.get("type").and_then(|v| v.as_str()) == Some("log") {
+        let stream = ev
+            .get("stream")
+            .and_then(|v| v.as_str())
+            .unwrap_or("stdout");
+        let line = ev.get("line").and_then(|v| v.as_str()).unwrap_or("");
+        log_line(state, stream, line);
+        return;
+    }
+
     for effect in apply_state_event(state, shutting_down, restart_attempts, ev) {
         match effect {
             SideEffect::OpenWindow(url) => open_harness_window(app, &url),
@@ -287,7 +336,9 @@ fn handle_event(
 }
 
 pub fn snapshot_payload(state: &Arc<Mutex<SharedState>>) -> Value {
-    let s = state.lock().unwrap();
+    let s = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     serde_json::json!({
         "status": s.status,
         "url": s.url,
@@ -377,10 +428,16 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
     };
 
     if let Some(stdin) = stdin {
-        *runtime.stdin.lock().unwrap() = Some(stdin);
+        *runtime
+            .stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stdin);
     }
     if let Some(child) = child.take() {
-        *runtime.child.lock().unwrap() = Some(child);
+        *runtime
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(child);
     }
 
     // Sidecar death watcher: a sidecar exit without an intentional app
@@ -393,7 +450,9 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
         let app_c = app.clone();
         std::thread::spawn(move || loop {
             let exited = {
-                let mut child = child_c.lock().unwrap();
+                let mut child = child_c
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 match child.as_mut() {
                     Some(child) => match child.try_wait() {
                         Ok(Some(status)) => Some(status),
@@ -405,13 +464,18 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
 
             if let Some(status) = exited {
                 if !shutting_down_c.load(Ordering::SeqCst) {
-                    let _ = stdin_c.lock().unwrap().take();
+                    let _ = stdin_c
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take();
                     let code = status
                         .code()
                         .map(|code| code.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
                     {
-                        let mut s = state_c.lock().unwrap();
+                        let mut s = state_c
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                         s.last_error = Some(format!("sidecar 进程意外退出 (code {code})"));
                         s.status = Status::Crashed;
                         s.pid = None;
@@ -436,9 +500,14 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 match serde_json::from_str::<Value>(&line) {
-                    Ok(ev) => {
-                        handle_event(&app_c, &state_c, &stdin_c, &shutting_down_c, &attempts_c, &ev)
-                    }
+                    Ok(ev) => handle_event(
+                        &app_c,
+                        &state_c,
+                        &stdin_c,
+                        &shutting_down_c,
+                        &attempts_c,
+                        &ev,
+                    ),
                     Err(_) => log_line(&state_c, "sidecar", &line),
                 }
             }
@@ -460,7 +529,8 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
 fn start_harness(runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> {
     if !paths.node.exists() || !paths.harness_dir.join("node_modules").exists() {
         return Err(
-            "runtime 未就绪（缺少 node 或 harness/node_modules）— 请先运行 `pnpm runtime:all`".to_string(),
+            "runtime 未就绪（缺少 node 或 harness/node_modules）— 请先运行 `pnpm runtime:all`"
+                .to_string(),
         );
     }
     let dsh_bin = paths
@@ -480,7 +550,11 @@ fn start_harness(runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> 
         "env": { "DSH_HOME": paths.dsh_home },
     });
     send_raw(runtime, &cmd)?;
-    runtime.state.lock().unwrap().status = Status::Starting;
+    runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .status = Status::Starting;
     Ok(())
 }
 
@@ -494,27 +568,59 @@ pub fn init(app: &AppHandle) {
     let paths = match resolve(app) {
         Ok(paths) => paths,
         Err(e) => {
-            fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, None, e);
+            fail_init(
+                app,
+                stdin_arc,
+                child_arc,
+                shutting_down,
+                restart_attempts,
+                None,
+                e,
+            );
             return;
         }
     };
 
     if let Err(e) = std::fs::create_dir_all(&paths.dsh_home) {
         let msg = format!("无法创建数据目录 {}: {e}", paths.dsh_home.display());
-        fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, Some(paths), msg);
+        fail_init(
+            app,
+            stdin_arc,
+            child_arc,
+            shutting_down,
+            restart_attempts,
+            Some(paths),
+            msg,
+        );
         return;
     }
 
     match std::fs::symlink_metadata(&paths.dsh_home) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             let msg = format!("数据目录 {} 不能是符号链接", paths.dsh_home.display());
-            fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, Some(paths), msg);
+            fail_init(
+                app,
+                stdin_arc,
+                child_arc,
+                shutting_down,
+                restart_attempts,
+                Some(paths),
+                msg,
+            );
             return;
         }
         Ok(_) => {}
         Err(e) => {
             let msg = format!("无法检查数据目录 {}: {e}", paths.dsh_home.display());
-            fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, Some(paths), msg);
+            fail_init(
+                app,
+                stdin_arc,
+                child_arc,
+                shutting_down,
+                restart_attempts,
+                Some(paths),
+                msg,
+            );
             return;
         }
     }
@@ -525,7 +631,15 @@ pub fn init(app: &AppHandle) {
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     ) {
         let msg = format!("无法设置数据目录权限 {}: {e}", paths.dsh_home.display());
-        fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, Some(paths), msg);
+        fail_init(
+            app,
+            stdin_arc,
+            child_arc,
+            shutting_down,
+            restart_attempts,
+            Some(paths),
+            msg,
+        );
         return;
     }
 
@@ -569,13 +683,20 @@ pub fn respawn_sidecar(app: &AppHandle) -> Result<(), String> {
         .ok_or_else(|| "运行时路径不可用".to_string())?;
     runtime.shutting_down.store(false, Ordering::SeqCst);
     runtime.restart_attempts.store(0, Ordering::SeqCst);
-    runtime.stdin.lock().unwrap().take();
+    runtime
+        .stdin
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
     launch_sidecar(app, &runtime, &paths)?;
     start_harness(&runtime, &paths)
 }
 
 pub fn send_raw(runtime: &Runtime, cmd: &Value) -> Result<(), String> {
-    let mut stdin = runtime.stdin.lock().unwrap();
+    let mut stdin = runtime
+        .stdin
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let stdin = stdin
         .as_mut()
         .ok_or_else(|| "sidecar stdin unavailable".to_string())?;
@@ -586,7 +707,12 @@ pub fn send_raw(runtime: &Runtime, cmd: &Value) -> Result<(), String> {
 }
 
 pub fn child_alive(runtime: &Runtime) -> bool {
-    match runtime.child.lock().unwrap().as_mut() {
+    match runtime
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_mut()
+    {
         Some(child) => matches!(child.try_wait(), Ok(None)),
         None => false,
     }
@@ -613,21 +739,33 @@ pub fn shutdown_blocking(app: &AppHandle) {
         .unwrap_or(std::time::Duration::from_secs(10));
     let stopped_deadline = std::time::Instant::now() + grace;
     while child_alive(&runtime) && std::time::Instant::now() < stopped_deadline {
-        let status = runtime.state.lock().unwrap().status;
+        let status = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status;
         if status == Status::Stopped || status == Status::Crashed {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    *runtime.stdin.lock().unwrap() = None;
+    *runtime
+        .stdin
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 
     let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while child_alive(&runtime) && std::time::Instant::now() < exit_deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     if child_alive(&runtime) {
-        if let Some(child) = runtime.child.lock().unwrap().as_mut() {
+        if let Some(child) = runtime
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+        {
             let _ = child.kill();
         }
     }
@@ -659,7 +797,9 @@ mod tests {
             &attempts,
             &json!({"type":"ready","url":"http://127.0.0.1:41234"}),
         );
-        let s = state.lock().unwrap();
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(s.status, Status::Running);
         assert_eq!(s.url.as_deref(), Some("http://127.0.0.1:41234"));
         assert_eq!(s.last_error, None);
@@ -677,15 +817,28 @@ mod tests {
     #[test]
     fn crashed_event_schedules_backoff_restart() {
         let (state, shutting_down, attempts) = fresh();
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status = Status::Running;
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .url = Some("http://127.0.0.1:9999".to_string());
         let effects = apply_state_event(
             &state,
             &shutting_down,
             &attempts,
             &json!({"type":"crashed","code":1}),
         );
-        let s = state.lock().unwrap();
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(s.last_error.as_deref().unwrap().contains("自动重启"));
-        assert_eq!(s.status, Status::Idle, "status unchanged until restart");
+        // No stale "running" with a dead port during the backoff window.
+        assert_eq!(s.status, Status::Starting);
+        assert_eq!(s.url, None);
+        assert_eq!(s.pid, None);
         drop(s);
         assert_eq!(effects, vec![SideEffect::ScheduleAutoRestart(1)]);
     }
@@ -700,7 +853,9 @@ mod tests {
             &attempts,
             &json!({"type":"crashed","code":1}),
         );
-        let s = state.lock().unwrap();
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(s.status, Status::Crashed);
         assert!(s.last_error.as_deref().unwrap().contains("停止自动重启"));
         drop(s);
@@ -718,7 +873,9 @@ mod tests {
             &json!({"type":"crashed","code":1}),
         );
         assert!(effects.is_empty());
-        let s = state.lock().unwrap();
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(s.status, Status::Idle);
         assert_eq!(s.last_error, None);
     }
@@ -732,7 +889,9 @@ mod tests {
             &attempts,
             &json!({"type":"ack","id":100,"ok":false,"error":"nothing to restart"}),
         );
-        let s = state.lock().unwrap();
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(s.status, Status::Crashed);
         assert_eq!(s.last_error.as_deref(), Some("nothing to restart"));
         drop(s);
@@ -742,14 +901,19 @@ mod tests {
     #[test]
     fn stopped_event_clears_pid_and_refreshes() {
         let (state, shutting_down, attempts) = fresh();
-        state.lock().unwrap().pid = Some(4242);
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pid = Some(4242);
         let effects = apply_state_event(
             &state,
             &shutting_down,
             &attempts,
             &json!({"type":"stopped","code":0}),
         );
-        let s = state.lock().unwrap();
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(s.status, Status::Stopped);
         assert_eq!(s.pid, None);
         drop(s);
@@ -765,7 +929,13 @@ mod tests {
             &attempts,
             &json!({"type":"status","id":99,"state":"running","pid":123}),
         );
-        assert_eq!(state.lock().unwrap().pid, Some(123));
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pid,
+            Some(123)
+        );
     }
 
     #[test]

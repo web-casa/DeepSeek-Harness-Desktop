@@ -1,7 +1,7 @@
 // Emit "<artifact>.sha256" next to a built installer so unsigned downloads
 // can be verified. Mirrors the release workflow's artifact uploads.
 
-import { readdirSync, createReadStream, writeFileSync } from "node:fs";
+import { readdirSync, createReadStream, writeFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, basename } from "node:path";
 import { repoRoot, fail, ok } from "./lib/common.ts";
@@ -13,6 +13,9 @@ if (bundleType !== "nsis" && bundleType !== "dmg") {
 }
 
 const bundleDir = join(repoRoot, "src-tauri", "target", "release", "bundle", bundleType);
+if (!existsSync(bundleDir)) {
+  fail(`bundle dir missing at ${bundleDir} — run the bundle build first`);
+}
 const suffix = bundleType === "nsis" ? "-setup.exe" : ".dmg";
 const artifacts = readdirSync(bundleDir).filter((f) => f.endsWith(suffix));
 if (artifacts.length !== 1) {
