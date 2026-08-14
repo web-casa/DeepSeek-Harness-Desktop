@@ -69,6 +69,12 @@ const log = (e: Event) => {
   if (verbose && e.type === "log") info(`[${e.stream}] ${e.line}`);
 };
 
+function lastLogs(count: number): string {
+  const logEvents = events.filter((e) => e.type === "log").slice(-count);
+  if (logEvents.length === 0) return "（无日志）";
+  return logEvents.map((e) => `[${e.stream}] ${e.line}`).join("\n    ");
+}
+
 function waitFor(
   pred: (e: Event) => boolean,
   what: string,
@@ -87,13 +93,21 @@ function waitFor(
       const fatal = events.find((e) => e.type === "error" || e.type === "crashed");
       if (fatal) {
         clearInterval(iv);
-        reject(new Error(`sidecar reported ${fatal.type} while waiting for ${what}: ${JSON.stringify(fatal)}`));
+        reject(
+          new Error(
+            `sidecar reported ${fatal.type} while waiting for ${what}: ${JSON.stringify(fatal)}\n  recent child logs:\n    ${lastLogs(25)}`,
+          ),
+        );
         return;
       }
       if (Date.now() - start > timeoutMs) {
         clearInterval(iv);
         const tail = events.slice(-6).map((e) => `[${e.stream ?? e.type}] ${e.line ?? e.message ?? ""}`).join("\n    ");
-        reject(new Error(`timeout waiting for ${what} (got ${hits.length}/${minCount});\n  last events:\n    ${tail}`));
+        reject(
+          new Error(
+            `timeout waiting for ${what} (got ${hits.length}/${minCount});\n  last events:\n    ${tail}\n  recent child logs:\n    ${lastLogs(25)}`,
+          ),
+        );
       }
     }, 100);
   });
