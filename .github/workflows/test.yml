@@ -49,5 +49,10 @@ jobs:
       - name: Runtime smoke
         run: node scripts/verify-runtime.ts
 
+      # Hung-but-alive detection: fake harnesses (hang + healthy negative
+      # case) driven through the real sidecar on every platform.
+      - name: Liveness heartbeat smoke
+        run: node scripts/verify-heartbeat.ts
+
       - name: Relocation smoke
         run: node scripts/relocate-runtime.ts && node scripts/verify-runtime.ts --runtime-dir .tmp/relocated-runtime

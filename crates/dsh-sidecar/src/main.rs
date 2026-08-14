@@ -21,6 +21,19 @@
 //! → {"id":4,"command":"shutdown"} →  {"type":"stopped","code":0}   (sidecar keeps running)
 //! [stdin EOF]                     →  graceful shutdown of the tree, sidecar exits 0
 //! ```
+//!
+//! While running, the sidecar also probes the ready URL (liveness heartbeat);
+//! after `DSH_HEARTBEAT_FAIL_LIMIT` consecutive unanswered probes it declares
+//! the child hung and emits the same pair the readiness watchdog does:
+//!
+//! ```text
+//! ← {"type":"error","code":"unresponsive","message":"dsh web did not answer health probes; killing the tree"}
+//! ← {"type":"crashed","code":null,"pid":…,"message":"killed after health checks failed (unresponsive)"}
+//! ```
+//!
+//! `crashed` events MAY carry a `message`; the shell must prefer it over the
+//! generic exit-code wording. The shell owns the restart policy for every
+//! `crashed`, unresponsive included.
 
 mod platform;
 
@@ -29,6 +42,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -322,12 +336,84 @@ fn ack_err(id: Option<u64>, error: impl AsRef<str>) {
     emit(json!({"type":"ack","id":id,"ok":false,"error":error.as_ref()}));
 }
 
+fn env_count(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
+
+// ---------------------------------------------------------------------------
+// Liveness heartbeat: a child can die two ways — the process exits (reaped
+// above → `crashed`) or it stays alive with a blocked event loop, answering
+// nothing. The latter would leave the UI silently white forever, so after
+// `ready` we probe the web endpoint and declare the child hung after N
+// consecutive unanswered probes. The supervisor itself never restarts: it
+// emits `crashed` and the Tauri shell owns the restart policy (backoff +
+// attempt cap), exactly like a real crash.
+// ---------------------------------------------------------------------------
+
+/// Consecutive-failure counter; the pure decision core of the heartbeat.
+struct Heartbeat {
+    consecutive: u32,
+    limit: u32,
+}
+
+impl Heartbeat {
+    fn new(limit: u32) -> Self {
+        Heartbeat {
+            consecutive: 0,
+            limit,
+        }
+    }
+
+    /// Record one probe outcome. Returns true when the child is declared hung
+    /// (the caller should kill the tree and emit `crashed`).
+    fn observe(&mut self, ok: bool) -> bool {
+        if ok {
+            self.consecutive = 0;
+            false
+        } else {
+            self.consecutive += 1;
+            self.consecutive >= self.limit
+        }
+    }
+}
+
+/// Minimal HTTP GET probe against the ready URL (`http://127.0.0.1:<port>` by
+/// construction — `extract_local_url` only accepts that shape). Alive = any
+/// response bytes within the read timeout; connection refused, write failure,
+/// read timeout, and immediate EOF all count as dead. A Node process whose
+/// event loop is blocked never writes a response, even though the kernel
+/// still completes the TCP handshake — so "listening but silent" is exactly
+/// what the read timeout catches.
+fn http_probe(url: &str, read_timeout: Duration) -> bool {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    let Some(port) = url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) else {
+        return false;
+    };
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(read_timeout));
+    let Ok(_) = stream.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    else {
+        return false;
+    };
+    let mut buf = [0u8; 64];
+    stream.read(&mut buf).is_ok_and(|n| n > 0)
+}
+
 /// Why we are currently tearing the tree down; decides the exit event.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StopReason {
     Shutdown,
     Restart,
     ReadinessTimeout,
+    Unresponsive,
 }
 
 /// The child currently being supervised.
@@ -393,11 +479,26 @@ fn main() {
     platform::ensure_hidden_console();
     let ready_timeout = env_ms("DSH_READY_TIMEOUT_MS", 120_000);
     let shutdown_grace = env_ms("DSH_SHUTDOWN_GRACE_MS", 10_000);
+    // Heartbeat knobs: interval 0 disables the watcher entirely. Defaults are
+    // deliberately conservative (4 unanswered probes × 10s ≈ 40s of silence)
+    // so long synchronous work cannot be mistaken for a hang.
+    let hb_interval = env_ms("DSH_HEARTBEAT_INTERVAL_MS", 10_000);
+    let hb_read_timeout = env_ms("DSH_HEARTBEAT_READ_TIMEOUT_MS", 3_000);
+    let hb_fail_limit = env_count("DSH_HEARTBEAT_FAIL_LIMIT", 4);
 
     emit(json!({"type":"sidecar","version":env!("CARGO_PKG_VERSION")}));
 
     let (line_tx, line_rx): (Sender<LineEvent>, Receiver<LineEvent>) = channel();
     let (cmd_tx, cmd_rx): (Sender<String>, Receiver<String>) = channel();
+    // Hang reports from heartbeat watchers; the payload is the generation of
+    // the child the watcher was probing, so a stale watcher's verdict can
+    // never kill a newer child.
+    let (hb_tx, hb_rx): (Sender<u64>, Receiver<u64>) = channel();
+
+    // Watcher control: hb_gen tracks the currently supervised generation,
+    // hb_enabled is cleared whenever we are not (or stop being) "running".
+    let hb_gen: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let hb_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // stdin reader: commands in. Parent death is detected via channel
     // disconnect below (the thread ends on stdin EOF, closing the sender).
@@ -427,6 +528,7 @@ fn main() {
             match Running::spawn(&$spec, &line_tx) {
                 Ok(r) => {
                     current_gen = r.gen;
+                    hb_gen.store(r.gen, Ordering::Relaxed);
                     running = Some(r);
                     true
                 }
@@ -441,6 +543,7 @@ fn main() {
 
     macro_rules! begin_stop {
         ($reason:expr) => {{
+            hb_enabled.store(false, Ordering::Relaxed);
             if let Some(r) = running.as_ref() {
                 let grace = if r.child.graceful() {
                     shutdown_grace
@@ -494,6 +597,7 @@ fn main() {
             running = None;
             ready_deadline = None;
             grace_deadline = None;
+            hb_enabled.store(false, Ordering::Relaxed);
             match reason {
                 Some(StopReason::Restart) => {
                     emit(json!({"type":"stopped","code":code,"pid":pid}));
@@ -525,6 +629,13 @@ fn main() {
                 Some(StopReason::ReadinessTimeout) => {
                     emit(
                         json!({"type":"crashed","code":code,"pid":pid,"message":"killed after readiness timeout"}),
+                    );
+                    state = "crashed";
+                    url = None;
+                }
+                Some(StopReason::Unresponsive) => {
+                    emit(
+                        json!({"type":"crashed","code":code,"pid":pid,"message":"killed after health checks failed (unresponsive)"}),
                     );
                     state = "crashed";
                     url = None;
@@ -572,6 +683,36 @@ fn main() {
                         state = "running";
                         ready_deadline = None;
                         emit(json!({"type":"ready","url":u}));
+                        // Arm the liveness watcher for THIS generation. It
+                        // exits on the first of: disabled (stop/shutdown),
+                        // generation change (restart/respawn), or a hang
+                        // verdict (reported via hb_tx with its generation).
+                        if !hb_interval.is_zero() {
+                            hb_enabled.store(true, Ordering::Relaxed);
+                            let my_gen = current_gen;
+                            let url_c = u.clone();
+                            let gen_c = Arc::clone(&hb_gen);
+                            let enabled_c = Arc::clone(&hb_enabled);
+                            let tx = hb_tx.clone();
+                            let interval = hb_interval;
+                            let read_timeout = hb_read_timeout;
+                            let limit = hb_fail_limit;
+                            thread::spawn(move || {
+                                let mut hb = Heartbeat::new(limit);
+                                loop {
+                                    thread::sleep(interval);
+                                    if !enabled_c.load(Ordering::Relaxed)
+                                        || gen_c.load(Ordering::Relaxed) != my_gen
+                                    {
+                                        return;
+                                    }
+                                    if hb.observe(http_probe(&url_c, read_timeout)) {
+                                        let _ = tx.send(my_gen);
+                                        return;
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
                 emit(json!({"type":"log","stream":stream,"line":line}));
@@ -584,7 +725,25 @@ fn main() {
             }
         }
 
-        // 4. Pump commands.
+        // 4. Pump heartbeat hang reports.
+        match hb_rx.try_recv() {
+            Ok(gen) => {
+                // Only a verdict for the CURRENTLY running generation may act;
+                // a stale watcher's report is ignored (the child it probed is
+                // already gone).
+                let is_current = running.as_ref().is_some_and(|r| r.gen == gen);
+                if is_current && state == "running" && stop_reason.is_none() {
+                    emit(
+                        json!({"type":"error","code":"unresponsive","message":"dsh web did not answer health probes; killing the tree"}),
+                    );
+                    begin_stop!(StopReason::Unresponsive);
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {}
+        }
+
+        // 5. Pump commands.
         match cmd_rx.try_recv() {
             Ok(line) if line.trim().is_empty() => {
                 // Blank lines are ignored — no out-of-band sentinel protocol.
@@ -1109,6 +1268,33 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_resets_on_success_and_flags_after_limit_failures() {
+        let mut hb = Heartbeat::new(3);
+        assert!(!hb.observe(false));
+        assert!(!hb.observe(false), "two failures must not hang yet");
+        assert!(hb.observe(false), "the third consecutive failure hangs");
+        // A later success resets the streak.
+        assert!(!hb.observe(true));
+    }
+
+    #[test]
+    fn heartbeat_success_resets_the_failure_streak() {
+        let mut hb = Heartbeat::new(3);
+        assert!(!hb.observe(false));
+        assert!(!hb.observe(false));
+        assert!(!hb.observe(true), "success must clear the streak");
+        assert!(!hb.observe(false));
+        assert!(!hb.observe(false), "still below the limit after the reset");
+        assert!(hb.observe(false));
+    }
+
+    #[test]
+    fn heartbeat_limit_one_hangs_on_first_failure() {
+        let mut hb = Heartbeat::new(1);
+        assert!(hb.observe(false));
+    }
+
+    #[test]
     fn ndjson_golden_events() {
         // These exact serialized forms are the protocol contract parsed by
         // the Tauri shell and verify-runtime; changing them silently breaks
@@ -1145,6 +1331,18 @@ mod tests {
         assert_eq!(
             json!({"type":"error","code":"readiness-timeout","message":"m"}).to_string(),
             r#"{"code":"readiness-timeout","message":"m","type":"error"}"#
+        );
+        assert_eq!(
+            json!({"type":"error","code":"unresponsive","message":"dsh web did not answer health probes; killing the tree"})
+                .to_string(),
+            r#"{"code":"unresponsive","message":"dsh web did not answer health probes; killing the tree","type":"error"}"#
+        );
+        // The crashed+message shape is the heartbeat's contract with the
+        // shell: it must surface `message`, not just the exit code.
+        assert_eq!(
+            json!({"type":"crashed","code":null,"pid":42,"message":"killed after health checks failed (unresponsive)"})
+                .to_string(),
+            r#"{"code":null,"message":"killed after health checks failed (unresponsive)","pid":42,"type":"crashed"}"#
         );
     }
 

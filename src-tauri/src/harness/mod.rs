@@ -334,6 +334,19 @@ fn apply_state_event(
         }
         "crashed" => {
             let code = ev.get("code").and_then(|v| v.as_i64());
+            // The sidecar attaches a human-readable `message` for diagnosed
+            // kills (readiness timeout, unresponsive). Prefer it over the
+            // generic exit-code wording — a bare "(code 9)" tells the user
+            // nothing about why the restart is happening.
+            let detail = ev.get("message").and_then(|v| v.as_str());
+            let describe = || match detail {
+                Some(m) => format!("Harness 进程异常退出：{m}"),
+                None => format!(
+                    "Harness 进程异常退出 (code {})",
+                    code.map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".into())
+                ),
+            };
             if shutting_down.load(Ordering::SeqCst) {
                 return effects;
             }
@@ -344,7 +357,8 @@ fn apply_state_event(
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     s.last_error = Some(format!(
-                        "Harness 进程异常退出 (code {code:?})，正在自动重启（第 {attempts}/{MAX_RESTART_ATTEMPTS} 次）…"
+                        "{}，正在自动重启（第 {attempts}/{MAX_RESTART_ATTEMPTS} 次）…",
+                        describe()
                     ));
                     // During the backoff window the old URL is dead — surface
                     // "starting" instead of a stale "running" with a dead port.
@@ -357,7 +371,8 @@ fn apply_state_event(
                 set_error(
                     state,
                     format!(
-                        "Harness 进程异常退出 (code {code:?})；已连续崩溃 {MAX_RESTART_ATTEMPTS} 次，停止自动重启"
+                        "{}；已连续崩溃 {MAX_RESTART_ATTEMPTS} 次，停止自动重启",
+                        describe()
                     ),
                 );
             }
@@ -1039,6 +1054,49 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(s.status, Status::Idle);
         assert_eq!(s.last_error, None);
+    }
+
+    #[test]
+    fn crashed_event_with_message_surfaces_the_sidecar_text() {
+        // The heartbeat's crashed carries `message` — the shell must prefer it
+        // over the generic "(code N)" wording so "unresponsive" is actually
+        // visible to the user.
+        let (state, shutting_down, attempts) = fresh();
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"crashed","code":9,"message":"killed after health checks failed (unresponsive)"}),
+        );
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let text = s.last_error.as_deref().unwrap();
+        assert!(
+            text.contains("killed after health checks failed (unresponsive)"),
+            "message must be surfaced: {text}"
+        );
+        assert!(text.contains("自动重启"), "restart wording kept: {text}");
+        drop(s);
+        assert_eq!(effects, vec![SideEffect::ScheduleAutoRestart(1)]);
+    }
+
+    #[test]
+    fn crashed_event_without_message_keeps_exit_code_wording() {
+        let (state, shutting_down, attempts) = fresh();
+        apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"crashed","code":7}),
+        );
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            s.last_error.as_deref().unwrap().contains("code 7"),
+            "exit-code wording must remain the fallback"
+        );
     }
 
     #[test]
