@@ -27,3 +27,14 @@ windows-sys = { version = "0.61", features = [
 lto = true
 strip = true
 codegen-units = 1
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
+[dev-dependencies]
+proptest = "1"

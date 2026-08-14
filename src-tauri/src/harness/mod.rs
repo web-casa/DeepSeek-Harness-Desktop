@@ -215,6 +215,17 @@ fn apply_state_event(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // The sidecar derives this URL from the readiness line, but the
+            // shell must not trust it blindly: a malformed ready must never
+            // fake a Running state with an unusable URL.
+            if !url.starts_with("http://127.0.0.1:") {
+                log_line(
+                    state,
+                    "sidecar",
+                    &format!("ignoring malformed ready URL: {url:?}"),
+                );
+                return effects;
+            }
             {
                 let mut s = state
                     .lock()
@@ -772,6 +783,7 @@ pub fn shutdown_blocking(app: &AppHandle) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -948,5 +960,66 @@ mod tests {
             &json!({"type":"mystery"}),
         );
         assert!(effects.is_empty());
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use serde_json::json;
+
+        // Any stream of arbitrary NDJSON events must never panic the state
+        // machine, and must keep the core invariants:
+        //  * Running implies a known URL,
+        //  * the log ring never exceeds its cap.
+        proptest! {
+            #[test]
+            fn apply_state_event_invariants(events in prop::collection::vec(
+                prop_oneof![
+                    Just(json!({"type": "ready", "url": "http://127.0.0.1:41234"})),
+                    Just(json!({"type": "starting"})),
+                    Just(json!({"type": "stopping"})),
+                    Just(json!({"type": "stopped", "code": 0})),
+                    Just(json!({"type": "crashed", "code": 1})),
+                    Just(json!({"type": "error", "message": "boom"})),
+                    Just(json!({"type": "status", "id": 99, "state": "running", "pid": 123})),
+                    Just(json!({"type": "log", "stream": "stdout", "line": "x"})),
+                    Just(json!({"type": "ack", "id": 1, "ok": true})),
+                    Just(json!({"type": "ack", "id": 1, "ok": false, "error": "nope"})),
+                    Just(json!({"type": "sidecar", "version": "0.1.0"})),
+                    Just(json!({"type": "mystery"})),
+                    Just(json!({"type": 42, "whatever": [1, 2, 3]})),
+                    Just(json!({"type": "ready"})), // missing url
+                    Just(json!({"type": "crashed", "code": null})),
+                ],
+                0..64
+            )) {
+                let (state, shutting_down, attempts) = fresh();
+                for ev in &events {
+                    let _ = apply_state_event(&state, &shutting_down, &attempts, ev);
+                }
+                let s = state.lock().unwrap();
+                if s.status == Status::Running {
+                    prop_assert!(s.url.is_some(), "Running without URL after {:?}", events);
+                }
+                prop_assert!(s.logs.len() <= MAX_LOGS);
+            }
+
+            #[test]
+            fn apply_state_event_url_sanity(urls in prop::collection::vec(any::<String>(), 0..16)) {
+                let (state, shutting_down, attempts) = fresh();
+                for url in &urls {
+                    let _ = apply_state_event(
+                        &state,
+                        &shutting_down,
+                        &attempts,
+                        &json!({"type": "ready", "url": url}),
+                    );
+                }
+                let s = state.lock().unwrap();
+                if s.status == Status::Running {
+                    prop_assert!(s.url.as_deref().is_some_and(|u| u.starts_with("http")));
+                }
+            }
+        }
     }
 }

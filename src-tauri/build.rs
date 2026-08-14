@@ -12,6 +12,9 @@ fn main() {
         "shutdown",
         "open_harness",
     ]);
-    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
-        .expect("failed to run tauri-build");
+    let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));
+    if let Err(e) = result {
+        eprintln!("failed to run tauri-build: {e}");
+        std::process::exit(1);
+    }
 }

@@ -20,7 +20,7 @@ fn main() {
         }
     });
 
-    builder
+    let builder = builder
         // Second launch focuses the existing windows instead of booting a
         // second Harness tree.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -46,15 +46,21 @@ fn main() {
             commands::restart,
             commands::shutdown,
             commands::open_harness
-        ])
-        .build(tauri::generate_context!())
-        .expect("error while building DeepSeek Harness Desktop")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                // The sidecar kills the whole Node/Harness tree on stdin EOF,
-                // and the Windows Job Object guarantees cleanup even if we
-                // crash. This is the polite path.
-                harness::shutdown_blocking(app);
-            }
-        });
+        ]);
+
+    let app = match builder.build(tauri::generate_context!()) {
+        Ok(app) => app,
+        Err(e) => {
+            eprintln!("error while building DeepSeek Harness Desktop: {e}");
+            std::process::exit(1);
+        }
+    };
+    app.run(|app, event| {
+        if let tauri::RunEvent::Exit = event {
+            // The sidecar kills the whole Node/Harness tree on stdin EOF,
+            // and the Windows Job Object guarantees cleanup even if we
+            // crash. This is the polite path.
+            harness::shutdown_blocking(app);
+        }
+    });
 }

@@ -28,8 +28,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-      - name: Sidecar unit tests
-        run: cargo test --manifest-path crates/dsh-sidecar/Cargo.toml
+      - name: Install cargo tools (nextest, llvm-cov, deny)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-llvm-cov,cargo-deny
+
+      - name: Install llvm-tools for coverage
+        run: rustup component add llvm-tools-preview
+
+      - name: Sidecar tests (nextest)
+        run: cargo nextest run --manifest-path crates/dsh-sidecar/Cargo.toml
+
+      - name: Sidecar coverage (llvm-cov, process lifecycle paths)
+        run: cargo llvm-cov nextest --manifest-path crates/dsh-sidecar/Cargo.toml --fail-under-lines 50
 
       - name: Sidecar cross-target checks (Windows + macOS)
         run: |
@@ -37,12 +48,15 @@ jobs:
           cargo check --target x86_64-pc-windows-msvc --manifest-path crates/dsh-sidecar/Cargo.toml
           cargo check --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml
 
-      - name: Tauri shell tests (compiles src-tauri + state-machine tests)
+      - name: Tauri shell tests (nextest: state machine + proptests)
         run: |
           # tauri-build asserts the bundle resources path exists; the smoke
           # job stages the real runtime — the unit job only needs the dir.
           mkdir -p src-tauri/resources/runtime
-          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo nextest run --manifest-path src-tauri/Cargo.toml
+
+      - name: Tauri coverage (llvm-cov)
+        run: cargo llvm-cov nextest --manifest-path src-tauri/Cargo.toml --fail-under-lines 25
 
       - name: Rust formatting & clippy
         run: |
@@ -51,8 +65,19 @@ jobs:
           cargo clippy --manifest-path crates/dsh-sidecar/Cargo.toml --all-targets -- -D warnings
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+      - name: Supply-chain gate (cargo-deny)
+        run: |
+          cargo deny --manifest-path crates/dsh-sidecar/Cargo.toml check
+          cargo deny --manifest-path src-tauri/Cargo.toml check
+
       - name: Frontend install & build
         run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Frontend type checks (tsc + svelte-check)
+        run: pnpm check
+
+      - name: Scripts type check (Node-native TS)
+        run: pnpm check:scripts
 
       - name: Bundle verifier self-test
         run: node scripts/verify-bundle.ts --self-test

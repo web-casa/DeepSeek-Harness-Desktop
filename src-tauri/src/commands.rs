@@ -139,7 +139,7 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
     let url = runtime
         .state
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .url
         .clone()
         .ok_or_else(|| "Harness 尚未就绪".to_string())?;

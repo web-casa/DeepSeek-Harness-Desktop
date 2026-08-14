@@ -154,38 +154,38 @@ pub fn parse_command(line: &str) -> Result<(Option<u64>, Command), String> {
         .get("command")
         .and_then(|c| c.as_str())
         .ok_or_else(|| "missing \"command\"".to_string())?;
-    let cmd =
-        match name {
-            "start" => {
-                let node = v
-                    .get("node")
-                    .and_then(|s| s.as_str())
-                    .ok_or_else(|| "start: missing \"node\"".to_string())?
-                    .to_string();
-                let script = v
-                    .get("script")
-                    .and_then(|s| s.as_str())
-                    .ok_or_else(|| "start: missing \"script\"".to_string())?
-                    .to_string();
-                let args = v
-                    .get("args")
-                    .and_then(|a| a.as_array())
-                    .ok_or_else(|| "start: \"args\" must be an array".to_string())?
-                    .iter()
-                    .map(|x| {
-                        x.as_str()
-                            .map(str::to_string)
-                            .ok_or_else(|| "start: args must be strings".to_string())
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let cwd = v
-                    .get("cwd")
-                    .and_then(|s| s.as_str())
-                    .ok_or_else(|| "start: missing \"cwd\"".to_string())?
-                    .to_string();
-                let env =
-                    v.get("env")
-                        .and_then(|e| e.as_object())
+    let cmd = match name {
+        "start" => {
+            let node = v
+                .get("node")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| "start: missing \"node\"".to_string())?
+                .to_string();
+            let script = v
+                .get("script")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| "start: missing \"script\"".to_string())?
+                .to_string();
+            let args = v
+                .get("args")
+                .and_then(|a| a.as_array())
+                .ok_or_else(|| "start: \"args\" must be an array".to_string())?
+                .iter()
+                .map(|x| {
+                    x.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "start: args must be strings".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let cwd = v
+                .get("cwd")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| "start: missing \"cwd\"".to_string())?
+                .to_string();
+            let env = match v.get("env") {
+                None => Vec::new(),
+                Some(e) if e.is_object() => {
+                    e.as_object()
                         .map(|o| {
                             o.iter()
                                 .map(|(k, val)| {
@@ -196,20 +196,23 @@ pub fn parse_command(line: &str) -> Result<(Option<u64>, Command), String> {
                                 .collect::<Result<Vec<_>, _>>()
                         })
                         .transpose()?
-                        .unwrap_or_default();
-                Command::Start {
-                    node,
-                    script,
-                    args,
-                    cwd,
-                    env,
+                        .unwrap_or_default()
                 }
+                Some(_) => return Err("start: \"env\" must be an object".to_string()),
+            };
+            Command::Start {
+                node,
+                script,
+                args,
+                cwd,
+                env,
             }
-            "shutdown" => Command::Shutdown,
-            "restart" => Command::Restart,
-            "status" => Command::Status,
-            other => return Err(format!("unknown command {other:?}")),
-        };
+        }
+        "shutdown" => Command::Shutdown,
+        "restart" => Command::Restart,
+        "status" => Command::Status,
+        other => return Err(format!("unknown command {other:?}")),
+    };
     Ok((id, cmd))
 }
 
@@ -589,6 +592,7 @@ fn main() {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -676,6 +680,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_object_env() {
+        let result = parse_command(
+            r#"{"command":"start","node":"n","script":"s","args":[],"cwd":"c","env":[["DSH_HOME","/h"]]}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("must be an object"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn quotes_plain_args_verbatim() {
         assert_eq!(quote_arg("node.exe"), "node.exe");
         assert_eq!(quote_arg("--port"), "--port");
@@ -702,6 +716,242 @@ mod tests {
         assert_eq!(
             quote_arg("C:\\Program Files\\"),
             "\"C:\\Program Files\\\\\""
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Property-based tests: the adversarial inputs (framing, quoting,
+    // parsing) are exactly what property tests are for.
+    // ------------------------------------------------------------------
+    mod proptests {
+        use crate::*;
+        use proptest::prelude::*;
+
+        /// Minimal CommandLineToArgvW-compatible unquoter — the reference
+        /// implementation our quote_arg must round-trip against.
+        fn unquote_arg(s: &str) -> String {
+            if !s.starts_with('"') {
+                return s.to_string();
+            }
+            let mut chars = s[1..].chars().peekable();
+            let mut out = String::new();
+            let mut backslashes = 0usize;
+            let mut quoted = true;
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    backslashes += 1;
+                    continue;
+                }
+                if c == '"' {
+                    out.push_str(&"\\".repeat(backslashes / 2));
+                    if backslashes % 2 == 1 {
+                        out.push('"');
+                    } else {
+                        quoted = false;
+                        // After a closing quote, remaining chars are literal;
+                        // our quote_arg never emits them, so just drain.
+                        for rest in chars.by_ref() {
+                            out.push(rest);
+                        }
+                    }
+                    backslashes = 0;
+                    continue;
+                }
+                out.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                out.push(c);
+            }
+            if quoted {
+                out.push_str(&"\\".repeat(backslashes));
+            }
+            out
+        }
+
+        proptest! {
+            #[test]
+            fn quote_arg_roundtrips(s in any::<String>()) {
+                prop_assert_eq!(unquote_arg(&quote_arg(&s)), s);
+            }
+
+            #[test]
+            fn extract_local_url_never_panics(s in any::<String>()) {
+                let _ = extract_local_url(&s);
+            }
+
+            #[test]
+            fn extract_local_url_parses_any_port(port in 0u32..=65535) {
+                let line = format!("dsh web: http://127.0.0.1:{port}");
+                let parsed = extract_local_url(&line);
+                let expected = line.strip_prefix("dsh web: ").map(str::to_string);
+                prop_assert_eq!(parsed, expected);
+            }
+
+            #[test]
+            fn parse_command_never_panics(s in any::<String>()) {
+                let _ = parse_command(&s);
+            }
+
+            #[test]
+            fn parse_start_roundtrips(env in prop::collection::vec(
+                any::<String>(), 0..8
+            ).prop_map(|vals| vals.into_iter().enumerate().map(|(i, v)| (format!("K{i}"), v)).collect::<Vec<_>>())) {
+                let env_map: serde_json::Map<String, Value> = env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                let cmd = json!({
+                    "command": "start",
+                    "node": "node",
+                    "script": "script",
+                    "args": ["web"],
+                    "cwd": "cwd",
+                    "env": env_map,
+                });
+                let text = cmd.to_string();
+                let (_, parsed) = parse_command(&text).unwrap();
+                // Re-serializing the parsed command must yield the same fields.
+                match parsed {
+                    Command::Start { node, script, args, cwd, env: env2 } => {
+                        prop_assert_eq!(node, "node");
+                        prop_assert_eq!(script, "script");
+                        prop_assert_eq!(args, vec!["web".to_string()]);
+                        prop_assert_eq!(cwd, "cwd");
+                        prop_assert_eq!(env2, env);
+                    }
+                    _ => prop_assert!(false, "expected Start"),
+                }
+            }
+
+            #[test]
+            fn truncate_line_bounds(s in any::<String>()) {
+                let out = truncate_line(s.clone());
+                prop_assert!(out.len() <= MAX_LINE + "… [line truncated]".len() + 8);
+                let keep = s.chars().count().min(MAX_LINE);
+                prop_assert!(out.starts_with(&s.chars().take(keep).collect::<String>()));
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Platform integration tests (unix): spawn/graceful/force against a
+    // real subprocess — the branches unit tests cannot reach. Windows
+    // equivalents are exercised by the CI runtime smoke.
+    // ------------------------------------------------------------------
+    #[cfg(unix)]
+    mod platform_tests {
+        use super::*;
+        use platform::{PlatformChild, SpawnSpec};
+        use std::time::{Duration, Instant};
+
+        fn spec(command: &str) -> SpawnSpec {
+            SpawnSpec {
+                node: "sh".to_string(),
+                script: "-c".to_string(),
+                args: vec![command.to_string()],
+                cwd: "/".to_string(),
+                env: vec![],
+            }
+        }
+
+        fn wait_exit(
+            child: &mut PlatformChild,
+            timeout: Duration,
+        ) -> Option<std::process::ExitStatus> {
+            let deadline = Instant::now() + timeout;
+            loop {
+                if let Some(status) = child.child.try_wait().unwrap() {
+                    return Some(status);
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        #[test]
+        fn spawn_and_reap_normal_exit() {
+            let mut child = PlatformChild::spawn(&spec("exit 7")).unwrap();
+            let status =
+                wait_exit(&mut child, Duration::from_secs(10)).expect("child did not exit");
+            assert_eq!(status.code(), Some(7));
+        }
+
+        #[test]
+        fn graceful_then_force_kills_a_trapping_child() {
+            // Trap TERM: the graceful signal is delivered but ignored, so the
+            // force path (SIGKILL to the group) must finish the job.
+            let mut child = PlatformChild::spawn(&spec("trap '' TERM; sleep 30")).unwrap();
+            // Give the shell time to install the trap before signalling.
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(child.graceful(), "graceful signal must be deliverable");
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(
+                child.child.try_wait().unwrap().is_none(),
+                "child must survive TERM"
+            );
+            child.force();
+            let status =
+                wait_exit(&mut child, Duration::from_secs(10)).expect("force did not kill");
+            assert!(!status.success());
+        }
+
+        #[test]
+        fn graceful_stops_a_normal_child() {
+            let mut child = PlatformChild::spawn(&spec("sleep 30")).unwrap();
+            assert!(child.graceful());
+            let status = wait_exit(&mut child, Duration::from_secs(10)).expect("TERM did not stop");
+            assert!(!status.success());
+        }
+
+        #[test]
+        fn env_overrides_reach_the_child() {
+            let mut spec = spec("test \"$DSH_HOME\" = \"/tmp/qa-home\"");
+            spec.env = vec![("DSH_HOME".to_string(), "/tmp/qa-home".to_string())];
+            let mut child = PlatformChild::spawn(&spec).unwrap();
+            let status =
+                wait_exit(&mut child, Duration::from_secs(10)).expect("child did not exit");
+            assert_eq!(status.code(), Some(0));
+        }
+    }
+
+    #[test]
+    fn ndjson_golden_events() {
+        // These exact serialized forms are the protocol contract parsed by
+        // the Tauri shell and verify-runtime; changing them silently breaks
+        // the other side of the pipe.
+        assert_eq!(
+            json!({"type":"ack","id":7,"ok":true}).to_string(),
+            r#"{"id":7,"ok":true,"type":"ack"}"#
+        );
+        assert_eq!(
+            json!({"type":"starting"}).to_string(),
+            r#"{"type":"starting"}"#
+        );
+        assert_eq!(
+            json!({"type":"ready","url":"http://127.0.0.1:41234"}).to_string(),
+            r#"{"type":"ready","url":"http://127.0.0.1:41234"}"#
+        );
+        assert_eq!(
+            json!({"type":"stopped","code":0,"pid":42}).to_string(),
+            r#"{"code":0,"pid":42,"type":"stopped"}"#
+        );
+        assert_eq!(
+            json!({"type":"crashed","code":1,"pid":42}).to_string(),
+            r#"{"code":1,"pid":42,"type":"crashed"}"#
+        );
+        assert_eq!(
+            json!({"type":"status","id":9,"state":"running","pid":42,"url":"http://127.0.0.1:1"})
+                .to_string(),
+            r#"{"id":9,"pid":42,"state":"running","type":"status","url":"http://127.0.0.1:1"}"#
+        );
+        assert_eq!(
+            json!({"type":"log","stream":"stdout","line":"x"}).to_string(),
+            r#"{"line":"x","stream":"stdout","type":"log"}"#
+        );
+        assert_eq!(
+            json!({"type":"error","code":"readiness-timeout","message":"m"}).to_string(),
+            r#"{"code":"readiness-timeout","message":"m","type":"error"}"#
         );
     }
 }

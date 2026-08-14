@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { repoRoot, tmpDir, fail, ok, info } from "./lib/common.ts";
+import { repoRoot, tmpDir, readManifest, fail, ok, info } from "./lib/common.ts";
 
 const bundleArg = process.argv.indexOf("--bundle");
 const bundleType = bundleArg >= 0 ? process.argv[bundleArg + 1] : undefined;
@@ -289,6 +289,12 @@ function runNsisChecks(): void {
   try {
     const mainExe = extractNsisFile(artifact, topLevelExes[0], extractDir);
     checkBinaryType(mainExe, "PE", "main binary");
+    const manifestFile = extractNsisFile(
+      artifact,
+      "runtime/harness/runtime-manifest.json",
+      extractDir,
+    );
+    checkBundledManifest(readFileSync(manifestFile, "utf8"));
   } finally {
     rmSync(extractDir, { recursive: true, force: true });
   }
@@ -330,9 +336,32 @@ function runDmgChecks(): void {
       "Mach-O",
       "main binary",
     );
+
+    checkBundledManifest(
+      readFileSync(
+        join(appRoot, "Contents", "Resources", "runtime", "harness", "runtime-manifest.json"),
+        "utf8",
+      ),
+    );
   } finally {
     detachDmg(mount);
   }
+}
+
+/// The bundle's runtime-manifest.json must match the repo manifest: the
+/// installer is verified against what the SOURCE says it should contain,
+/// not just against its own internal consistency.
+function checkBundledManifest(bundledText: string): void {
+  const repo = readManifest();
+  const bundled = JSON.parse(bundledText) as Partial<Record<string, string>>;
+  for (const key of ["nodeVersion", "harnessVersion", "sidecarVersion"] as const) {
+    if (bundled[key] !== repo[key]) {
+      throw new Error(
+        `bundled manifest ${key}=${bundled[key]} != repo manifest ${repo[key]}`,
+      );
+    }
+  }
+  ok(`bundled manifest matches repo (node ${bundled.nodeVersion}, harness ${bundled.harnessVersion})`);
 }
 
 try {

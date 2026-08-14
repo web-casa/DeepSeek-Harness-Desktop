@@ -1,0 +1,60 @@
+# cargo-deny policy for the DeepSeek Harness Desktop supply chain.
+# `cargo deny check` runs in CI as a release gate.
+
+[advisories]
+yanked = "deny"
+# Unmaintained-only advisories (no vulnerabilities) from transitive deps of
+# tauri's macro/GTK stack: gtk-rs GTK3 bindings (Linux dev-only target; tauri
+# itself is on the gtk4 migration path), rust-unic (unicode-ident family),
+# proc-macro-error. Revisit on tauri upgrades.
+ignore = [
+  "RUSTSEC-2024-0370",
+  "RUSTSEC-2024-0411",
+  "RUSTSEC-2024-0412",
+  "RUSTSEC-2024-0413",
+  "RUSTSEC-2024-0414",
+  "RUSTSEC-2024-0415",
+  "RUSTSEC-2024-0416",
+  "RUSTSEC-2024-0417",
+  "RUSTSEC-2024-0418",
+  "RUSTSEC-2024-0419",
+  "RUSTSEC-2024-0420",
+  "RUSTSEC-2025-0075",
+  "RUSTSEC-2025-0080",
+  "RUSTSEC-2025-0081",
+  "RUSTSEC-2025-0098",
+  "RUSTSEC-2025-0100",
+]
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "BSD-2-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "OpenSSL",
+  "CC0-1.0",
+]
+# Root-owned workspace crates are MIT.
+exceptions = [
+  { allow = ["LicenseRef-embedding"], name = "*" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

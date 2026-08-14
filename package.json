@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "check": "tsc -p tsconfig.json --noEmit && svelte-check --tsconfig ./tsconfig.json",
+    "check:scripts": "tsc -p tsconfig.scripts.json",
     "tauri": "tauri",
     "runtime:node": "node scripts/download-node.ts",
     "runtime:harness": "node scripts/prepare-harness.ts",
@@ -21,7 +23,9 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^26.2.0",
     "svelte": "^5.56.9",
+    "svelte-check": "^4.7.6",
     "typescript": "^5.9.3",
     "vite": "^8.2.1"
   }

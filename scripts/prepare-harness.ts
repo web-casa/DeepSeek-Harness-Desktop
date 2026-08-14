@@ -72,7 +72,7 @@ const env: NodeJS.ProcessEnv = {
 // would fail open and every dependency script would run unreviewed.
 const npmVersionRes = spawnSync("npm", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
 const npmVersion = (npmVersionRes.stdout ?? "").trim();
-const [vMajor = "0", vMinor = "0"] = npmVersion.split(".").map((p) => Number.parseInt(p, 10) || 0);
+const [vMajor = 0, vMinor = 0] = npmVersion.split(".").map((p) => Number.parseInt(p, 10) || 0);
 if (npmVersionRes.status !== 0 || vMajor < 11 || (vMajor === 11 && vMinor < 17)) {
   fail(
     `npm ${npmVersion || "not found"} is too old: strict-allow-scripts requires npm >= 11.17. ` +
