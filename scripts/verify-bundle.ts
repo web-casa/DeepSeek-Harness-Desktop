@@ -161,6 +161,8 @@ Size = 2001
   ok("self-test: 7z -slt parser excludes header block, handles spaces and backslashes");
 
   // assertExecutable: fixtures with and without the exec bit.
+  // (.tmp is gitignored and absent on fresh CI checkouts — create it first.)
+  mkdirSync(tmpDir, { recursive: true });
   const exeFixture = join(tmpDir, "vbs-exe-fixture");
   writeFileSync(exeFixture, "#!/bin/sh\necho hi\n", { mode: 0o755 });
   const noExeFixture = join(tmpDir, "vbs-noexe-fixture");
