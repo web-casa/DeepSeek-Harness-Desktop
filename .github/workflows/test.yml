@@ -38,7 +38,11 @@ jobs:
           cargo check --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml
 
       - name: Tauri shell tests (compiles src-tauri + state-machine tests)
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: |
+          # tauri-build asserts the bundle resources path exists; the smoke
+          # job stages the real runtime — the unit job only needs the dir.
+          mkdir -p src-tauri/resources/runtime
+          cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Rust formatting & clippy
         run: |
