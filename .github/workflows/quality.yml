@@ -20,9 +20,9 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa  # v4 (SHA-pinned)
-        with:
-          version: 11.21.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1  # v4 (SHA-pinned, peeled commit)
+      # Version source of truth: packageManager in package.json (action-setup
+      # v4 reads it when `version` is omitted; mismatches fail loudly).
 
       # Tauri shell system deps (compiling src-tauri requires webkit2gtk-4.1).
       - name: Install Tauri system dependencies

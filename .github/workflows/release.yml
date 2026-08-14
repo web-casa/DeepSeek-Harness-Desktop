@@ -15,9 +15,36 @@ jobs:
     name: Quality gates
     uses: ./.github/workflows/quality.yml
 
+  # Refuse to spend two platform builds (and a publish) on a tag that can
+  # never be published: the tag commit must be an ancestor of main. The
+  # release-preflight branch check is local-only (skipped in CI), so without
+  # this gate a tag pushed from a feature branch would sail through. Full
+  # main history is fetched so --is-ancestor can walk it.
+  #
+  # Semantics: the tag must be created ON main AFTER the merge. A tag on a
+  # feature branch that is later squash-merged is rejected (the squash commit
+  # is a different commit), as is any tag after a force-push rewrite of main.
+  # workflow_dispatch skips this job (skipped needs are satisfied).
+  tag-gate:
+    name: Tag gate (tag must be on main)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Enforce tag ancestry
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor HEAD FETCH_HEAD || {
+            echo "::error::tag ${{ github.ref_name }} is not an ancestor of origin/main — refusing to build/publish"
+            exit 1
+          }
+
   build:
     name: Build ${{ matrix.target }}
-    needs: quality
+    needs: [quality, tag-gate]
     strategy:
       fail-fast: false
       matrix:
@@ -44,9 +71,9 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa  # v4 (SHA-pinned)
-        with:
-          version: 11.21.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1  # v4 (SHA-pinned, peeled commit)
+      # Version source of truth: packageManager in package.json (action-setup
+      # v4 reads it when `version` is omitted; mismatches fail loudly).
 
       - name: Release preflight (versions, checksums, npm policy)
         run: node scripts/release-preflight.ts
@@ -117,18 +144,8 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      # Tags must point at a commit that is an ancestor of main. The
-      # release-preflight branch check is local-only (skipped in CI), so a tag
-      # pushed from a feature branch would otherwise sail through the whole
-      # pipeline. Full main history is fetched so --is-ancestor can walk it.
-      - name: Enforce tag ancestry (must be on main)
-        run: |
-          git fetch origin main
-          git merge-base --is-ancestor HEAD FETCH_HEAD || {
-            echo "::error::tag ${{ github.ref_name }} is not an ancestor of origin/main — refusing to publish"
-            exit 1
-          }
-
+      # Tag ancestry was already enforced by the tag-gate job before the
+      # build; this job only binds the tag to the version it publishes.
       # The tag must be bound to the version it publishes: v9.9.9 must never
       # ship artifacts whose embedded desktop version is 0.1.0.
       - name: Release preflight (tag binding)

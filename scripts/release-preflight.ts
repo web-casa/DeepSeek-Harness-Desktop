@@ -10,7 +10,14 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { repoRoot, readManifest, fail, ok, info } from "./lib/common.ts";
+import {
+  repoRoot,
+  readManifest,
+  fail,
+  ok,
+  info,
+  assertNpmInAuditedRange,
+} from "./lib/common.ts";
 
 const PLATFORM_KEYS = ["win32-x64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
 // Case-insensitive: the checksums we publish are lowercase, but a manual edit
@@ -98,24 +105,11 @@ if (extraKeys.length > 0) {
 }
 ok(`node checksum table covers exactly ${PLATFORM_KEYS.length} platforms (64-hex each)`);
 
-// --- deny: npm version (allowlist precondition) ---------------------------
-const npmRes = spawnSync("npm", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
-const npmVersion = (npmRes.stdout ?? "").trim();
-const [vMajor = 0, vMinor = 0] = npmVersion.split(".").map((p) => Number.parseInt(p, 10) || 0);
-if (npmRes.status !== 0 || vMajor < 11 || (vMajor === 11 && vMinor < 17)) {
-  fail(`npm ${npmVersion || "not found"} too old: strict-allow-scripts requires >= 11.17`);
-}
-// Upper bound too: strict-allow-scripts/allow-scripts is a new npm 11 policy
-// feature. If a future npm major renames or drops those keys, the allowlist
-// would silently fail OPEN (every install script runs unreviewed) while the
-// >= check above still passes — refuse until a human has re-verified.
-if (vMajor > 11) {
-  fail(
-    `npm ${npmVersion} is newer than the audited major (11): verify that ` +
-      `strict-allow-scripts/allow-scripts still gates install scripts in runtime/.npmrc, ` +
-      `then widen this check.`,
-  );
-}
+// --- deny: npm version (allowlist precondition, both bounds) ---------------
+// Shared with prepare-harness so the two pipelines cannot diverge (a local
+// `pnpm runtime:all` on an unaudited npm major would otherwise silently run
+// install scripts unreviewed). DSH_ALLOW_NPM_MAJOR is the reviewed override.
+const npmVersion = assertNpmInAuditedRange();
 ok(`npm ${npmVersion} supports strict-allow-scripts`);
 
 // --- deny: tag binding ------------------------------------------------------

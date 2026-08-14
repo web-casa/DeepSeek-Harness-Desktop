@@ -23,16 +23,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@d6317709a54fd87078d323eeb0e48ec331c8e621  # v3 (SHA-pinned)
+        uses: github/codeql-action/init@f3712979fa5f215279b101dd0a2e3bdfb4353324  # v3 (SHA-pinned, peeled commit)
         with:
           languages: ${{ matrix.language }}
           queries: security-extended,security-and-quality
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@d6317709a54fd87078d323eeb0e48ec331c8e621  # v3 (SHA-pinned)
+        uses: github/codeql-action/autobuild@f3712979fa5f215279b101dd0a2e3bdfb4353324  # v3 (SHA-pinned, peeled commit)
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@d6317709a54fd87078d323eeb0e48ec331c8e621  # v3 (SHA-pinned)
+        uses: github/codeql-action/analyze@f3712979fa5f215279b101dd0a2e3bdfb4353324  # v3 (SHA-pinned, peeled commit)
 
   analyze-rust:
     name: Analyze (Rust)
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@d6317709a54fd87078d323eeb0e48ec331c8e621  # v3 (SHA-pinned)
+        uses: github/codeql-action/init@f3712979fa5f215279b101dd0a2e3bdfb4353324  # v3 (SHA-pinned, peeled commit)
         with:
           languages: rust
 
@@ -51,4 +51,4 @@ jobs:
         run: cargo build --manifest-path crates/dsh-sidecar/Cargo.toml
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@d6317709a54fd87078d323eeb0e48ec331c8e621  # v3 (SHA-pinned)
+        uses: github/codeql-action/analyze@f3712979fa5f215279b101dd0a2e3bdfb4353324  # v3 (SHA-pinned, peeled commit)

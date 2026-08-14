@@ -18,35 +18,68 @@ import {
   renameSync,
   mkdirSync,
   readdirSync,
+  statSync,
   type Dirent,
 } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { repoRoot, runtimeDir, harnessDir, readManifest, fail, ok, info } from "./lib/common.ts";
+import {
+  repoRoot,
+  runtimeDir,
+  harnessDir,
+  readManifest,
+  fail,
+  ok,
+  info,
+  assertNpmInAuditedRange,
+} from "./lib/common.ts";
 import { materialize } from "./lib/materialize.ts";
 
 // Collect every package's license file into licenses/<rel-path> so the
 // installer carries third-party attribution for the whole dependency tree.
+//
 // One recursive walk covers ALL package locations: top-level, scoped
 // (@scope/<name>), and nested node_modules (un-hoisted version conflicts).
-// A directory is a package iff it contains package.json — the tree walk
-// never assumes a specific layout, so npm layout changes cannot silently
-// drop attribution again.
+// A directory counts as a package only when its path has the SHAPE of a
+// package root (top-level, @scope/<name>, */node_modules/<name>, or
+// */node_modules/@scope/<name>): inner package.json files — the
+// {"type":"module"} stubs in dist/esm, cjs, helpers/ … — mark file-layout
+// hints, not separate packages, and must not spawn pseudo-attribution.
 function collectLicenses(nodeModules: string, outDir: string): void {
   let collected = 0;
   const candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING"];
-  const walk = (dir: string, rel: string): void => {
+
+  const isPackageRoot = (segs: string[]): boolean => {
+    const n = segs.length;
+    if (n === 0) return false;
+    if (n === 1) return true; // <top>/pkg
+    if (n === 2 && segs[0].startsWith("@")) return true; // <top>/@scope/pkg
+    if (segs[n - 2] === "node_modules") return true; // …/node_modules/pkg
+    if (n >= 3 && segs[n - 3] === "node_modules" && segs[n - 2].startsWith("@")) {
+      return true; // …/node_modules/@scope/pkg
+    }
+    return false;
+  };
+
+  const walk = (dir: string, segs: string[]): void => {
     let entries: Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return; // unreadable subtree (e.g. dangling entry) — not a package
+    } catch (e) {
+      // Only dangling entries are expected (npm can leave them behind); any
+      // real IO failure must abort — attribution must not silently shrink.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return;
+      throw e;
     }
-    if (entries.some((e) => e.isFile() && e.name === "package.json")) {
+    if (isPackageRoot(segs) && entries.some((e) => e.isFile() && e.name === "package.json")) {
       for (const file of candidates) {
         const src = join(dir, file);
-        if (existsSync(src)) {
-          const destDir = join(outDir, rel);
+        // existsSync is true for a LICENSE *directory*; copyFileSync would
+        // then throw EISDIR. Only regular files (or links resolving to
+        // files) count.
+        if (existsSync(src) && statSync(src).isFile()) {
+          const destDir = join(outDir, ...segs);
           mkdirSync(destDir, { recursive: true });
           copyFileSync(src, join(destDir, file));
           collected += 1;
@@ -56,10 +89,10 @@ function collectLicenses(nodeModules: string, outDir: string): void {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      walk(join(dir, entry.name), rel === "" ? entry.name : join(rel, entry.name));
+      walk(join(dir, entry.name), [...segs, entry.name]);
     }
   };
-  walk(nodeModules, "");
+  walk(nodeModules, []);
   info(`collected ${collected} third-party license files into licenses/`);
 }
 
@@ -86,17 +119,11 @@ const env: NodeJS.ProcessEnv = {
 };
 
 // The runtime/.npmrc allowlist (allow-scripts/strict-allow-scripts) requires
-// npm >= 11.17. Older npm silently IGNORES unknown config keys — the allowlist
-// would fail open and every dependency script would run unreviewed.
-const npmVersionRes = spawnSync("npm", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
-const npmVersion = (npmVersionRes.stdout ?? "").trim();
-const [vMajor = 0, vMinor = 0] = npmVersion.split(".").map((p) => Number.parseInt(p, 10) || 0);
-if (npmVersionRes.status !== 0 || vMajor < 11 || (vMajor === 11 && vMinor < 17)) {
-  fail(
-    `npm ${npmVersion || "not found"} is too old: strict-allow-scripts requires npm >= 11.17. ` +
-      "Upgrade Node (npm ships with it) before preparing the runtime.",
-  );
-}
+// npm 11.17+ and has been audited only up to npm 11. Both bounds are shared
+// with release-preflight, so `pnpm runtime:all` cannot silently run install
+// scripts unreviewed on an unaudited npm major.
+const npmVersion = assertNpmInAuditedRange();
+ok(`npm ${npmVersion} supports strict-allow-scripts`);
 
 // npm ci: clean, reproducible install from the committed package-lock.json.
 // On Windows the npm shim is a .cmd file; spawnSync resolves it via a shell.
