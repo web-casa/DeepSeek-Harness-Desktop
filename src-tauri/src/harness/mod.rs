@@ -133,16 +133,44 @@ fn refresh_pid(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
     }
 }
 
+/// Strict readiness-URL validation: the exact shape the sidecar emits.
+/// http + host 127.0.0.1 + path "/" + explicit port 1..=65535, no userinfo,
+/// no query, no fragment. Any other shape is not a Harness readiness URL.
+pub(crate) fn is_valid_readiness_url(url: &str) -> bool {
+    let Ok(parsed) = tauri::Url::parse(url) else {
+        return false;
+    };
+    parsed.scheme() == "http"
+        && parsed.host_str() == Some("127.0.0.1")
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.path() == "/"
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && matches!(parsed.port(), Some(port) if (1..=65535).contains(&port))
+}
+
+/// Navigation guard for the remote webview: any path/query is fine (the
+/// Harness UI routes internally), but the origin must be exactly the
+/// readiness origin captured at window creation — never another local port.
+fn same_origin(candidate: &tauri::Url, origin: &tauri::Url) -> bool {
+    candidate.scheme() == origin.scheme()
+        && candidate.host_str() == origin.host_str()
+        && candidate.port() == origin.port()
+}
+
 /// Open (or focus) the harness window. The remote webview may only navigate
-/// to 127.0.0.1 — even with zero IPC permissions, a stray page link must not
-/// be able to turn the window into a general-purpose browser.
+/// within the readiness origin — even with zero IPC permissions, a stray page
+/// link must not turn the window into a general-purpose browser or a jumper
+/// into other local services.
 pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
+    if !is_valid_readiness_url(url) {
+        return;
+    }
     let Ok(parsed) = tauri::Url::parse(url) else {
         return;
     };
-    if parsed.host_str() != Some("127.0.0.1") {
-        return;
-    }
+    let origin = parsed.clone();
     let app = app.clone();
     let app_in = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -159,7 +187,7 @@ pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
             .title("DeepSeek Harness")
             .inner_size(1280.0, 800.0)
             .min_inner_size(960.0, 600.0)
-            .on_navigation(|url| url.host_str() == Some("127.0.0.1"))
+            .on_navigation(move |candidate| same_origin(candidate, &origin))
             .build();
         }
     });
@@ -218,7 +246,7 @@ fn apply_state_event(
             // The sidecar derives this URL from the readiness line, but the
             // shell must not trust it blindly: a malformed ready must never
             // fake a Running state with an unusable URL.
-            if !url.starts_with("http://127.0.0.1:") {
+            if !is_valid_readiness_url(&url) {
                 log_line(
                     state,
                     "sidecar",
@@ -342,7 +370,17 @@ fn handle_event(
             }
         }
     }
+    publish_snapshot(app, state);
+}
+
+/// Single snapshot publication channel: emits to the bootstrap window AND
+/// updates the tray status line. Every state mutation path must end here so
+/// the tray can never go stale (watcher, fail_init, command errors included).
+pub(crate) fn publish_snapshot(app: &AppHandle, state: &Arc<Mutex<SharedState>>) {
     let snapshot = snapshot_payload(state);
+    if let Some(status) = snapshot.get("status").and_then(|v| v.as_str()) {
+        crate::tray::update_status(app, &crate::tray::status_label(status));
+    }
     let _ = app.emit_to("bootstrap", "harness-event", &snapshot);
 }
 
@@ -405,13 +443,15 @@ fn fail_init(
     let state = Arc::new(Mutex::new(SharedState::default()));
     set_error(&state, message);
     app.manage(Runtime {
-        state,
+        state: state.clone(),
         stdin,
         child,
         shutting_down,
         restart_attempts,
         paths,
     });
+    // fail_init historically emitted nothing — the tray/UI must see it too.
+    publish_snapshot(app, &state);
 }
 
 /// Spawn the sidecar process and wire reader/watcher threads. The Runtime
@@ -491,8 +531,7 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
                         s.status = Status::Crashed;
                         s.pid = None;
                     }
-                    let snapshot = snapshot_payload(&state_c);
-                    let _ = app_c.emit_to("bootstrap", "harness-event", &snapshot);
+                    publish_snapshot(&app_c, &state_c);
                 }
                 return;
             }
@@ -674,11 +713,62 @@ pub fn init(app: &AppHandle) {
 
     if let Err(e) = launch_sidecar(app, &runtime, &paths) {
         set_error(&state, e);
+        publish_snapshot(app, &state);
         return;
     }
     if let Err(e) = start_harness(&runtime, &paths) {
         set_error(&state, e);
+        publish_snapshot(app, &state);
     }
+}
+
+/// Unified restart entry (tray menu + bootstrap button): sidecar alive → send
+/// restart command; sidecar dead → respawn the whole chain. Publishes state.
+pub fn request_restart(app: &AppHandle) -> Result<(), String> {
+    let runtime = app.state::<Runtime>();
+    if !child_alive(&runtime) {
+        let result = respawn_sidecar(app);
+        if let Err(e) = &result {
+            let mut s = runtime
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            s.last_error = Some(e.clone());
+            s.status = Status::Crashed;
+        } else {
+            reset_restart_attempts(&runtime);
+            let mut s = runtime
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            s.last_error = None;
+        }
+        publish_snapshot(app, &runtime.state);
+        return result;
+    }
+
+    let result = send_raw(
+        &runtime,
+        &serde_json::json!({"id": CMD_ID_RESTART, "command": "restart"}),
+    );
+    if let Err(e) = &result {
+        let mut s = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        s.last_error = Some(e.clone());
+        s.status = Status::Crashed;
+    } else {
+        reset_restart_attempts(&runtime);
+        let mut s = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        s.last_error = None;
+        s.status = Status::Starting;
+    }
+    publish_snapshot(app, &runtime.state);
+    result
 }
 
 /// Re-launch the sidecar after it died unexpectedly (user presses the restart
@@ -1017,9 +1107,27 @@ mod tests {
                 }
                 let s = state.lock().unwrap();
                 if s.status == Status::Running {
-                    prop_assert!(s.url.as_deref().is_some_and(|u| u.starts_with("http")));
+                    prop_assert!(s.url.as_deref().is_some_and(is_valid_readiness_url));
                 }
             }
         }
+    }
+
+    #[test]
+    fn validates_readiness_urls() {
+        assert!(is_valid_readiness_url("http://127.0.0.1:41234"));
+        assert!(is_valid_readiness_url("http://127.0.0.1:1/"));
+        assert!(!is_valid_readiness_url("http://127.0.0.1:0"));
+        assert!(!is_valid_readiness_url("http://127.0.0.1:65536"));
+        assert!(!is_valid_readiness_url("http://127.0.0.1"));
+        assert!(!is_valid_readiness_url("http://localhost:41234"));
+        assert!(!is_valid_readiness_url("https://127.0.0.1:41234"));
+        assert!(!is_valid_readiness_url("http://127.0.0.1:41234/some/path"));
+        assert!(!is_valid_readiness_url("http://127.0.0.1:41234?q=1"));
+        assert!(!is_valid_readiness_url("http://user@127.0.0.1:41234"));
+        assert!(!is_valid_readiness_url("http://192.168.1.5:41234"));
+        assert!(!is_valid_readiness_url("http://127.0.0.1:41234#frag"));
+        assert!(!is_valid_readiness_url("not a url"));
+        assert!(!is_valid_readiness_url(""));
     }
 }

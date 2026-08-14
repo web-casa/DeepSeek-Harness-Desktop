@@ -122,3 +122,44 @@ const outPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src-tauri",
 mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, encodePng(rgba, SIZE));
 console.log(`✓ icon source written → ${outPath}`);
+
+// ---------------------------------------------------------------------------
+// Tray template icon (32px, monochrome black ring, transparent background).
+// macOS uses template images (auto light/dark); Windows/Linux tint per theme.
+// ---------------------------------------------------------------------------
+function genTrayTemplate(): void {
+  const S = 32;
+  const cx = S / 2 - 0.5;
+  const cy = S / 2 - 0.5;
+  const R_OUT = 13;
+  const R_IN = 10;
+  const CORE = 4.5;
+  const rgba = Buffer.alloc(S * S * 4);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      const hit = d <= CORE || (d >= R_IN && d <= R_OUT);
+      const i = (y * S + x) * 4;
+      // 2×2 supersample for smooth edges.
+      let a = 0;
+      for (const [ox, oy] of [
+        [0.25, 0.25],
+        [0.75, 0.25],
+        [0.25, 0.75],
+        [0.75, 0.75],
+      ]) {
+        const dd = Math.hypot(x + ox - cx, y + oy - cy);
+        if (dd <= CORE || (dd >= R_IN && dd <= R_OUT)) a += 255;
+      }
+      rgba[i] = 0;
+      rgba[i + 1] = 0;
+      rgba[i + 2] = 0;
+      rgba[i + 3] = Math.round(a / 4);
+    }
+  }
+  const outPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src-tauri", "icons", "tray-template.png");
+  writeFileSync(outPath, encodePng(rgba, S));
+  console.log(`✓ tray template icon written → ${outPath}`);
+}
+
+genTrayTemplate();

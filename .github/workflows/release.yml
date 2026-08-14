@@ -43,6 +43,9 @@ jobs:
         with:
           version: 11
 
+      - name: Release preflight (versions, checksums, npm policy)
+        run: node scripts/release-preflight.ts
+
       - name: Frontend dependencies
         run: pnpm install --frozen-lockfile
 
@@ -101,6 +104,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      # The tag must be bound to the version it publishes: v9.9.9 must never
+      # ship artifacts whose embedded desktop version is 0.1.0.
+      - name: Release preflight (tag binding)
+        run: node scripts/release-preflight.ts --expect-tag ${{ github.ref_name }}
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts

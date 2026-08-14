@@ -126,10 +126,19 @@ pub fn extract_local_url(line: &str) -> Option<String> {
     let rest = &line[idx + MARKER.len()..];
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
-        None
-    } else {
-        Some(format!("http://127.0.0.1:{digits}"))
+        return None;
     }
+    // Port must be followed by a delimiter: end of line or the documented
+    // " (LAN: …)" suffix. `123abc` must not silently become port 123.
+    match rest.chars().nth(digits.len()) {
+        None | Some(' ') => {}
+        _ => return None,
+    }
+    let port: u16 = digits.parse().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some(format!("http://127.0.0.1:{port}"))
 }
 
 /// A command received over stdin.
@@ -625,6 +634,11 @@ mod tests {
         assert_eq!(extract_local_url("dsh web: listening"), None);
         assert_eq!(extract_local_url("http://127.0.0.1:80"), None);
         assert_eq!(extract_local_url(""), None);
+        // Malformed ports must be rejected, never silently truncated.
+        assert_eq!(extract_local_url("dsh web: http://127.0.0.1:0"), None);
+        assert_eq!(extract_local_url("dsh web: http://127.0.0.1:123abc"), None);
+        assert_eq!(extract_local_url("dsh web: http://127.0.0.1:70000"), None);
+        assert_eq!(extract_local_url("dsh web: http://127.0.0.1:49321x"), None);
     }
 
     #[test]
@@ -779,10 +793,14 @@ mod tests {
             }
 
             #[test]
-            fn extract_local_url_parses_any_port(port in 0u32..=65535) {
+            fn extract_local_url_parses_any_port(port in 0u32..=99_999) {
                 let line = format!("dsh web: http://127.0.0.1:{port}");
                 let parsed = extract_local_url(&line);
-                let expected = line.strip_prefix("dsh web: ").map(str::to_string);
+                let expected = if (1..=65_535).contains(&port) {
+                    line.strip_prefix("dsh web: ").map(str::to_string)
+                } else {
+                    None
+                };
                 prop_assert_eq!(parsed, expected);
             }
 

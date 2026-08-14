@@ -5,8 +5,8 @@
 //! Harness WebView has an empty capability set and cannot invoke anything.
 
 use crate::harness::{
-    child_alive, open_harness_window, reset_restart_attempts, respawn_sidecar, send_raw,
-    snapshot_payload, Runtime, CMD_ID_RESTART, CMD_ID_SHUTDOWN,
+    child_alive, open_harness_window, publish_snapshot, request_restart, send_raw,
+    snapshot_payload, Runtime, CMD_ID_SHUTDOWN,
 };
 use serde_json::Value;
 use tauri::{AppHandle, State};
@@ -58,54 +58,13 @@ pub fn get_versions(runtime: State<'_, Runtime>) -> Value {
 }
 
 #[tauri::command]
-pub fn restart(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String> {
-    // Sidecar died: relaunch the whole chain instead of asking the user to
-    // restart the app.
-    if !child_alive(&runtime) {
-        let respawned = respawn_sidecar(&app);
-        if let Err(e) = respawned {
-            let mut s = runtime
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            s.last_error = Some(e.clone());
-            s.status = crate::harness::Status::Crashed;
-            return Err(e);
-        }
-        reset_restart_attempts(&runtime);
-        let mut s = runtime
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        s.last_error = None;
-        return Ok(());
-    }
-
-    if let Err(error) = send_raw(
-        &runtime,
-        &serde_json::json!({"id": CMD_ID_RESTART, "command": "restart"}),
-    ) {
-        let mut s = runtime
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        s.last_error = Some(error.clone());
-        s.status = crate::harness::Status::Crashed;
-        return Err(error);
-    }
-
-    reset_restart_attempts(&runtime);
-    let mut s = runtime
-        .state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    s.last_error = None;
-    s.status = crate::harness::Status::Starting;
-    Ok(())
+pub fn restart(_runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String> {
+    // Unified restart: sidecar alive → restart command; dead → full respawn.
+    request_restart(&app)
 }
 
 #[tauri::command]
-pub fn shutdown(runtime: State<'_, Runtime>) -> Result<(), String> {
+pub fn shutdown(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String> {
     if !child_alive(&runtime) {
         // Keep the real status (Stopped/Idle stays what it is) — only the
         // message explains why nothing happened.
@@ -115,6 +74,7 @@ pub fn shutdown(runtime: State<'_, Runtime>) -> Result<(), String> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .last_error = Some(error.clone());
+        publish_snapshot(&app, &runtime.state);
         return Err(error);
     }
 
@@ -128,6 +88,7 @@ pub fn shutdown(runtime: State<'_, Runtime>) -> Result<(), String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         s.last_error = Some(error.clone());
         s.status = crate::harness::Status::Crashed;
+        publish_snapshot(&app, &runtime.state);
         return Err(error);
     }
 
