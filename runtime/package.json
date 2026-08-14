@@ -1,0 +1,9 @@
+{
+  "name": "dsh-desktop-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Bundled DeepSeek Harness runtime for the desktop packaging. Pin exactly; upgrades happen only through prepare-harness + CI smoke.",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.6"
+  }
+}

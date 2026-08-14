@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "bootstrap",
+  "description": "Trusted local bootstrap/settings UI. Core defaults plus the app's own commands (gated by the app ACL generated in build.rs).",
+  "windows": ["bootstrap"],
+  "permissions": [
+    "core:default",
+    "allow-get-status",
+    "allow-get-logs",
+    "allow-get-versions",
+    "allow-restart",
+    "allow-shutdown",
+    "allow-open-harness"
+  ]
+}

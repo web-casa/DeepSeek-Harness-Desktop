@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "harness",
+  "description": "The remote Harness WebView (http://127.0.0.1:<port>). Deliberately empty: this webview has NO IPC surface — no core modules, no app commands, no shell/fs/process. It can only talk HTTP to the local Harness server.",
+  "windows": ["harness"],
+  "permissions": []
+}

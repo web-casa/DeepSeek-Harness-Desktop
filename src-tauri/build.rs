@@ -1,0 +1,16 @@
+fn main() {
+    // App-level ACL: only windows whose capability grants the generated
+    // `allow-<command>` permissions may invoke these commands. The remote
+    // Harness WebView ("harness" window) has an empty capability set, so it
+    // gets zero IPC surface even though it renders in the same app.
+    let manifest = tauri_build::AppManifest::new().commands(&[
+        "get_status",
+        "get_logs",
+        "get_versions",
+        "restart",
+        "shutdown",
+        "open_harness",
+    ]);
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
+        .expect("failed to run tauri-build");
+}

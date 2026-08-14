@@ -1,0 +1,70 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    name: Unit tests & frontend (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Sidecar unit tests
+        run: cargo test --manifest-path crates/dsh-sidecar/Cargo.toml
+
+      - name: Sidecar cross-target checks (Windows + macOS)
+        run: |
+          rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
+          cargo check --target x86_64-pc-windows-msvc --manifest-path crates/dsh-sidecar/Cargo.toml
+          cargo check --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml
+
+      - name: Frontend install & build
+        run: pnpm install --frozen-lockfile && pnpm build
+
+  smoke:
+    name: Runtime smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      # The exact P0 acceptance chain, on every platform:
+      # sidecar → bundled node → dsh web --port 0 → readiness → HTTP 200
+      # → restart → HTTP 200 → shutdown → no orphan processes.
+      - name: Download bundled Node
+        run: node scripts/download-node.ts
+
+      - name: Build sidecar (host triple)
+        run: node scripts/build-sidecar.ts
+
+      - name: Prepare Harness runtime
+        run: node scripts/prepare-harness.ts
+
+      - name: Runtime smoke
+        run: node scripts/verify-runtime.ts
