@@ -101,6 +101,9 @@ jobs:
       - name: Heartbeat simulator self-test
         run: node scripts/verify-heartbeat.ts --self-test
 
+      - name: Signing verifier self-test
+        run: node scripts/verify-signing.ts --self-test
+
   # Lint the #[cfg(windows)] code the Linux job cannot compile: the Tauri
   # shell's Windows-only paths (tray, window events) and the sidecar's hand-
   # rolled console/Job code. Runs on a Windows runner where llvm-rc exists

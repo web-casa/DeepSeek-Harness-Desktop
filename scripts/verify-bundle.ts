@@ -16,6 +16,7 @@ import {
   lstatSync,
   mkdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -158,6 +159,23 @@ Size = 2001
     fail("self-test: parser must exclude the archive-level header block");
   }
   ok("self-test: 7z -slt parser excludes header block, handles spaces and backslashes");
+
+  // assertExecutable: fixtures with and without the exec bit.
+  const exeFixture = join(tmpDir, "vbs-exe-fixture");
+  writeFileSync(exeFixture, "#!/bin/sh\necho hi\n", { mode: 0o755 });
+  const noExeFixture = join(tmpDir, "vbs-noexe-fixture");
+  writeFileSync(noExeFixture, "plain", { mode: 0o644 });
+  assertExecutable(exeFixture, "fixture (exec)");
+  let rejected = false;
+  try {
+    assertExecutable(noExeFixture, "fixture (no exec)");
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) fail("self-test: assertExecutable accepted a non-executable file");
+  rmSync(exeFixture, { force: true });
+  rmSync(noExeFixture, { force: true });
+  ok("self-test: assertExecutable enforces the exec bit");
 }
 
 function extractNsisFile(artifact: string, innerPath: string, outDir: string): string {
@@ -231,6 +249,29 @@ function countSymlinks(root: string): number {
   };
   scan(root);
   return links;
+}
+
+/// Unsigned-arm64 hardening (community finding): binaries must carry exec
+/// bits straight out of the DMG, or the app dies with "permission denied".
+function assertExecutable(path: string, label: string): void {
+  const mode = lstatSync(path).mode;
+  if ((mode & 0o111) === 0) {
+    throw new Error(`${label} is not executable (mode ${(mode & 0o777).toString(8)})`);
+  }
+  ok(`${label} is executable`);
+}
+
+/// Build hygiene, NOT a signing claim: Gatekeeper stamps com.apple.quarantine
+/// on downloads; a locally built DMG must never carry it. (Signed or
+/// unsigned is decided elsewhere — see verify-signing.ts.)
+function assertNoQuarantine(path: string, label: string): void {
+  const res = spawnSync("xattr", ["-p", "com.apple.quarantine", path], {
+    encoding: "utf8",
+  });
+  if (res.status === 0) {
+    throw new Error(`${label} carries com.apple.quarantine (${(res.stdout ?? "").trim()})`);
+  }
+  ok(`${label} has no quarantine attribute`);
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +381,23 @@ function runDmgChecks(): void {
       throw new Error(`bundled harness tree contains ${links} symlink(s)`);
     }
     ok("bundled harness tree is fully materialized (no symlinks)");
+
+    // Unsigned-arm64 hardening: the main binary and the bundled runtime
+    // binaries must be executable straight out of the DMG, and the bundle
+    // must carry no Gatekeeper quarantine (build hygiene).
+    assertExecutable(
+      join(appRoot, "Contents", "MacOS", "deepseek-harness-desktop"),
+      "main binary",
+    );
+    assertExecutable(
+      join(appRoot, "Contents", "Resources", "runtime", "sidecar"),
+      "sidecar binary",
+    );
+    assertExecutable(
+      join(appRoot, "Contents", "Resources", "runtime", "node"),
+      "bundled node",
+    );
+    assertNoQuarantine(appRoot, "app bundle");
 
     checkBinaryType(
       join(appRoot, "Contents", "MacOS", "deepseek-harness-desktop"),

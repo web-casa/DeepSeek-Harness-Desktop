@@ -113,6 +113,15 @@ jobs:
       - name: Verify bundle contents
         run: node scripts/verify-bundle.ts --bundle ${{ matrix.bundle }}
 
+      # Conditional signing verification: with signing secrets present the
+      # artifact MUST verify (fail-closed); without them the build must be
+      # genuinely unsigned (warn-level) so signing state can never drift.
+      - name: Verify signing state
+        run: node scripts/verify-signing.ts --bundle ${{ matrix.bundle }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+
       # Unsigned distribution: give users a checksum file for verification.
       - name: Emit SHA-256 checksum
         run: node scripts/checksums.ts --bundle ${{ matrix.bundle }}
