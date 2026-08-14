@@ -252,6 +252,68 @@ fn env_ms(name: &str, default: u64) -> Duration {
         .unwrap_or(Duration::from_millis(default))
 }
 
+// ---------------------------------------------------------------------------
+// Child environment hygiene: the sidecar inherits the parent's (Tauri shell's)
+// environment and forwards it to the bundled Node. A user launching the app
+// from a shell with NODE_OPTIONS / NODE_PATH / npm_config_* set would otherwise
+// inject code (`--require=…`) or config into the Harness process. These keys
+// are stripped before spawn. The `env` overrides carried by the start command
+// are applied AFTER the filter and are NOT filtered — they are the app's own
+// contract (DSH_HOME etc.). Also scrubbed: ELECTRON_RUN_AS_NODE, which would
+// turn a bundled Electron's node into a Harness host if one is ever reused.
+// ---------------------------------------------------------------------------
+
+const FORBIDDEN_ENV_KEYS: [&str; 3] = ["node_options", "node_path", "electron_run_as_node"];
+const FORBIDDEN_ENV_PREFIX: &str = "npm_config_";
+
+fn env_key_forbidden(key: &str) -> bool {
+    let folded = key.to_ascii_lowercase();
+    FORBIDDEN_ENV_KEYS.contains(&folded.as_str()) || folded.starts_with(FORBIDDEN_ENV_PREFIX)
+}
+
+/// Filter an inherited environment snapshot (String form — the unix path).
+pub fn sanitize_inherited_env(vars: Vec<(String, String)>) -> Vec<(String, String)> {
+    vars.into_iter()
+        .filter(|(k, _)| !env_key_forbidden(k))
+        .collect()
+}
+
+/// ASCII case fold for one UTF-16 code unit (non-ASCII units unchanged).
+/// Windows env-key lookups are nominally case-insensitive per NLS, but every
+/// key this project filters is ASCII, so ASCII folding is exact here and
+/// leaves non-ASCII units (unpaired surrogates included) untouched.
+pub(crate) fn fold_ascii_u16(w: u16) -> u16 {
+    if (b'A' as u16..=b'Z' as u16).contains(&w) {
+        w + (b'a' - b'A') as u16
+    } else {
+        w
+    }
+}
+
+/// Filter raw UTF-16 env-block lines (the Windows path) WITHOUT any UTF-8
+/// round-trip: untouched entries — including ones containing unpaired
+/// surrogates — are forwarded verbatim. Entries without '=' and entries with
+/// an empty key (the `=C:=…` per-drive entries) are never filter targets.
+pub fn sanitize_env_lines(lines: Vec<Vec<u16>>) -> Vec<Vec<u16>> {
+    let prefix: Vec<u16> = FORBIDDEN_ENV_PREFIX.encode_utf16().collect();
+    lines
+        .into_iter()
+        .filter(|line| {
+            let Some(eq) = line.iter().position(|&w| w == b'=' as u16) else {
+                return true; // malformed entry without '=': forward untouched
+            };
+            if eq == 0 {
+                return true; // hidden/drive entry (`=C:=…`): keep
+            }
+            let folded: Vec<u16> = line[..eq].iter().map(|&w| fold_ascii_u16(w)).collect();
+            !FORBIDDEN_ENV_KEYS
+                .iter()
+                .any(|k| folded == k.encode_utf16().collect::<Vec<u16>>())
+                && !folded.starts_with(&prefix)
+        })
+        .collect()
+}
+
 fn ack_ok(id: Option<u64>) {
     emit(json!({"type":"ack","id":id,"ok":true}));
 }
@@ -981,6 +1043,69 @@ mod tests {
                 wait_exit(&mut child, Duration::from_secs(10)).expect("child did not exit");
             assert_eq!(status.code(), Some(0));
         }
+
+        #[test]
+        fn inherited_node_env_is_sanitized_for_the_child() {
+            // The injection chain this guards against: user shell env →
+            // sidecar → bundled Node. Set the poison in OUR process env before
+            // spawn; the child must not see it (its env snapshot is taken at
+            // spawn), while ordinary keys (PATH) still flow through.
+            std::env::set_var("NODE_OPTIONS", "--require=/evil.js");
+            std::env::set_var("npm_config_cache", "/tmp/evil-cache");
+            let child = PlatformChild::spawn(&spec(
+                "test -z \"${NODE_OPTIONS}\" && test -z \"${npm_config_cache}\" && test -n \"${PATH}\"",
+            ));
+            std::env::remove_var("NODE_OPTIONS");
+            std::env::remove_var("npm_config_cache");
+            let mut child = child.unwrap();
+            let status =
+                wait_exit(&mut child, Duration::from_secs(10)).expect("child did not exit");
+            assert_eq!(status.code(), Some(0));
+        }
+    }
+
+    #[test]
+    fn sanitizes_inherited_env_strings() {
+        let vars = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("NODE_OPTIONS".to_string(), "--require=/evil".to_string()),
+            ("node_path".to_string(), "/evil".to_string()),
+            ("npm_config_cache".to_string(), "/c".to_string()),
+            ("Npm_Config_Foo".to_string(), "1".to_string()),
+            ("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string()),
+            ("HOME".to_string(), "/home/u".to_string()),
+        ];
+        let out = sanitize_inherited_env(vars);
+        let keys: Vec<&str> = out.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["PATH", "HOME"]);
+    }
+
+    #[test]
+    fn sanitizes_utf16_env_lines_without_roundtrip() {
+        fn u(s: &str) -> Vec<u16> {
+            s.encode_utf16().collect()
+        }
+        // A lone high surrogate in an UNRELATED entry must survive verbatim:
+        // the sanitizer never round-trips through UTF-8.
+        let mut path_line = u("PATH=");
+        path_line.push(0xD800);
+        let lines = vec![
+            u("NODE_OPTIONS=--require=x"),
+            u("npm_config_foo=1"),
+            u("Node_Path=/evil"),
+            path_line,
+            u("=C:=C:\\dir"),
+            u("NO_EQUALS"),
+            u("HOME=/u"),
+        ];
+        let out = sanitize_env_lines(lines);
+        assert_eq!(out.len(), 4);
+        let mut want_path = u("PATH=");
+        want_path.push(0xD800);
+        assert_eq!(out[0], want_path);
+        assert_eq!(out[1], u("=C:=C:\\dir"));
+        assert_eq!(out[2], u("NO_EQUALS"));
+        assert_eq!(out[3], u("HOME=/u"));
     }
 
     #[test]

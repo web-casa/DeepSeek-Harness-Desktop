@@ -44,9 +44,18 @@ mod imp {
     impl PlatformChild {
         pub fn spawn(spec: &SpawnSpec) -> io::Result<Self> {
             let mut cmd = Command::new(&spec.node);
-            cmd.arg(&spec.script)
+            // Injection-safe environment: Command inherits the FULL parent
+            // env by default and `.envs()` only overlays — so a key omitted
+            // from the overlay would still leak through. env_clear() first,
+            // then re-add the sanitized snapshot (parent env minus node/npm
+            // control keys), then the start command's own overrides (DSH_HOME
+            // etc.) which are exempt from the filter by design.
+            let inherited = crate::sanitize_inherited_env(std::env::vars().collect());
+            cmd.env_clear()
+                .arg(&spec.script)
                 .args(&spec.args)
                 .current_dir(&spec.cwd)
+                .envs(inherited)
                 .envs(spec.env.iter().map(|(k, v)| (k, v)))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -294,6 +303,11 @@ mod imp {
         }
         unsafe { FreeEnvironmentStringsW(raw) };
 
+        // Injection-safe environment: strip node/npm control keys at the
+        // UTF-16 level (no lossy round-trip), then apply the overrides —
+        // overrides come last, so they win and are exempt from the filter.
+        let mut lines = crate::sanitize_env_lines(lines);
+
         for (key, value) in overrides {
             let mut entry: Vec<u16> = key.encode_utf16().collect();
             entry.push(b'=' as u16);
@@ -301,14 +315,14 @@ mod imp {
             // ASCII-folded `KEY=` prefix, compared at the UTF-16 level.
             let prefix: Vec<u16> = key
                 .encode_utf16()
-                .map(fold_ascii)
+                .map(crate::fold_ascii_u16)
                 .chain(std::iter::once(b'=' as u16))
                 .collect();
             let matches = |l: &[u16]| {
                 l.len() >= prefix.len()
                     && l[..prefix.len()]
                         .iter()
-                        .map(|&w| fold_ascii(w))
+                        .map(|&w| crate::fold_ascii_u16(w))
                         .eq(prefix.iter().copied())
             };
             match lines.iter_mut().find(|l| matches(l)) {
@@ -324,19 +338,6 @@ mod imp {
         }
         block.push(0); // double null terminator
         Ok(block)
-    }
-
-    /// ASCII case fold for one UTF-16 code unit (non-ASCII units unchanged).
-    /// Windows env-key lookups are nominally case-insensitive per NLS, but
-    /// every key this project sets is ASCII, so ASCII folding is exact for
-    /// our overrides and at least as predictable as a full Unicode fold
-    /// (e.g. Rust's `to_lowercase` is not length-preserving for all inputs).
-    fn fold_ascii(w: u16) -> u16 {
-        if (b'A' as u16..=b'Z' as u16).contains(&w) {
-            w + (b'a' - b'A') as u16
-        } else {
-            w
-        }
     }
 
     impl PlatformChild {

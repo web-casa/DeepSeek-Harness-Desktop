@@ -665,7 +665,10 @@ fn start_harness(runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> 
         "script": dsh_bin,
         "args": ["web", "--host", "127.0.0.1", "--port", "0"],
         "cwd": paths.harness_dir,
-        "env": { "DSH_HOME": paths.dsh_home },
+        // DSH_HOME: the harness' own data root. DSH_TELEMETRY_DISABLED:
+        // upstream dsh honors any non-empty value by disabling the
+        // session-telemetry row — a community wrapper defaults to OFF.
+        "env": { "DSH_HOME": paths.dsh_home, "DSH_TELEMETRY_DISABLED": "1" },
     });
     send_raw(runtime, &cmd)?;
     runtime

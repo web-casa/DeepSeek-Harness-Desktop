@@ -172,7 +172,9 @@ async function main(): Promise<void> {
     script: dshBin,
     args: ["web", "--host", "127.0.0.1", "--port", "0"],
     cwd: harnessDir,
-    env: { DSH_HOME: dshHome },
+    // Keep this env in lockstep with src-tauri/src/harness/mod.rs
+    // (start_harness): the smoke must exercise the production contract.
+    env: { DSH_HOME: dshHome, DSH_TELEMETRY_DISABLED: "1" },
   });
   info("waiting for readiness line…");
   const ready = await waitFor((e) => e.type === "ready", "ready", 180_000);
