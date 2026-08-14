@@ -2,6 +2,8 @@
 // keep it for `cargo run` logging.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use tauri::Manager;
+
 mod commands;
 mod harness;
 mod paths;
@@ -19,6 +21,19 @@ fn main() {
     });
 
     builder
+        // Second launch focuses the existing windows instead of booting a
+        // second Harness tree.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            for label in ["bootstrap", "harness"] {
+                if let Some(win) = app.get_webview_window(label) {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            }
+        }))
+        // Persists/restores window size & position automatically.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
             harness::init(&app.handle().clone());
             Ok(())
@@ -27,6 +42,7 @@ fn main() {
             commands::get_status,
             commands::get_logs,
             commands::get_versions,
+            commands::get_diagnostics,
             commands::restart,
             commands::shutdown,
             commands::open_harness

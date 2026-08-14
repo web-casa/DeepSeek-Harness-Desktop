@@ -7,6 +7,7 @@ fn main() {
         "get_status",
         "get_logs",
         "get_versions",
+        "get_diagnostics",
         "restart",
         "shutdown",
         "open_harness",

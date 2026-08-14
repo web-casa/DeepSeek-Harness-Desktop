@@ -22,11 +22,14 @@ export interface StatusPayload {
   pid: number | null;
   lastError: string | null;
   versions?: Versions;
+  dshHome?: string | null;
 }
 
 export const getStatus = (): Promise<StatusPayload> => invoke("get_status");
 export const getLogs = (): Promise<[string, string][]> => invoke("get_logs");
 export const getVersions = (): Promise<Versions> => invoke("get_versions");
+export const getDiagnostics = (): Promise<Record<string, unknown>> =>
+  invoke("get_diagnostics");
 export const restart = (): Promise<void> => invoke("restart");
 export const shutdown = (): Promise<void> => invoke("shutdown");
 export const openHarness = (): Promise<void> => invoke("open_harness");

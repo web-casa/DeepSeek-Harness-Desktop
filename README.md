@@ -109,13 +109,16 @@ Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
   → tag v* 发版（新 Node/新 Harness 随 Desktop 一起更新）
 ```
 
-## 当前状态与已知边界（P0）
+## 当前状态与已知边界（P1）
 
-- ✅ sidecar 三平台编译通过（linux-arm64 本机、win-msvc、mac-arm64 cargo check）
-- ✅ 本机端到端冒烟全绿：boot → readiness → HTTP 200 → restart → HTTP 200 → shutdown → 无孤儿
-- ✅ 真实 Tauri 应用在 Xvfb 下运行验证：app → sidecar → node → dsh web 全链 + DSH_HOME 完整初始化 + 组信号杀后零残留
+- ✅ sidecar 三平台编译通过；本机端到端冒烟全绿（含重定位冒烟：副本 runtime 独立运行）
+- ✅ 真实 Tauri 应用验证：app → sidecar → node → dsh web 全链、DSH_HOME 完整初始化、
+  组信号杀后零残留、退出无孤儿
+- ✅ P1：单实例锁（第二实例秒退并聚焦已有窗口）、窗口尺寸/位置记忆（window-state）、
+  崩溃自动恢复（1s/2s/4s backoff，最多 3 次后停止）、diagnostics 一键复制、
+  macOS 关闭窗口=隐藏
 - ⏳ Windows/macOS 冒烟与打包由 CI 验证（本仓库尚未推送远端）
-- ⏳ 未接入：代码签名 / 公证 / 自动更新 / 插件安装（bundled pnpm）/ 单实例锁
+- ⏳ 未接入：代码签名 / 公证 / 自动更新 / 插件安装（bundled pnpm）
 - 未签名构建：Windows SmartScreen、macOS Gatekeeper 需要用户手动放行
 - Linux 仅为开发环境，不作为发行目标；node-pty 在 Linux dev 下无 prebuild
   （Web UI 启动不受影响；Windows/macOS 发行包自带对应 prebuild）

@@ -4,6 +4,7 @@
     getStatus,
     getLogs,
     getVersions,
+    getDiagnostics,
     restart,
     shutdown,
     openHarness,
@@ -86,19 +87,12 @@
   }
 
   async function copyDiagnostics() {
-    const payload = {
-      status,
-      url,
-      pid,
-      lastError,
-      versions,
-      logsTail: logs.slice(-60),
-    };
     try {
+      const payload = await getDiagnostics();
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
       showToast("诊断信息已复制到剪贴板");
-    } catch {
-      showToast("复制失败（剪贴板不可用）");
+    } catch (e) {
+      showToast(`复制失败：${e}`);
     }
   }
 

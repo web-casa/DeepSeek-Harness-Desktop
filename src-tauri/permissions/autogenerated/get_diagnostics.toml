@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-diagnostics"
+description = "Enables the get_diagnostics command without any pre-configured scope."
+commands.allow = ["get_diagnostics"]
+
+[[permission]]
+identifier = "deny-get-diagnostics"
+description = "Denies the get_diagnostics command without any pre-configured scope."
+commands.deny = ["get_diagnostics"]

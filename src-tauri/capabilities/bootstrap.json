@@ -8,6 +8,7 @@
     "allow-get-status",
     "allow-get-logs",
     "allow-get-versions",
+    "allow-get-diagnostics",
     "allow-restart",
     "allow-shutdown",
     "allow-open-harness"

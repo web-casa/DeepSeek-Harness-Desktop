@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -43,6 +43,7 @@ pub struct SharedState {
     pub last_error: Option<String>,
     pub logs: Vec<(String, String)>,
     pub versions: Versions,
+    pub dsh_home: Option<String>,
 }
 
 pub struct Runtime {
@@ -50,6 +51,44 @@ pub struct Runtime {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Arc<Mutex<Option<Child>>>,
     shutting_down: Arc<AtomicBool>,
+    restart_attempts: Arc<AtomicU32>,
+}
+
+/// Crash auto-restart policy: up to this many consecutive attempts with
+/// exponential backoff, then give up and surface the error.
+const MAX_RESTART_ATTEMPTS: u32 = 3;
+
+/// Send a raw command line through the sidecar stdin, if available.
+fn send_restart(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
+    let mut stdin = stdin.lock().unwrap();
+    if let Some(stdin) = stdin.as_mut() {
+        let _ = writeln!(stdin, "{{\"id\":100,\"command\":\"restart\"}}");
+        let _ = stdin.flush();
+    }
+}
+
+/// Schedule a crash auto-restart with exponential backoff (1s, 2s, 4s…).
+fn schedule_auto_restart(
+    state: &Arc<Mutex<SharedState>>,
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    shutting_down: &Arc<AtomicBool>,
+    attempts: u32,
+) {
+    let state_c = state.clone();
+    let stdin_c = stdin.clone();
+    let shutting_down_c = shutting_down.clone();
+    std::thread::spawn(move || {
+        let backoff = std::time::Duration::from_secs(1u64 << (attempts.saturating_sub(1).min(3)));
+        std::thread::sleep(backoff);
+        if shutting_down_c.load(Ordering::SeqCst) {
+            return;
+        }
+        {
+            let mut s = state_c.lock().unwrap();
+            s.status = Status::Starting;
+        }
+        send_restart(&stdin_c);
+    });
 }
 
 fn log_line(state: &Mutex<SharedState>, stream: &str, line: &str) {
@@ -105,6 +144,8 @@ fn handle_event(
     app: &AppHandle,
     state: &Arc<Mutex<SharedState>>,
     stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    shutting_down: &Arc<AtomicBool>,
+    restart_attempts: &Arc<AtomicU32>,
     ev: &Value,
 ) {
     let ty = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -138,6 +179,8 @@ fn handle_event(
                 s.url = Some(url.clone());
                 s.last_error = None;
             }
+            // A successful boot resets the crash counter.
+            restart_attempts.store(0, Ordering::SeqCst);
             refresh_pid(stdin);
             open_harness_window(app, &url);
         }
@@ -154,12 +197,26 @@ fn handle_event(
         }
         "crashed" => {
             let code = ev.get("code").and_then(|v| v.as_i64());
-            let msg = ev
-                .get("message")
-                .and_then(|v| v.as_str())
-                .map(|m| format!("Harness 进程异常退出 (code {code:?}): {m}"))
-                .unwrap_or_else(|| format!("Harness 进程异常退出 (code {code:?})"));
-            set_error(state, msg);
+            if shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            let attempts = restart_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempts <= MAX_RESTART_ATTEMPTS {
+                {
+                    let mut s = state.lock().unwrap();
+                    s.last_error = Some(format!(
+                        "Harness 进程异常退出 (code {code:?})，正在自动重启（第 {attempts}/{MAX_RESTART_ATTEMPTS} 次）…"
+                    ));
+                }
+                schedule_auto_restart(state, stdin, shutting_down, attempts);
+            } else {
+                set_error(
+                    state,
+                    format!(
+                        "Harness 进程异常退出 (code {code:?})；已连续崩溃 {MAX_RESTART_ATTEMPTS} 次，停止自动重启"
+                    ),
+                );
+            }
         }
         "error" => {
             let msg = ev
@@ -195,7 +252,13 @@ pub fn snapshot_payload(state: &Arc<Mutex<SharedState>>) -> Value {
         "pid": s.pid,
         "lastError": s.last_error,
         "versions": s.versions,
+        "dshHome": s.dsh_home,
     })
+}
+
+/// Reset the crash auto-restart counter (user-initiated restarts start fresh).
+pub fn reset_restart_attempts(runtime: &Runtime) {
+    runtime.restart_attempts.store(0, Ordering::SeqCst);
 }
 
 fn read_versions(paths: &RuntimePaths) -> Versions {
@@ -229,6 +292,7 @@ pub fn init(app: &AppHandle) {
     let stdin_arc: Arc<Mutex<Option<ChildStdin>>> = Arc::new(Mutex::new(None));
     let child_arc: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
     let shutting_down = Arc::new(AtomicBool::new(false));
+    let restart_attempts = Arc::new(AtomicU32::new(0));
     let paths = match resolve(app) {
         Ok(paths) => paths,
         Err(e) => {
@@ -239,6 +303,7 @@ pub fn init(app: &AppHandle) {
                 stdin: stdin_arc.clone(),
                 child: child_arc.clone(),
                 shutting_down: shutting_down.clone(),
+                restart_attempts: restart_attempts.clone(),
             });
             return;
         }
@@ -255,6 +320,7 @@ pub fn init(app: &AppHandle) {
             stdin: stdin_arc.clone(),
             child: child_arc.clone(),
             shutting_down: shutting_down.clone(),
+            restart_attempts: restart_attempts.clone(),
         });
         return;
     }
@@ -271,6 +337,7 @@ pub fn init(app: &AppHandle) {
                 stdin: stdin_arc.clone(),
                 child: child_arc.clone(),
                 shutting_down: shutting_down.clone(),
+                restart_attempts: restart_attempts.clone(),
             });
             return;
         }
@@ -286,6 +353,7 @@ pub fn init(app: &AppHandle) {
                 stdin: stdin_arc.clone(),
                 child: child_arc.clone(),
                 shutting_down: shutting_down.clone(),
+                restart_attempts: restart_attempts.clone(),
             });
             return;
         }
@@ -306,6 +374,7 @@ pub fn init(app: &AppHandle) {
             stdin: stdin_arc.clone(),
             child: child_arc.clone(),
             shutting_down: shutting_down.clone(),
+            restart_attempts: restart_attempts.clone(),
         });
         return;
     }
@@ -314,6 +383,7 @@ pub fn init(app: &AppHandle) {
     let state = Arc::new(Mutex::new(SharedState {
         status: Status::Idle,
         versions,
+        dsh_home: Some(paths.dsh_home.display().to_string()),
         ..Default::default()
     }));
 
@@ -322,6 +392,7 @@ pub fn init(app: &AppHandle) {
         stdin: stdin_arc.clone(),
         child: child_arc.clone(),
         shutting_down: shutting_down.clone(),
+        restart_attempts: restart_attempts.clone(),
     });
     let runtime = app.state::<Runtime>();
 
@@ -406,10 +477,14 @@ pub fn init(app: &AppHandle) {
         let state_c = state.clone();
         let stdin_c = stdin_arc.clone();
         let app_c = app.clone();
+        let shutting_down_c = shutting_down.clone();
+        let attempts_c = restart_attempts.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 match serde_json::from_str::<Value>(&line) {
-                    Ok(ev) => handle_event(&app_c, &state_c, &stdin_c, &ev),
+                    Ok(ev) => {
+                        handle_event(&app_c, &state_c, &stdin_c, &shutting_down_c, &attempts_c, &ev)
+                    }
                     Err(_) => log_line(&state_c, "sidecar", &line),
                 }
             }
