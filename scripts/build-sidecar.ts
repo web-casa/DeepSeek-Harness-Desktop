@@ -1,13 +1,26 @@
 // Build the dsh-sidecar supervisor for the current host (or --target) and
 // stage it into src-tauri/resources/runtime/sidecar[.exe].
 
-import { existsSync, chmodSync, copyFileSync, mkdirSync } from "node:fs";
+import { existsSync, chmodSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { repoRoot, runtimeDir, sidecarPath, fail, ok, info } from "./lib/common.ts";
+import { repoRoot, runtimeDir, sidecarPath, readManifest, fail, ok, info } from "./lib/common.ts";
 
 const targetFlag = process.argv.indexOf("--target");
 const target = targetFlag >= 0 ? process.argv[targetFlag + 1] : undefined;
+
+// Cross-check: crates/dsh-sidecar/Cargo.toml version must match the manifest
+// (same single-source-of-truth policy as the harness version).
+const cargoToml = readFileSync(join(repoRoot, "crates", "dsh-sidecar", "Cargo.toml"), "utf8");
+const crateVersion = /^version = "([^"]+)"/m.exec(cargoToml)?.[1];
+const manifestVersion = readManifest().sidecarVersion;
+if (!crateVersion) fail("could not parse version from crates/dsh-sidecar/Cargo.toml");
+if (crateVersion !== manifestVersion) {
+  fail(
+    `version drift: crates/dsh-sidecar/Cargo.toml says ${crateVersion} but ` +
+      `runtime-manifest.json says ${manifestVersion}`,
+  );
+}
 
 function hostTriple(): string {
   const res = spawnSync("rustc", ["-vV"], { encoding: "utf8" });

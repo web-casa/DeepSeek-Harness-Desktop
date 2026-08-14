@@ -245,7 +245,8 @@ fn main() {
     ) = channel();
     let (cmd_tx, cmd_rx): (Sender<String>, Receiver<String>) = channel();
 
-    // stdin reader: commands in, parent-death detection out (EOF).
+    // stdin reader: commands in. Parent death is detected via channel
+    // disconnect below (the thread ends on stdin EOF, closing the sender).
     thread::spawn(move || {
         let stdin = std::io::stdin();
         for line in stdin.lock().lines().map_while(Result::ok) {
@@ -253,7 +254,6 @@ fn main() {
                 break;
             }
         }
-        let _ = cmd_tx.send(String::new()); // empty == EOF marker
     });
 
     let mut running: Option<Running> = None;
@@ -432,24 +432,8 @@ fn main() {
 
         // 4. Pump commands.
         match cmd_rx.try_recv() {
-            Ok(line) if line.is_empty() => {
-                // Parent went away: tear the tree down and exit.
-                if let Some(r) = running.as_ref() {
-                    r.child.force();
-                    let deadline = Instant::now() + shutdown_grace;
-                    while let Some(r) = running.as_mut() {
-                        if r.try_exit().is_some() {
-                            break;
-                        }
-                        if Instant::now() >= deadline {
-                            let _ = r.child.child.kill();
-                            let _ = r.try_exit();
-                            break;
-                        }
-                        thread::sleep(TICK);
-                    }
-                }
-                std::process::exit(0);
+            Ok(line) if line.trim().is_empty() => {
+                // Blank lines are ignored — no out-of-band sentinel protocol.
             }
             Ok(line) => match parse_command(&line) {
                 Ok((

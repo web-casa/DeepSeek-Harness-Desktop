@@ -5,7 +5,7 @@
 // .zip/.tar.gz, GNU tar on Linux handles .tar.xz), so the script has zero
 // npm dependencies.
 
-import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync, copyFileSync, readFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync, copyFileSync, createReadStream } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -85,7 +85,17 @@ if (!existsSync(archive)) {
 
 const expectedSha256 = manifest.nodeSha256[platformKey];
 if (!expectedSha256) fail(`runtime-manifest.json is missing nodeSha256 for ${platformKey}`);
-const actualSha256 = createHash("sha256").update(readFileSync(archive)).digest("hex");
+
+// Stream the archive through the hash instead of loading it into memory.
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  const stream = createReadStream(path);
+  for await (const chunk of stream) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
+}
+const actualSha256 = await sha256File(archive);
 if (actualSha256.toLowerCase() !== expectedSha256.toLowerCase()) {
   fail(`SHA-256 mismatch for ${dist.file}: expected ${expectedSha256}, got ${actualSha256}`);
 }

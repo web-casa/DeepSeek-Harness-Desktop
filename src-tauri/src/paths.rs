@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 use tauri::{path::BaseDirectory, Manager};
 
+#[derive(Clone)]
 pub struct RuntimePaths {
     pub sidecar: PathBuf,
     pub node: PathBuf,

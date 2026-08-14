@@ -78,11 +78,17 @@ jobs:
       - name: Verify bundle contents
         run: node scripts/verify-bundle.ts --bundle ${{ matrix.bundle }}
 
+      # Unsigned distribution: give users a checksum file for verification.
+      - name: Emit SHA-256 checksum
+        run: node scripts/checksums.ts --bundle ${{ matrix.bundle }}
+
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.glob }}
+          path: |
+            ${{ matrix.glob }}
+            ${{ matrix.glob }}.sha256
           if-no-files-found: error
 
   release:

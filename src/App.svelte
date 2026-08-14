@@ -146,7 +146,7 @@
       <span class="subtitle">桌面发行层 · 原版 Harness Web UI · 内置 Node Runtime</span>
     </div>
     <div class="spacer"></div>
-    <span class="badge">P0</span>
+    <span class="badge">v{versions.desktop}</span>
   </header>
 
   {#if !inTauri}

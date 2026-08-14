@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      frontend:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /runtime
+    schedule:
+      interval: weekly
+    groups:
+      harness-runtime:
+        patterns: ["*"]
+    # The bundled runtime is pinned via runtime-manifest.json — pull requests
+    # here still require the manifest + CI smoke update before merging.
+
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /crates/dsh-sidecar
+    schedule:
+      interval: weekly

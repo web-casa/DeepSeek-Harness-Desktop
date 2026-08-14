@@ -5,10 +5,11 @@
 //! Harness WebView has an empty capability set and cannot invoke anything.
 
 use crate::harness::{
-    child_alive, reset_restart_attempts, send_raw, snapshot_payload, Runtime,
+    child_alive, open_harness_window, reset_restart_attempts, respawn_sidecar, send_raw,
+    snapshot_payload, Runtime,
 };
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 #[tauri::command]
 pub fn get_status(runtime: State<'_, Runtime>) -> Value {
@@ -42,13 +43,21 @@ pub fn get_versions(runtime: State<'_, Runtime>) -> Value {
 }
 
 #[tauri::command]
-pub fn restart(runtime: State<'_, Runtime>) -> Result<(), String> {
+pub fn restart(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String> {
+    // Sidecar died: relaunch the whole chain instead of asking the user to
+    // restart the app.
     if !child_alive(&runtime) {
-        let error = "sidecar 未运行".to_string();
+        let respawned = respawn_sidecar(&app);
+        if let Err(e) = respawned {
+            let mut s = runtime.state.lock().unwrap();
+            s.last_error = Some(e.clone());
+            s.status = crate::harness::Status::Crashed;
+            return Err(e);
+        }
+        reset_restart_attempts(&runtime);
         let mut s = runtime.state.lock().unwrap();
-        s.last_error = Some(error.clone());
-        s.status = crate::harness::Status::Crashed;
-        return Err(error);
+        s.last_error = None;
+        return Ok(());
     }
 
     if let Err(error) = send_raw(
@@ -100,25 +109,6 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
         .url
         .clone()
         .ok_or_else(|| "Harness 尚未就绪".to_string())?;
-    let parsed = tauri::Url::parse(&url).map_err(|e| format!("无效 URL: {e}"))?;
-    let app = app.clone();
-    let app_in = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Some(win) = app_in.get_webview_window("harness") {
-            let _ = win.navigate(parsed.clone());
-            let _ = win.show();
-            let _ = win.set_focus();
-        } else {
-            let _ = tauri::WebviewWindowBuilder::new(
-                &app_in,
-                "harness",
-                tauri::WebviewUrl::External(parsed),
-            )
-            .title("DeepSeek Harness")
-            .inner_size(1280.0, 800.0)
-            .min_inner_size(960.0, 600.0)
-            .build();
-        }
-    });
+    open_harness_window(&app, &url);
     Ok(())
 }

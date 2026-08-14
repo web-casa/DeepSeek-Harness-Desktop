@@ -52,6 +52,7 @@ pub struct Runtime {
     child: Arc<Mutex<Option<Child>>>,
     shutting_down: Arc<AtomicBool>,
     restart_attempts: Arc<AtomicU32>,
+    paths: Option<RuntimePaths>,
 }
 
 /// Crash auto-restart policy: up to this many consecutive attempts with
@@ -115,10 +116,16 @@ fn refresh_pid(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
     }
 }
 
-fn open_harness_window(app: &AppHandle, url: &str) {
+/// Open (or focus) the harness window. The remote webview may only navigate
+/// to 127.0.0.1 — even with zero IPC permissions, a stray page link must not
+/// be able to turn the window into a general-purpose browser.
+pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
     let Ok(parsed) = tauri::Url::parse(url) else {
         return;
     };
+    if parsed.host_str() != Some("127.0.0.1") {
+        return;
+    }
     let app = app.clone();
     let app_in = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -135,6 +142,7 @@ fn open_harness_window(app: &AppHandle, url: &str) {
             .title("DeepSeek Harness")
             .inner_size(1280.0, 800.0)
             .min_inner_size(960.0, 600.0)
+            .on_navigation(|url| url.host_str() == Some("127.0.0.1"))
             .build();
         }
     });
@@ -287,116 +295,32 @@ fn read_versions(paths: &RuntimePaths) -> Versions {
     }
 }
 
-/// Spawn the sidecar, wire the reader thread, and auto-start the Harness.
-pub fn init(app: &AppHandle) {
-    let stdin_arc: Arc<Mutex<Option<ChildStdin>>> = Arc::new(Mutex::new(None));
-    let child_arc: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
-    let shutting_down = Arc::new(AtomicBool::new(false));
-    let restart_attempts = Arc::new(AtomicU32::new(0));
-    let paths = match resolve(app) {
-        Ok(paths) => paths,
-        Err(e) => {
-            let state = Arc::new(Mutex::new(SharedState::default()));
-            set_error(&state, e);
-            app.manage(Runtime {
-                state,
-                stdin: stdin_arc.clone(),
-                child: child_arc.clone(),
-                shutting_down: shutting_down.clone(),
-                restart_attempts: restart_attempts.clone(),
-            });
-            return;
-        }
-    };
-
-    if let Err(e) = std::fs::create_dir_all(&paths.dsh_home) {
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        set_error(
-            &state,
-            format!("无法创建数据目录 {}: {e}", paths.dsh_home.display()),
-        );
-        app.manage(Runtime {
-            state,
-            stdin: stdin_arc.clone(),
-            child: child_arc.clone(),
-            shutting_down: shutting_down.clone(),
-            restart_attempts: restart_attempts.clone(),
-        });
-        return;
-    }
-
-    match std::fs::symlink_metadata(&paths.dsh_home) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let state = Arc::new(Mutex::new(SharedState::default()));
-            set_error(
-                &state,
-                format!("数据目录 {} 不能是符号链接", paths.dsh_home.display()),
-            );
-            app.manage(Runtime {
-                state,
-                stdin: stdin_arc.clone(),
-                child: child_arc.clone(),
-                shutting_down: shutting_down.clone(),
-                restart_attempts: restart_attempts.clone(),
-            });
-            return;
-        }
-        Ok(_) => {}
-        Err(e) => {
-            let state = Arc::new(Mutex::new(SharedState::default()));
-            set_error(
-                &state,
-                format!("无法检查数据目录 {}: {e}", paths.dsh_home.display()),
-            );
-            app.manage(Runtime {
-                state,
-                stdin: stdin_arc.clone(),
-                child: child_arc.clone(),
-                shutting_down: shutting_down.clone(),
-                restart_attempts: restart_attempts.clone(),
-            });
-            return;
-        }
-    }
-
-    #[cfg(unix)]
-    if let Err(e) = std::fs::set_permissions(
-        &paths.dsh_home,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    ) {
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        set_error(
-            &state,
-            format!("无法设置数据目录权限 {}: {e}", paths.dsh_home.display()),
-        );
-        app.manage(Runtime {
-            state,
-            stdin: stdin_arc.clone(),
-            child: child_arc.clone(),
-            shutting_down: shutting_down.clone(),
-            restart_attempts: restart_attempts.clone(),
-        });
-        return;
-    }
-
-    let versions = read_versions(&paths);
-    let state = Arc::new(Mutex::new(SharedState {
-        status: Status::Idle,
-        versions,
-        dsh_home: Some(paths.dsh_home.display().to_string()),
-        ..Default::default()
-    }));
-
+/// Shared init-failure path: manage an errored Runtime so the UI has a state
+/// to render instead of a dead window.
+fn fail_init(
+    app: &AppHandle,
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    child: Arc<Mutex<Option<Child>>>,
+    shutting_down: Arc<AtomicBool>,
+    restart_attempts: Arc<AtomicU32>,
+    paths: Option<RuntimePaths>,
+    message: String,
+) {
+    let state = Arc::new(Mutex::new(SharedState::default()));
+    set_error(&state, message);
     app.manage(Runtime {
-        state: state.clone(),
-        stdin: stdin_arc.clone(),
-        child: child_arc.clone(),
-        shutting_down: shutting_down.clone(),
-        restart_attempts: restart_attempts.clone(),
+        state,
+        stdin,
+        child,
+        shutting_down,
+        restart_attempts,
+        paths,
     });
-    let runtime = app.state::<Runtime>();
+}
 
-    // Spawn the sidecar.
+/// Spawn the sidecar process and wire reader/watcher threads. The Runtime
+/// must already be managed; on success its stdin/child arcs are populated.
+fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> {
     let spawn_result = Command::new(&paths.sidecar)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -411,31 +335,27 @@ pub fn init(app: &AppHandle) {
             (Some(c), stdin, stdout, stderr)
         }
         Err(e) => {
-            set_error(
-                &state,
-                format!(
-                    "无法启动 sidecar ({}): {e} — 请先运行 `pnpm runtime:all`",
-                    paths.sidecar.display()
-                ),
-            );
-            (None, None, None, None)
+            return Err(format!(
+                "无法启动 sidecar ({}): {e} — 请先运行 `pnpm runtime:all`",
+                paths.sidecar.display()
+            ));
         }
     };
 
     if let Some(stdin) = stdin {
-        *stdin_arc.lock().unwrap() = Some(stdin);
+        *runtime.stdin.lock().unwrap() = Some(stdin);
     }
     if let Some(child) = child.take() {
-        *child_arc.lock().unwrap() = Some(child);
+        *runtime.child.lock().unwrap() = Some(child);
     }
 
     // Sidecar death watcher: a sidecar exit without an intentional app
     // shutdown is surfaced even if no final NDJSON event was received.
     {
-        let child_c = child_arc.clone();
-        let state_c = state.clone();
-        let stdin_c = stdin_arc.clone();
-        let shutting_down_c = shutting_down.clone();
+        let child_c = runtime.child.clone();
+        let state_c = runtime.state.clone();
+        let stdin_c = runtime.stdin.clone();
+        let shutting_down_c = runtime.shutting_down.clone();
         let app_c = app.clone();
         std::thread::spawn(move || loop {
             let exited = {
@@ -474,11 +394,11 @@ pub fn init(app: &AppHandle) {
 
     // Reader threads: stdout = NDJSON events, stderr = plain log lines.
     if let Some(stdout) = stdout {
-        let state_c = state.clone();
-        let stdin_c = stdin_arc.clone();
+        let state_c = runtime.state.clone();
+        let stdin_c = runtime.stdin.clone();
         let app_c = app.clone();
-        let shutting_down_c = shutting_down.clone();
-        let attempts_c = restart_attempts.clone();
+        let shutting_down_c = runtime.shutting_down.clone();
+        let attempts_c = runtime.restart_attempts.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 match serde_json::from_str::<Value>(&line) {
@@ -491,7 +411,7 @@ pub fn init(app: &AppHandle) {
         });
     }
     if let Some(stderr) = stderr {
-        let state_c = state.clone();
+        let state_c = runtime.state.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 log_line(&state_c, "sidecar", &line);
@@ -499,35 +419,125 @@ pub fn init(app: &AppHandle) {
         });
     }
 
-    // Auto-start the Harness.
-    if paths.node.exists() && paths.harness_dir.join("node_modules").exists() {
-        let dsh_bin = paths
-            .harness_dir
-            .join("node_modules")
-            .join("@deepseek-ai")
-            .join("dsh")
-            .join("lib")
-            .join("bin.js");
-        let cmd = serde_json::json!({
-            "id": 1,
-            "command": "start",
-            "node": paths.node,
-            "script": dsh_bin,
-            "args": ["web", "--host", "127.0.0.1", "--port", "0"],
-            "cwd": paths.harness_dir,
-            "env": { "DSH_HOME": paths.dsh_home },
-        });
-        if let Err(e) = send_raw(&runtime, &cmd) {
-            set_error(&state, e);
-        } else {
-            state.lock().unwrap().status = Status::Starting;
-        }
-    } else {
-        set_error(
-            &state,
-            "runtime 未就绪（缺少 node 或 harness/node_modules）— 请先运行 `pnpm runtime:all`",
+    Ok(())
+}
+
+/// Send the NDJSON `start` command for the bundled runtime.
+fn start_harness(runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> {
+    if !paths.node.exists() || !paths.harness_dir.join("node_modules").exists() {
+        return Err(
+            "runtime 未就绪（缺少 node 或 harness/node_modules）— 请先运行 `pnpm runtime:all`".to_string(),
         );
     }
+    let dsh_bin = paths
+        .harness_dir
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib")
+        .join("bin.js");
+    let cmd = serde_json::json!({
+        "id": 1,
+        "command": "start",
+        "node": paths.node,
+        "script": dsh_bin,
+        "args": ["web", "--host", "127.0.0.1", "--port", "0"],
+        "cwd": paths.harness_dir,
+        "env": { "DSH_HOME": paths.dsh_home },
+    });
+    send_raw(runtime, &cmd)?;
+    runtime.state.lock().unwrap().status = Status::Starting;
+    Ok(())
+}
+
+/// Spawn the sidecar, wire the reader thread, and auto-start the Harness.
+pub fn init(app: &AppHandle) {
+    let stdin_arc: Arc<Mutex<Option<ChildStdin>>> = Arc::new(Mutex::new(None));
+    let child_arc: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let restart_attempts = Arc::new(AtomicU32::new(0));
+
+    let paths = match resolve(app) {
+        Ok(paths) => paths,
+        Err(e) => {
+            fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, None, e);
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&paths.dsh_home) {
+        let msg = format!("无法创建数据目录 {}: {e}", paths.dsh_home.display());
+        fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, Some(paths), msg);
+        return;
+    }
+
+    match std::fs::symlink_metadata(&paths.dsh_home) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let msg = format!("数据目录 {} 不能是符号链接", paths.dsh_home.display());
+            fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, Some(paths), msg);
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let msg = format!("无法检查数据目录 {}: {e}", paths.dsh_home.display());
+            fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, Some(paths), msg);
+            return;
+        }
+    }
+
+    #[cfg(unix)]
+    if let Err(e) = std::fs::set_permissions(
+        &paths.dsh_home,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    ) {
+        let msg = format!("无法设置数据目录权限 {}: {e}", paths.dsh_home.display());
+        fail_init(app, stdin_arc, child_arc, shutting_down, restart_attempts, Some(paths), msg);
+        return;
+    }
+
+    let versions = read_versions(&paths);
+    let state = Arc::new(Mutex::new(SharedState {
+        status: Status::Idle,
+        versions,
+        dsh_home: Some(paths.dsh_home.display().to_string()),
+        ..Default::default()
+    }));
+
+    app.manage(Runtime {
+        state: state.clone(),
+        stdin: stdin_arc,
+        child: child_arc,
+        shutting_down: shutting_down.clone(),
+        restart_attempts: restart_attempts.clone(),
+        paths: Some(paths.clone()),
+    });
+    let runtime = app.state::<Runtime>();
+
+    if let Err(e) = launch_sidecar(app, &runtime, &paths) {
+        set_error(&state, e);
+        return;
+    }
+    if let Err(e) = start_harness(&runtime, &paths) {
+        set_error(&state, e);
+    }
+}
+
+/// Re-launch the sidecar after it died unexpectedly (user presses the restart
+/// button). Resets the crash counter and re-sends the start command.
+pub fn respawn_sidecar(app: &AppHandle) -> Result<(), String> {
+    let runtime = app.state::<Runtime>();
+    if child_alive(&runtime) {
+        return Ok(());
+    }
+    let paths = runtime
+        .paths
+        .clone()
+        .ok_or_else(|| "运行时路径不可用".to_string())?;
+    runtime.shutting_down.store(false, Ordering::SeqCst);
+    runtime.restart_attempts.store(0, Ordering::SeqCst);
+    runtime.stdin.lock().unwrap().take();
+    launch_sidecar(app, &runtime, &paths)?;
+    start_harness(&runtime, &paths)
 }
 
 pub fn send_raw(runtime: &Runtime, cmd: &Value) -> Result<(), String> {
@@ -549,6 +559,9 @@ pub fn child_alive(runtime: &Runtime) -> bool {
 }
 
 /// Blocking teardown used on app exit: polite shutdown, then reap the sidecar.
+/// The Stopped-wait matches the sidecar's own graceful window
+/// (DSH_SHUTDOWN_GRACE_MS, default 10s) so the harness actually gets its full
+/// chance to exit cleanly before the stdin-EOF force path takes over.
 pub fn shutdown_blocking(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
     runtime.shutting_down.store(true, Ordering::SeqCst);
@@ -557,7 +570,12 @@ pub fn shutdown_blocking(app: &AppHandle) {
         &serde_json::json!({"id": 900, "command": "shutdown"}),
     );
 
-    let stopped_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let grace = std::env::var("DSH_SHUTDOWN_GRACE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10));
+    let stopped_deadline = std::time::Instant::now() + grace;
     while std::time::Instant::now() < stopped_deadline {
         if runtime.state.lock().unwrap().status == Status::Stopped {
             break;
