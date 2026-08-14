@@ -13,9 +13,11 @@ fn main() {
     let builder = tauri::Builder::default();
 
     // Close-to-tray: when the tray is available, closing any window hides it
-    // and the app keeps running in the tray; without a tray, per-platform
-    // defaults remain (macOS hides bootstrap, Win/Linux quit on close) so a
-    // hidden app can never become unreachable.
+    // and the app keeps running in the tray. Without a tray there is no
+    // background-resident mode: macOS hides bootstrap (native convention,
+    // quit via Cmd+Q), Windows/Linux quit the whole app when bootstrap is
+    // closed — otherwise a running Harness would be left with its only
+    // control surface destroyed and no way to recover it in-session.
     let builder = builder.on_window_event(|window, event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             let app = window.app_handle();
@@ -29,6 +31,13 @@ fn main() {
                 if window.label() == "bootstrap" {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+                #[cfg(not(target_os = "macos"))]
+                if window.label() == "bootstrap" {
+                    // No tray: bootstrap is the app's control surface — its
+                    // close quits the app (graceful: RunEvent::Exit runs
+                    // shutdown_blocking) instead of stranding the harness.
+                    app.exit(0);
                 }
             }
         }

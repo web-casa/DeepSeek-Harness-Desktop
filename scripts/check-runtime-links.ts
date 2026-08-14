@@ -38,12 +38,15 @@ function scan(dir: string): void {
   }
 }
 
-scan(nodeModules);
+// The invariant covers the WHOLE harness subtree (not just node_modules):
+// licenses/, the copied README/LICENSE files and the manifest must be
+// materialized too — a link anywhere would break the self-contained bundle.
+scan(harnessDir);
 if (links.length > 0) {
   fail(
-    `staged runtime contains ${links.length} link(s); it must be fully materialized:\n` +
+    `staged harness tree contains ${links.length} link(s); it must be fully materialized:\n` +
       links.slice(0, 10).map((link) => `  ${link}`).join("\n"),
   );
 }
 
-ok("staged runtime is fully materialized (no symlinks/junctions)");
+ok("staged harness tree is fully materialized (no symlinks/junctions)");

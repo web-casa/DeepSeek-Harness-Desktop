@@ -24,22 +24,36 @@ import { spawnSync } from "node:child_process";
 import { repoRoot, runtimeDir, harnessDir, readManifest, fail, ok, info } from "./lib/common.ts";
 import { materialize } from "./lib/materialize.ts";
 
-// Collect every top-level package's license file into licenses/<name> so the
+// Collect every package's license file into licenses/<rel-path> so the
 // installer carries third-party attribution for the whole dependency tree.
+// Scoped packages live at node_modules/@scope/<name>: the scope directory
+// itself carries no license, so both levels are walked (the old top-level-
+// only scan silently skipped every scoped package's attribution).
 function collectLicenses(nodeModules: string, outDir: string): void {
   let collected = 0;
-  for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
-    const pkgDir = join(nodeModules, entry.name);
-    const candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING"];
+  const candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING"];
+  const visit = (pkgDir: string, rel: string): void => {
     for (const file of candidates) {
       const src = join(pkgDir, file);
       if (existsSync(src)) {
-        const destDir = join(outDir, entry.name);
+        const destDir = join(outDir, rel);
         mkdirSync(destDir, { recursive: true });
         copyFileSync(src, join(destDir, file));
         collected += 1;
-        break;
+        return;
       }
+    }
+  };
+  for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith("@")) {
+      const scopeDir = join(nodeModules, entry.name);
+      for (const sub of readdirSync(scopeDir, { withFileTypes: true })) {
+        if (!sub.isDirectory()) continue;
+        visit(join(scopeDir, sub.name), join(entry.name, sub.name));
+      }
+    } else {
+      visit(join(nodeModules, entry.name), entry.name);
     }
   }
   info(`collected ${collected} third-party license files into licenses/`);

@@ -172,7 +172,7 @@ function extractNsisFile(artifact: string, innerPath: string, outDir: string): s
 // ---------------------------------------------------------------------------
 // DMG: hdiutil attach → walk → detach.
 // ---------------------------------------------------------------------------
-function attachDmg(artifact: string): { mount: string; appRoot: string } {
+function attachDmg(artifact: string): string {
   const mount = join(tmpDir, "dmg-mount");
   rmSync(mount, { recursive: true, force: true });
   mkdirSync(mount, { recursive: true });
@@ -182,12 +182,7 @@ function attachDmg(artifact: string): { mount: string; appRoot: string } {
     { encoding: "utf8" },
   );
   if (res.status !== 0) throw new Error(`hdiutil attach failed: ${res.stderr}`);
-  const appRoot = join(mount, `${productName}.app`);
-  if (!existsSync(appRoot)) {
-    const listing = readdirSync(mount).join(", ");
-    throw new Error(`.app bundle not found in DMG (entries: ${listing})`);
-  }
-  return { mount, appRoot };
+  return mount;
 }
 
 function detachDmg(mount: string): void {
@@ -302,8 +297,16 @@ function runNsisChecks(): void {
 
 function runDmgChecks(): void {
   const artifact = findArtifact();
-  const { mount, appRoot } = attachDmg(artifact);
+  // Attach is covered by the same try/finally as everything after it: any
+  // throw post-attach (missing .app, walk failure, assertion) must still
+  // detach the volume — a leaked read-only mount would fail CI cleanup.
+  const mount = attachDmg(artifact);
   try {
+    const appRoot = join(mount, `${productName}.app`);
+    if (!existsSync(appRoot)) {
+      const listing = readdirSync(mount).join(", ");
+      throw new Error(`.app bundle not found in DMG (entries: ${listing})`);
+    }
     const allFiles = walkFiles(appRoot);
     const rel = allFiles.map((f) => f.slice(appRoot.length + 1).replace(/\\/g, "/"));
     const relSet = new Set(rel.map((f) => f.toLowerCase()));
@@ -323,8 +326,10 @@ function runDmgChecks(): void {
       ok(`present: ${path}`);
     }
 
+    // The whole harness subtree (licenses/, manifest, READMEs, node_modules)
+    // must be materialized — any symlink breaks the self-contained bundle.
     const links = countSymlinks(
-      join(appRoot, "Contents", "Resources", "runtime", "harness", "node_modules"),
+      join(appRoot, "Contents", "Resources", "runtime", "harness"),
     );
     if (links > 0) {
       throw new Error(`bundled harness tree contains ${links} symlink(s)`);
@@ -354,14 +359,14 @@ function runDmgChecks(): void {
 function checkBundledManifest(bundledText: string): void {
   const repo = readManifest();
   const bundled = JSON.parse(bundledText) as Partial<Record<string, string>>;
-  for (const key of ["nodeVersion", "harnessVersion", "sidecarVersion"] as const) {
+  for (const key of ["desktopVersion", "nodeVersion", "harnessVersion", "sidecarVersion"] as const) {
     if (bundled[key] !== repo[key]) {
       throw new Error(
         `bundled manifest ${key}=${bundled[key]} != repo manifest ${repo[key]}`,
       );
     }
   }
-  ok(`bundled manifest matches repo (node ${bundled.nodeVersion}, harness ${bundled.harnessVersion})`);
+  ok(`bundled manifest matches repo (desktop ${bundled.desktopVersion}, node ${bundled.nodeVersion}, harness ${bundled.harnessVersion})`);
 }
 
 try {

@@ -1,8 +1,9 @@
 // Release preflight: run before tagging (or as the first CI build step).
 //
-// Deny-level checks: version alignment across the four version files, the
-// sidecar/harness pins, the node checksum table (exact 5-platform set, 64-hex
-// each), .nvmrc consistency, npm >= 11.17 (script allowlist precondition).
+// Deny-level checks: version alignment across the version files (including the
+// runtime lockfile's resolved dsh version), the sidecar/harness pins, the node
+// checksum table (exact 5-platform set, 64-hex each), .nvmrc consistency,
+// npm 11.17..11.x (script allowlist precondition, both bounds).
 // Tag binding: --expect-tag vX.Y.Z requires ref_name == "v${desktopVersion}".
 // Warn-level (skipped in CI): dirty worktree, wrong branch, existing tag.
 
@@ -12,7 +13,9 @@ import { spawnSync } from "node:child_process";
 import { repoRoot, readManifest, fail, ok, info } from "./lib/common.ts";
 
 const PLATFORM_KEYS = ["win32-x64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
-const SHA256_RE = /^[0-9a-f]{64}$/;
+// Case-insensitive: the checksums we publish are lowercase, but a manual edit
+// must not slip through just because it used uppercase hex.
+const SHA256_RE = /^[0-9a-fA-F]{64}$/;
 
 function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(repoRoot, path), "utf8")) as Record<string, unknown>;
@@ -61,6 +64,21 @@ if (harnessPin !== manifest.harnessVersion) {
 }
 ok(`harness pin aligned: ${harnessPin}`);
 
+// The lockfile's RESOLVED version must match too: npm ci installs what the
+// lock resolves, so a pin/lock mismatch would ship silently unless the
+// prepare step catches it — deny here, at the earliest line of defense.
+const runtimeLock = readJson("runtime/package-lock.json") as {
+  packages?: Record<string, { version?: string }>;
+};
+const lockedDsh = runtimeLock.packages?.["node_modules/@deepseek-ai/dsh"]?.version;
+if (lockedDsh !== manifest.harnessVersion) {
+  fail(
+    `harness lockfile drift: package-lock resolves @deepseek-ai/dsh@${lockedDsh}, ` +
+      `manifest says ${manifest.harnessVersion} (refresh with npm install in runtime/)`,
+  );
+}
+ok(`harness lockfile aligned: ${lockedDsh}`);
+
 // --- deny: node checksums + .nvmrc ---------------------------------------
 const nvmrc = readFileSync(join(repoRoot, ".nvmrc"), "utf8").trim();
 if (nvmrc !== manifest.nodeVersion) {
@@ -86,6 +104,17 @@ const npmVersion = (npmRes.stdout ?? "").trim();
 const [vMajor = 0, vMinor = 0] = npmVersion.split(".").map((p) => Number.parseInt(p, 10) || 0);
 if (npmRes.status !== 0 || vMajor < 11 || (vMajor === 11 && vMinor < 17)) {
   fail(`npm ${npmVersion || "not found"} too old: strict-allow-scripts requires >= 11.17`);
+}
+// Upper bound too: strict-allow-scripts/allow-scripts is a new npm 11 policy
+// feature. If a future npm major renames or drops those keys, the allowlist
+// would silently fail OPEN (every install script runs unreviewed) while the
+// >= check above still passes — refuse until a human has re-verified.
+if (vMajor > 11) {
+  fail(
+    `npm ${npmVersion} is newer than the audited major (11): verify that ` +
+      `strict-allow-scripts/allow-scripts still gates install scripts in runtime/.npmrc, ` +
+      `then widen this check.`,
+  );
 }
 ok(`npm ${npmVersion} supports strict-allow-scripts`);
 

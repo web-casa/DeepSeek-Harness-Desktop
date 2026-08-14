@@ -1,0 +1,9 @@
+# Pinned toolchain: CI and local builds must not drift across a floating
+# `stable` (a future compiler version could fail the build or change clippy
+# lints mid-release). Bump deliberately and re-run the full gate suite.
+[toolchain]
+channel = "1.96.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+# Cross-check targets used by `quality.yml` (sidecar cross-target clippy).
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]

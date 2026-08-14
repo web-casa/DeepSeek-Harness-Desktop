@@ -4,9 +4,11 @@
 [advisories]
 yanked = "deny"
 # Unmaintained-only advisories (no vulnerabilities) from transitive deps of
-# tauri's macro/GTK stack: gtk-rs GTK3 bindings (Linux dev-only target; tauri
-# itself is on the gtk4 migration path), rust-unic (unicode-ident family),
-# proc-macro-error. Revisit on tauri upgrades.
+# tauri's macro/GTK stack. NOTE: the GTK3 bindings are NOT dev-only — the
+# Linux dependency graph compiles them in CI (quality/smoke jobs); they are
+# merely not part of any shipped bundle (we publish Windows/macOS only).
+# Every entry below was verified to be in the "unmaintained" class, never a
+# vulnerability advisory. Revisit on tauri upgrades.
 ignore = [
   "RUSTSEC-2024-0370",
   "RUSTSEC-2024-0411",

@@ -68,6 +68,11 @@ async function downloadOnce(url: string, dest: string): Promise<void> {
   const streamError = new Promise<never>((_, reject) => {
     out.on("error", reject);
   });
+  // Mark the rejection as observed: an early stream error (e.g. open failure
+  // before the first write, arriving while `reader.read()` is pending) must
+  // not crash the process as an unhandled rejection — it has to reach the
+  // retry loop through the races below instead.
+  streamError.catch(() => {});
   let received = 0;
   try {
     for (;;) {

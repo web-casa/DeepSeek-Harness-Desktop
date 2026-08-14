@@ -34,19 +34,19 @@ jobs:
             glob: target/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable branch (toolchain version pinned via rust-toolchain.toml)
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4 (SHA-pinned)
         with:
           node-version-file: .nvmrc
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa  # v4 (SHA-pinned)
         with:
-          version: 11
+          version: 11.21.0
 
       - name: Release preflight (versions, checksums, npm policy)
         run: node scripts/release-preflight.ts
@@ -57,11 +57,11 @@ jobs:
       - name: Download bundled Node
         run: node scripts/download-node.ts
 
-      - name: Build sidecar (host triple)
-        run: node scripts/build-sidecar.ts
-
       - name: Prepare Harness runtime
         run: node scripts/prepare-harness.ts
+
+      - name: Build sidecar (host triple)
+        run: node scripts/build-sidecar.ts
 
       - name: Assert staged runtime has no symlinks
         run: node scripts/check-runtime-links.ts
@@ -91,7 +91,7 @@ jobs:
         run: node scripts/checksums.ts --bundle ${{ matrix.bundle }}
 
       - name: Upload bundle artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -109,27 +109,39 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
         with:
           ref: ${{ github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4 (SHA-pinned)
         with:
           node-version-file: .nvmrc
+
+      # Tags must point at a commit that is an ancestor of main. The
+      # release-preflight branch check is local-only (skipped in CI), so a tag
+      # pushed from a feature branch would otherwise sail through the whole
+      # pipeline. Full main history is fetched so --is-ancestor can walk it.
+      - name: Enforce tag ancestry (must be on main)
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor HEAD FETCH_HEAD || {
+            echo "::error::tag ${{ github.ref_name }} is not an ancestor of origin/main — refusing to publish"
+            exit 1
+          }
 
       # The tag must be bound to the version it publishes: v9.9.9 must never
       # ship artifacts whose embedded desktop version is 0.1.0.
       - name: Release preflight (tag binding)
         run: node scripts/release-preflight.ts --expect-tag ${{ github.ref_name }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2 (SHA-pinned)
         with:
           draft: true
           tag_name: ${{ github.ref_name }}
-          files: artifacts/*
+          files: artifacts/**/*
