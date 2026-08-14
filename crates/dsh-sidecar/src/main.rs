@@ -128,11 +128,11 @@ pub fn extract_local_url(line: &str) -> Option<String> {
     if digits.is_empty() {
         return None;
     }
-    // Port must be followed by a delimiter: end of line or the documented
-    // " (LAN: …)" suffix. `123abc` must not silently become port 123.
-    match rest.chars().nth(digits.len()) {
-        None | Some(' ') => {}
-        _ => return None,
+    // Port must be followed by end of line or the documented " (LAN: …)"
+    // suffix — arbitrary trailing text must never count as readiness.
+    let tail = &rest[digits.len()..];
+    if !tail.is_empty() && !tail.starts_with(" (LAN: ") {
+        return None;
     }
     let port: u16 = digits.parse().ok()?;
     if port == 0 {
@@ -639,6 +639,14 @@ mod tests {
         assert_eq!(extract_local_url("dsh web: http://127.0.0.1:123abc"), None);
         assert_eq!(extract_local_url("dsh web: http://127.0.0.1:70000"), None);
         assert_eq!(extract_local_url("dsh web: http://127.0.0.1:49321x"), None);
+        assert_eq!(
+            extract_local_url("dsh web: http://127.0.0.1:49321 attacker"),
+            None
+        );
+        assert_eq!(
+            extract_local_url("dsh web: http://127.0.0.1:49321 (LAN: http://192.168.1.5:49321)"),
+            Some("http://127.0.0.1:49321".to_string())
+        );
     }
 
     #[test]

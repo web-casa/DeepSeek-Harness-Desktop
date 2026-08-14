@@ -11,8 +11,13 @@ on:
         description: "Tag/branch to build & verify (defaults to the default branch). Does not publish."
 
 jobs:
+  quality:
+    name: Quality gates
+    uses: ./.github/workflows/quality.yml
+
   build:
     name: Build ${{ matrix.target }}
+    needs: quality
     strategy:
       fail-fast: false
       matrix:

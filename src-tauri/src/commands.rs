@@ -82,12 +82,16 @@ pub fn shutdown(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), Strin
         &runtime,
         &serde_json::json!({"id": CMD_ID_SHUTDOWN, "command": "shutdown"}),
     ) {
-        let mut s = runtime
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        s.last_error = Some(error.clone());
-        s.status = crate::harness::Status::Crashed;
+        {
+            // Scope the lock: publish_snapshot takes the same mutex and a
+            // held guard here would deadlock the command.
+            let mut s = runtime
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            s.last_error = Some(error.clone());
+            s.status = crate::harness::Status::Crashed;
+        }
         publish_snapshot(&app, &runtime.state);
         return Err(error);
     }

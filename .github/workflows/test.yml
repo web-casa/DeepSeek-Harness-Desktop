@@ -3,87 +3,13 @@ name: Test
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
-  unit:
-    name: Unit tests & frontend (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-
-      # Tauri shell system deps (compiling src-tauri requires webkit2gtk-4.1).
-      - name: Install Tauri system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-
-      - name: Install cargo tools (nextest, llvm-cov, deny, vet)
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest,cargo-llvm-cov,cargo-deny,cargo-vet
-
-      - name: Install llvm-tools for coverage
-        run: rustup component add llvm-tools-preview
-
-      - name: Sidecar tests (nextest)
-        run: cargo nextest run --manifest-path crates/dsh-sidecar/Cargo.toml
-
-      - name: Sidecar coverage (llvm-cov, process lifecycle paths)
-        run: cargo llvm-cov nextest --manifest-path crates/dsh-sidecar/Cargo.toml --fail-under-lines 50
-
-      - name: Sidecar cross-target checks (Windows + macOS)
-        run: |
-          rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
-          cargo check --target x86_64-pc-windows-msvc --manifest-path crates/dsh-sidecar/Cargo.toml
-          cargo check --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml
-
-      - name: "Tauri shell tests (nextest: state machine + proptests)"
-        run: |
-          # tauri-build asserts the bundle resources path exists; the smoke
-          # job stages the real runtime — the unit job only needs the dir.
-          mkdir -p src-tauri/resources/runtime
-          cargo nextest run --manifest-path src-tauri/Cargo.toml
-
-      - name: Tauri coverage (llvm-cov)
-        run: cargo llvm-cov nextest --manifest-path src-tauri/Cargo.toml --fail-under-lines 25
-
-      - name: Rust formatting & clippy
-        run: |
-          cargo fmt --check --manifest-path crates/dsh-sidecar/Cargo.toml
-          cargo fmt --check --manifest-path src-tauri/Cargo.toml
-          cargo clippy --manifest-path crates/dsh-sidecar/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-
-      - name: Supply-chain gate (cargo-deny)
-        run: |
-          cargo deny --manifest-path crates/dsh-sidecar/Cargo.toml check
-          cargo deny --manifest-path src-tauri/Cargo.toml check
-
-      - name: Supply-chain audit (cargo-vet)
-        run: cargo vet --locked
-
-      - name: Frontend install & build
-        run: pnpm install --frozen-lockfile && pnpm build
-
-      - name: Frontend type checks (tsc + svelte-check)
-        run: pnpm check
-
-      - name: Scripts type check (Node-native TS)
-        run: pnpm check:scripts
-
-      - name: Bundle verifier self-test
-        run: node scripts/verify-bundle.ts --self-test
+  quality:
+    name: Quality gates
+    uses: ./.github/workflows/quality.yml
 
   smoke:
     name: Runtime smoke (${{ matrix.os }})

@@ -86,6 +86,11 @@ pub fn init(app: &AppHandle) {
     } else {
         eprintln!("[dsh-desktop] DSH_FORCE_NO_TRAY set: tray disabled (test mode)");
     }
+    // Seed the status line from the current snapshot (harmless when the
+    // Runtime does not exist yet; the next publish will refresh it).
+    if let Some(runtime) = app.try_state::<crate::harness::Runtime>() {
+        crate::harness::publish_snapshot(app, &runtime.state);
+    }
     app.manage(state);
 }
 
@@ -116,16 +121,22 @@ fn build_tray(app: &AppHandle) -> tauri::Result<(tauri::tray::TrayIcon<Wry>, Men
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show-harness" => {
                 let runtime = app.state::<crate::harness::Runtime>();
-                let url = runtime
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .url
-                    .clone();
-                match url {
-                    Some(u) => crate::harness::open_harness_window(app, &u),
-                    None => show_windows(app),
+                let (status, url) = {
+                    let s = runtime
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    (s.status, s.url.clone())
+                };
+                // Only a live Running URL may drive the harness window;
+                // anything else falls back to the bootstrap window.
+                if status == crate::harness::Status::Running {
+                    if let Some(u) = url {
+                        crate::harness::open_harness_window(app, &u);
+                        return;
+                    }
                 }
+                show_windows(app);
             }
             "settings" => show_windows(app),
             "restart" => {

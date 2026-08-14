@@ -173,7 +173,7 @@ version = "0.22.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.cc]]
-version = "1.4.2"
+version = "1.4.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.cesu8]]
@@ -413,7 +413,7 @@ version = "0.3.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.find-msvc-tools]]
-version = "0.1.10"
+version = "0.1.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.flate2]]

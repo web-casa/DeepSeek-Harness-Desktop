@@ -57,8 +57,10 @@ fn main() {
                 .build(),
         )
         .setup(|app| {
-            harness::init(&app.handle().clone());
+            // Tray first: harness init failure paths publish snapshots that
+            // must reach the tray status line.
             tray::init(&app.handle().clone());
+            harness::init(&app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

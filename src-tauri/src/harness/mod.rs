@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -53,7 +53,18 @@ pub struct Runtime {
     shutting_down: Arc<AtomicBool>,
     restart_attempts: Arc<AtomicU32>,
     paths: Option<RuntimePaths>,
+    /// Bumped on every sidecar launch; watcher threads hold the value they
+    /// started with and must never touch a newer generation's resources.
+    gen: Arc<AtomicU64>,
+    /// Bumped on every user-initiated restart; cancels queued auto-restarts.
+    restart_gen: Arc<AtomicU64>,
 }
+
+/// The origin the currently open harness window was created for. Restarts may
+/// change the port; the window must be recreated in that case because its
+/// on_navigation guard is bound to the creation origin.
+#[derive(Default)]
+pub struct WindowOrigin(pub Mutex<Option<String>>);
 
 /// Crash auto-restart policy: up to this many consecutive attempts with
 /// exponential backoff, then give up and surface the error.
@@ -82,15 +93,20 @@ fn schedule_auto_restart(
     state: &Arc<Mutex<SharedState>>,
     stdin: &Arc<Mutex<Option<ChildStdin>>>,
     shutting_down: &Arc<AtomicBool>,
+    restart_gen: &Arc<AtomicU64>,
     attempts: u32,
 ) {
     let state_c = state.clone();
     let stdin_c = stdin.clone();
     let shutting_down_c = shutting_down.clone();
+    let restart_gen_c = restart_gen.clone();
+    let my_gen = restart_gen.load(Ordering::SeqCst);
     std::thread::spawn(move || {
         let backoff = std::time::Duration::from_secs(1u64 << (attempts.saturating_sub(1).min(3)));
         std::thread::sleep(backoff);
-        if shutting_down_c.load(Ordering::SeqCst) {
+        // A user-initiated restart during the backoff supersedes this one.
+        if shutting_down_c.load(Ordering::SeqCst) || restart_gen_c.load(Ordering::SeqCst) != my_gen
+        {
             return;
         }
         {
@@ -120,6 +136,8 @@ fn set_error(state: &Mutex<SharedState>, message: impl Into<String>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     s.last_error = Some(message.into());
     s.status = Status::Crashed;
+    s.url = None;
+    s.pid = None;
 }
 
 /// Ask the sidecar for a status refresh (carries the real pid).
@@ -170,26 +188,55 @@ pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
     let Ok(parsed) = tauri::Url::parse(url) else {
         return;
     };
-    let origin = parsed.clone();
-    let app = app.clone();
+    let origin = parsed.origin().ascii_serialization();
+
+    // Same origin as the current window → refresh + show/focus (the
+    // navigation guard allows same-origin navigations).
+    let window_origin = app.try_state::<WindowOrigin>();
+    let current = window_origin.as_ref().and_then(|w| {
+        w.0.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    });
+    if current.as_deref() == Some(origin.as_str()) {
+        let app_in = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(win) = app_in.get_webview_window("harness") {
+                let _ = win.navigate(parsed.clone());
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        });
+        return;
+    }
+
+    // Different origin (restart picked a new port): the old window's
+    // navigation guard would block the new port, so recreate the window.
+    let Ok(origin_parsed) = tauri::Url::parse(&origin) else {
+        return; // unreachable: is_valid_readiness_url passed above
+    };
+    if let Some(window_origin) = window_origin {
+        *window_origin
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(origin.clone());
+    }
     let app_in = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(win) = app_in.get_webview_window("harness") {
-            let _ = win.navigate(parsed.clone());
-            let _ = win.show();
-            let _ = win.set_focus();
-        } else {
-            let _ = tauri::WebviewWindowBuilder::new(
-                &app_in,
-                "harness",
-                tauri::WebviewUrl::External(parsed),
-            )
-            .title("DeepSeek Harness")
-            .inner_size(1280.0, 800.0)
-            .min_inner_size(960.0, 600.0)
-            .on_navigation(move |candidate| same_origin(candidate, &origin))
-            .build();
+            // destroy() bypasses CloseRequested (which hides instead of closing).
+            let _ = win.destroy();
         }
+        let _ = tauri::WebviewWindowBuilder::new(
+            &app_in,
+            "harness",
+            tauri::WebviewUrl::External(parsed),
+        )
+        .title("DeepSeek Harness")
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(960.0, 600.0)
+        .on_navigation(move |candidate| same_origin(candidate, &origin_parsed))
+        .build();
     });
 }
 
@@ -280,6 +327,8 @@ fn apply_state_event(
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 s.status = Status::Stopped;
                 s.pid = None;
+                // The port may change on the next boot; never keep a dead URL.
+                s.url = None;
             }
             effects.push(SideEffect::RefreshPid);
         }
@@ -347,6 +396,7 @@ fn handle_event(
     stdin: &Arc<Mutex<Option<ChildStdin>>>,
     shutting_down: &Arc<AtomicBool>,
     restart_attempts: &Arc<AtomicU32>,
+    restart_gen: &Arc<AtomicU64>,
     ev: &Value,
 ) {
     // Log lines flow by the thousands during agent runs; the snapshot payload
@@ -366,7 +416,7 @@ fn handle_event(
             SideEffect::OpenWindow(url) => open_harness_window(app, &url),
             SideEffect::RefreshPid => refresh_pid(stdin),
             SideEffect::ScheduleAutoRestart(attempts) => {
-                schedule_auto_restart(state, stdin, shutting_down, attempts)
+                schedule_auto_restart(state, stdin, shutting_down, restart_gen, attempts)
             }
         }
     }
@@ -429,26 +479,31 @@ fn read_versions(paths: &RuntimePaths) -> Versions {
     }
 }
 
-/// Shared init-failure path: manage an errored Runtime so the UI has a state
-/// to render instead of a dead window.
-fn fail_init(
-    app: &AppHandle,
+/// The Arc handles shared by the Runtime and its threads, bundled so the
+/// init helpers stay under clippy's argument budget.
+struct RuntimeArcs {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Arc<Mutex<Option<Child>>>,
     shutting_down: Arc<AtomicBool>,
     restart_attempts: Arc<AtomicU32>,
-    paths: Option<RuntimePaths>,
-    message: String,
-) {
+    gen: Arc<AtomicU64>,
+    restart_gen: Arc<AtomicU64>,
+}
+
+/// Shared init-failure path: manage an errored Runtime so the UI has a state
+/// to render instead of a dead window.
+fn fail_init(app: &AppHandle, arcs: RuntimeArcs, paths: Option<RuntimePaths>, message: String) {
     let state = Arc::new(Mutex::new(SharedState::default()));
     set_error(&state, message);
     app.manage(Runtime {
         state: state.clone(),
-        stdin,
-        child,
-        shutting_down,
-        restart_attempts,
+        stdin: arcs.stdin,
+        child: arcs.child,
+        shutting_down: arcs.shutting_down,
+        restart_attempts: arcs.restart_attempts,
         paths,
+        gen: arcs.gen,
+        restart_gen: arcs.restart_gen,
     });
     // fail_init historically emitted nothing — the tray/UI must see it too.
     publish_snapshot(app, &state);
@@ -457,6 +512,9 @@ fn fail_init(
 /// Spawn the sidecar process and wire reader/watcher threads. The Runtime
 /// must already be managed; on success its stdin/child arcs are populated.
 fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> {
+    // New generation: any watcher/reader from an older launch must not touch
+    // this launch's child/stdin slots.
+    let my_gen = runtime.gen.fetch_add(1, Ordering::SeqCst) + 1;
     let spawn_result = Command::new(&paths.sidecar)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -498,8 +556,14 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
         let state_c = runtime.state.clone();
         let stdin_c = runtime.stdin.clone();
         let shutting_down_c = runtime.shutting_down.clone();
+        let gen_c = runtime.gen.clone();
         let app_c = app.clone();
         std::thread::spawn(move || loop {
+            // A respawn supersedes us: never observe or mutate the slots of a
+            // newer generation's sidecar.
+            if gen_c.load(Ordering::SeqCst) != my_gen {
+                return;
+            }
             let exited = {
                 let mut child = child_c
                     .lock()
@@ -514,7 +578,8 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
             };
 
             if let Some(status) = exited {
-                if !shutting_down_c.load(Ordering::SeqCst) {
+                if !shutting_down_c.load(Ordering::SeqCst) && gen_c.load(Ordering::SeqCst) == my_gen
+                {
                     let _ = stdin_c
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -530,6 +595,7 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
                         s.last_error = Some(format!("sidecar 进程意外退出 (code {code})"));
                         s.status = Status::Crashed;
                         s.pid = None;
+                        s.url = None;
                     }
                     publish_snapshot(&app_c, &state_c);
                 }
@@ -547,6 +613,7 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
         let app_c = app.clone();
         let shutting_down_c = runtime.shutting_down.clone();
         let attempts_c = runtime.restart_attempts.clone();
+        let restart_gen_c = runtime.restart_gen.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 match serde_json::from_str::<Value>(&line) {
@@ -556,6 +623,7 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
                         &stdin_c,
                         &shutting_down_c,
                         &attempts_c,
+                        &restart_gen_c,
                         &ev,
                     ),
                     Err(_) => log_line(&state_c, "sidecar", &line),
@@ -614,63 +682,42 @@ pub fn init(app: &AppHandle) {
     let child_arc: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
     let shutting_down = Arc::new(AtomicBool::new(false));
     let restart_attempts = Arc::new(AtomicU32::new(0));
+    let gen = Arc::new(AtomicU64::new(0));
+    let restart_gen = Arc::new(AtomicU64::new(0));
+    app.manage(WindowOrigin::default());
+    let arcs = RuntimeArcs {
+        stdin: stdin_arc.clone(),
+        child: child_arc.clone(),
+        shutting_down: shutting_down.clone(),
+        restart_attempts: restart_attempts.clone(),
+        gen: gen.clone(),
+        restart_gen: restart_gen.clone(),
+    };
 
     let paths = match resolve(app) {
         Ok(paths) => paths,
         Err(e) => {
-            fail_init(
-                app,
-                stdin_arc,
-                child_arc,
-                shutting_down,
-                restart_attempts,
-                None,
-                e,
-            );
+            fail_init(app, arcs, None, e);
             return;
         }
     };
 
     if let Err(e) = std::fs::create_dir_all(&paths.dsh_home) {
         let msg = format!("无法创建数据目录 {}: {e}", paths.dsh_home.display());
-        fail_init(
-            app,
-            stdin_arc,
-            child_arc,
-            shutting_down,
-            restart_attempts,
-            Some(paths),
-            msg,
-        );
+        fail_init(app, arcs, Some(paths), msg);
         return;
     }
 
     match std::fs::symlink_metadata(&paths.dsh_home) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             let msg = format!("数据目录 {} 不能是符号链接", paths.dsh_home.display());
-            fail_init(
-                app,
-                stdin_arc,
-                child_arc,
-                shutting_down,
-                restart_attempts,
-                Some(paths),
-                msg,
-            );
+            fail_init(app, arcs, Some(paths), msg);
             return;
         }
         Ok(_) => {}
         Err(e) => {
             let msg = format!("无法检查数据目录 {}: {e}", paths.dsh_home.display());
-            fail_init(
-                app,
-                stdin_arc,
-                child_arc,
-                shutting_down,
-                restart_attempts,
-                Some(paths),
-                msg,
-            );
+            fail_init(app, arcs, Some(paths), msg);
             return;
         }
     }
@@ -681,15 +728,7 @@ pub fn init(app: &AppHandle) {
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     ) {
         let msg = format!("无法设置数据目录权限 {}: {e}", paths.dsh_home.display());
-        fail_init(
-            app,
-            stdin_arc,
-            child_arc,
-            shutting_down,
-            restart_attempts,
-            Some(paths),
-            msg,
-        );
+        fail_init(app, arcs, Some(paths), msg);
         return;
     }
 
@@ -708,6 +747,8 @@ pub fn init(app: &AppHandle) {
         shutting_down: shutting_down.clone(),
         restart_attempts: restart_attempts.clone(),
         paths: Some(paths.clone()),
+        gen: gen.clone(),
+        restart_gen: restart_gen.clone(),
     });
     let runtime = app.state::<Runtime>();
 
@@ -726,6 +767,8 @@ pub fn init(app: &AppHandle) {
 /// restart command; sidecar dead → respawn the whole chain. Publishes state.
 pub fn request_restart(app: &AppHandle) -> Result<(), String> {
     let runtime = app.state::<Runtime>();
+    // Supersede any queued crash auto-restart: the user is in control now.
+    runtime.restart_gen.fetch_add(1, Ordering::SeqCst);
     if !child_alive(&runtime) {
         let result = respawn_sidecar(app);
         if let Err(e) = &result {

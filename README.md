@@ -5,7 +5,7 @@
 桌面层只负责生命周期：Tauri 管窗口，Rust sidecar 管 Harness 进程。
 
 仓库：https://github.com/web-casa/dsh-gui · 下载：https://github.com/web-casa/dsh-gui/releases
-（v0.1.0：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
+（v0.1.1：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
 
 ```
 ┌────────────────────────────────────────────────┐
@@ -141,11 +141,11 @@ Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
   → tag v* 发版（新 Node/新 Harness 随 Desktop 一起更新）
 ```
 
-## 当前状态与已知边界（v0.1.0）
+## 当前状态与已知边界（v0.1.1）
 
 - ✅ CI 四平台全绿（ubuntu / windows-latest / macos-14 + Linux 单测），Windows
   冒烟含 boot → readiness → HTTP 200 → restart → shutdown → 无孤儿 + 重定位冒烟
-- ✅ v0.1.0 发布：NSIS 52MB / DMG 98MB（draft prerelease）
+- ✅ v0.1.1 发布：NSIS 52MB / DMG 98MB + SHA-256（draft prerelease）
 - ✅ 单实例锁、窗口状态记忆、崩溃自动恢复、diagnostics、macOS 关闭=隐藏
 - ⏳ 未接入：代码签名 / 公证 / 自动更新 / 插件安装（bundled pnpm）
 - 未签名构建：Windows SmartScreen、macOS Gatekeeper 需要用户手动放行
