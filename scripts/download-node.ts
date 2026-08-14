@@ -6,6 +6,7 @@
 // npm dependencies.
 
 import { createWriteStream, existsSync, mkdirSync, rmSync, renameSync, chmodSync, copyFileSync, createReadStream } from "node:fs";
+import { once } from "node:events";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -62,6 +63,11 @@ async function downloadOnce(url: string, dest: string): Promise<void> {
   const total = Number(res.headers.get("content-length") ?? 0);
   const reader = res.body.getReader();
   const out = createWriteStream(dest);
+  // ONE persistent error listener (per-wait `once("error")` calls would stack
+  // listeners and trip the MaxListeners warning over a long download).
+  const streamError = new Promise<never>((_, reject) => {
+    out.on("error", reject);
+  });
   let received = 0;
   try {
     for (;;) {
@@ -71,20 +77,14 @@ async function downloadOnce(url: string, dest: string): Promise<void> {
       const buf = Buffer.from(value);
       // Respect backpressure: a slow disk must not buffer the whole archive.
       if (!out.write(buf)) {
-        await new Promise<void>((resolve, reject) => {
-          out.once("drain", resolve);
-          out.once("error", reject);
-        });
+        await Promise.race([once(out, "drain"), streamError]);
       }
       if (total > 0 && received % (16 * 1024 * 1024) < 64 * 1024) {
         process.stdout.write(`\r  ${((received / total) * 100).toFixed(0)}% (${(received / 1048576).toFixed(0)} MB)`);
       }
     }
     out.end();
-    await new Promise<void>((resolve, reject) => {
-      out.on("finish", resolve);
-      out.on("error", reject);
-    });
+    await Promise.race([once(out, "finish"), streamError]);
   } catch (e) {
     out.destroy();
     throw e;

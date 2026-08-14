@@ -73,6 +73,11 @@ jobs:
         with:
           version: 11
 
+      # runtime/.npmrc relies on strict-allow-scripts (npm >= 11.17); the npm
+      # bundled with Node 24.18.0 is 11.16 and would fail the policy OPEN.
+      - name: Pin npm for the script allowlist
+        run: npm install -g npm@11.17.0
+
       # The exact P0 acceptance chain, on every platform:
       # sidecar → bundled node → dsh web --port 0 → readiness → HTTP 200
       # → restart → HTTP 200 → shutdown → no orphan processes.
