@@ -80,8 +80,13 @@ function parseSltListing(text: string): string[] {
 }
 
 function listNsisEntries(artifact: string): string[] {
-  const res = spawnSync(find7z(), ["l", "-slt", artifact], { encoding: "utf8" });
-  if (res.status !== 0) fail(`7z listing failed: ${res.stderr}`);
+  const sevenZip = find7z();
+  const res = spawnSync(sevenZip, ["l", "-slt", artifact], { encoding: "utf8" });
+  if (res.status !== 0) {
+    fail(
+      `7z listing failed (exit ${res.status}) for ${artifact}\n  command: ${sevenZip} l -slt <artifact>\n  stdout: ${(res.stdout ?? "").trim()}\n  stderr: ${(res.stderr ?? "").trim()}`,
+    );
+  }
   return parseSltListing(res.stdout ?? "");
 }
 

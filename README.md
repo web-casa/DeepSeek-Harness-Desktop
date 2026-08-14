@@ -66,10 +66,14 @@ pnpm icons                         # 从 icon-source.png 重新生成平台图�
 
 | 脚本 | 作用 |
 |---|---|
-| `download-node.ts` | 按 manifest 版本下载官方 Node 二进制（平台/架构自动映射） |
-| `prepare-harness.ts` | runtime/ 下 `pnpm install` 后复制 node_modules + 署名文件到 bundle resources；交叉校验 manifest 与安装版本 |
+| `download-node.ts` | 按 manifest 版本下载官方 Node 二进制（SHA-256 校验，平台/架构自动映射） |
+| `prepare-harness.ts` | runtime/ 下 `npm ci`（扁平布局）后物化（零符号链接）复制到 bundle resources；交叉校验 manifest 与安装版本 |
 | `build-sidecar.ts` | `cargo build --release --target <host-triple>` 并暂存到 resources/runtime |
-| `verify-runtime.ts` | 冒烟：boot → readiness → HTTP 200 → status → restart → HTTP 200 → shutdown → 孤儿进程检查 → sidecar 随父退出 |
+| `verify-runtime.ts` | 冒烟：boot → readiness → HTTP 200 → status → restart → HTTP 200 → shutdown → 孤儿进程检查 → sidecar 随父退出；支持 `--runtime-dir`（重定位验证） |
+| `check-runtime-links.ts` | 断言 staged harness 树零符号链接 |
+| `relocate-runtime.ts` | 物化复制 runtime 到 `.tmp` 供重定位冒烟 |
+| `verify-bundle.ts` | 安装包内容断言：NSIS 用 7z、DMG 用 hdiutil；校验主二进制类型、runtime 全树、平台 node-pty prebuild、零符号链接；`--self-test` 可在任意平台跑解析器测试 |
+| `lib/materialize.ts` | 物化器：递归展开符号链接/junction，文件硬链接零额外空间 |
 
 ## dsh-sidecar 协议（NDJSON，stdin 命令 / stdout 事件）
 
@@ -96,11 +100,11 @@ pnpm icons                         # 从 icon-source.png 重新生成平台图�
 
 ## CI
 
-- **test.yml**：ubuntu 上 sidecar 单测 + 三 target 交叉编译检查 + 前端构建；
-  三平台（ubuntu/windows/macos-14）各跑一遍完整 runtime 冒烟。
-- **release.yml**：tag 触发，在 windows-latest / macos-14 上先冒烟后打包
-  （NSIS / DMG），产物上传为 GitHub Release draft。签名/公证/updater 的
-  secrets 已在 workflow 中留位（P3 接入）。
+- **test.yml**：ubuntu 上 sidecar 单测 + 三 target 交叉编译检查 + 前端构建 +
+  bundle 校验器自测；三平台（ubuntu/windows/macos-14）各跑一遍完整 runtime 冒烟。
+- **release.yml**：tag 触发 → 冒烟 → 打包（NSIS/DMG）→ **安装包内容断言**
+  （`verify-bundle.ts`）→ 产物上传 → draft release。签名/公证 secrets 已留位（P3）。
+  `workflow_dispatch` 为只构建+验证的测试通道（不发布）。
 
 ## 版本升级流程
 
