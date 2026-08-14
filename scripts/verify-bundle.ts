@@ -81,10 +81,15 @@ function parseSltListing(text: string): string[] {
 
 function listNsisEntries(artifact: string): string[] {
   const sevenZip = find7z();
-  const res = spawnSync(sevenZip, ["l", "-slt", artifact], { encoding: "utf8" });
+  // -slt output for ~2k entries exceeds spawnSync's 1MB default buffer —
+  // the child gets killed mid-listing otherwise (status null, ENOBUFS).
+  const res = spawnSync(sevenZip, ["l", "-slt", artifact], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
   if (res.status !== 0) {
     fail(
-      `7z listing failed (exit ${res.status}) for ${artifact}\n  command: ${sevenZip} l -slt <artifact>\n  stdout: ${(res.stdout ?? "").trim()}\n  stderr: ${(res.stderr ?? "").trim()}`,
+      `7z listing failed (exit ${res.status}, error ${res.error?.message ?? "none"}) for ${artifact}\n  command: ${sevenZip} l -slt <artifact>\n  stdout tail: ${(res.stdout ?? "").trim().slice(-400)}\n  stderr: ${(res.stderr ?? "").trim()}`,
     );
   }
   return parseSltListing(res.stdout ?? "");
@@ -137,6 +142,7 @@ Size = 2001
 function extractNsisFile(artifact: string, innerPath: string, outDir: string): string {
   const res = spawnSync(find7z(), ["e", artifact, `-o${outDir}`, innerPath, "-y"], {
     encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
   });
   if (res.status !== 0) fail(`7z extraction of ${innerPath} failed: ${res.stderr}`);
   return join(outDir, innerPath.split("/").pop()!);
