@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -48,6 +49,7 @@ pub struct Runtime {
     pub state: Arc<Mutex<SharedState>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Arc<Mutex<Option<Child>>>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 fn log_line(state: &Mutex<SharedState>, stream: &str, line: &str) {
@@ -75,7 +77,9 @@ fn refresh_pid(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
 }
 
 fn open_harness_window(app: &AppHandle, url: &str) {
-    let Ok(parsed) = tauri::Url::parse(url) else { return };
+    let Ok(parsed) = tauri::Url::parse(url) else {
+        return;
+    };
     let app = app.clone();
     let app_in = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -105,6 +109,15 @@ fn handle_event(
 ) {
     let ty = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match ty {
+        "ack" => {
+            if ev.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+                let msg = ev
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown sidecar error");
+                set_error(state, msg.to_string());
+            }
+        }
         "sidecar" => {
             if let Some(v) = ev.get("version").and_then(|v| v.as_str()) {
                 state.lock().unwrap().versions.sidecar = v.to_string();
@@ -114,7 +127,11 @@ fn handle_event(
             state.lock().unwrap().status = Status::Starting;
         }
         "ready" => {
-            let url = ev.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = ev
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             {
                 let mut s = state.lock().unwrap();
                 s.status = Status::Running;
@@ -157,7 +174,10 @@ fn handle_event(
             }
         }
         "log" => {
-            let stream = ev.get("stream").and_then(|v| v.as_str()).unwrap_or("stdout");
+            let stream = ev
+                .get("stream")
+                .and_then(|v| v.as_str())
+                .unwrap_or("stdout");
             let line = ev.get("line").and_then(|v| v.as_str()).unwrap_or("");
             log_line(state, stream, line);
         }
@@ -206,18 +226,86 @@ fn read_versions(paths: &RuntimePaths) -> Versions {
 
 /// Spawn the sidecar, wire the reader thread, and auto-start the Harness.
 pub fn init(app: &AppHandle) {
-    let paths = resolve(app);
-
     let stdin_arc: Arc<Mutex<Option<ChildStdin>>> = Arc::new(Mutex::new(None));
     let child_arc: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let paths = match resolve(app) {
+        Ok(paths) => paths,
+        Err(e) => {
+            let state = Arc::new(Mutex::new(SharedState::default()));
+            set_error(&state, e);
+            app.manage(Runtime {
+                state,
+                stdin: stdin_arc.clone(),
+                child: child_arc.clone(),
+                shutting_down: shutting_down.clone(),
+            });
+            return;
+        }
+    };
 
     if let Err(e) = std::fs::create_dir_all(&paths.dsh_home) {
         let state = Arc::new(Mutex::new(SharedState::default()));
-        set_error(&state, format!("无法创建数据目录 {}: {e}", paths.dsh_home.display()));
+        set_error(
+            &state,
+            format!("无法创建数据目录 {}: {e}", paths.dsh_home.display()),
+        );
         app.manage(Runtime {
             state,
             stdin: stdin_arc.clone(),
             child: child_arc.clone(),
+            shutting_down: shutting_down.clone(),
+        });
+        return;
+    }
+
+    match std::fs::symlink_metadata(&paths.dsh_home) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let state = Arc::new(Mutex::new(SharedState::default()));
+            set_error(
+                &state,
+                format!("数据目录 {} 不能是符号链接", paths.dsh_home.display()),
+            );
+            app.manage(Runtime {
+                state,
+                stdin: stdin_arc.clone(),
+                child: child_arc.clone(),
+                shutting_down: shutting_down.clone(),
+            });
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let state = Arc::new(Mutex::new(SharedState::default()));
+            set_error(
+                &state,
+                format!("无法检查数据目录 {}: {e}", paths.dsh_home.display()),
+            );
+            app.manage(Runtime {
+                state,
+                stdin: stdin_arc.clone(),
+                child: child_arc.clone(),
+                shutting_down: shutting_down.clone(),
+            });
+            return;
+        }
+    }
+
+    #[cfg(unix)]
+    if let Err(e) = std::fs::set_permissions(
+        &paths.dsh_home,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    ) {
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        set_error(
+            &state,
+            format!("无法设置数据目录权限 {}: {e}", paths.dsh_home.display()),
+        );
+        app.manage(Runtime {
+            state,
+            stdin: stdin_arc.clone(),
+            child: child_arc.clone(),
+            shutting_down: shutting_down.clone(),
         });
         return;
     }
@@ -233,6 +321,7 @@ pub fn init(app: &AppHandle) {
         state: state.clone(),
         stdin: stdin_arc.clone(),
         child: child_arc.clone(),
+        shutting_down: shutting_down.clone(),
     });
     let runtime = app.state::<Runtime>();
 
@@ -267,6 +356,49 @@ pub fn init(app: &AppHandle) {
     }
     if let Some(child) = child.take() {
         *child_arc.lock().unwrap() = Some(child);
+    }
+
+    // Sidecar death watcher: a sidecar exit without an intentional app
+    // shutdown is surfaced even if no final NDJSON event was received.
+    {
+        let child_c = child_arc.clone();
+        let state_c = state.clone();
+        let stdin_c = stdin_arc.clone();
+        let shutting_down_c = shutting_down.clone();
+        let app_c = app.clone();
+        std::thread::spawn(move || loop {
+            let exited = {
+                let mut child = child_c.lock().unwrap();
+                match child.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => Some(status),
+                        Ok(None) | Err(_) => None,
+                    },
+                    None => return,
+                }
+            };
+
+            if let Some(status) = exited {
+                if !shutting_down_c.load(Ordering::SeqCst) {
+                    let _ = stdin_c.lock().unwrap().take();
+                    let code = status
+                        .code()
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    {
+                        let mut s = state_c.lock().unwrap();
+                        s.last_error = Some(format!("sidecar 进程意外退出 (code {code})"));
+                        s.status = Status::Crashed;
+                        s.pid = None;
+                    }
+                    let snapshot = snapshot_payload(&state_c);
+                    let _ = app_c.emit_to("bootstrap", "harness-event", &snapshot);
+                }
+                return;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
     }
 
     // Reader threads: stdout = NDJSON events, stderr = plain log lines.
@@ -310,8 +442,11 @@ pub fn init(app: &AppHandle) {
             "cwd": paths.harness_dir,
             "env": { "DSH_HOME": paths.dsh_home },
         });
-        send_raw(&runtime, &cmd);
-        state.lock().unwrap().status = Status::Starting;
+        if let Err(e) = send_raw(&runtime, &cmd) {
+            set_error(&state, e);
+        } else {
+            state.lock().unwrap().status = Status::Starting;
+        }
     } else {
         set_error(
             &state,
@@ -320,33 +455,50 @@ pub fn init(app: &AppHandle) {
     }
 }
 
-pub fn send_raw(runtime: &Runtime, cmd: &Value) {
+pub fn send_raw(runtime: &Runtime, cmd: &Value) -> Result<(), String> {
     let mut stdin = runtime.stdin.lock().unwrap();
-    if let Some(stdin) = stdin.as_mut() {
-        let _ = writeln!(stdin, "{cmd}");
-        let _ = stdin.flush();
+    let stdin = stdin
+        .as_mut()
+        .ok_or_else(|| "sidecar stdin unavailable".to_string())?;
+    writeln!(stdin, "{cmd}").map_err(|e| format!("failed to write to sidecar: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("failed to flush sidecar command: {e}"))
+}
+
+pub fn child_alive(runtime: &Runtime) -> bool {
+    match runtime.child.lock().unwrap().as_mut() {
+        Some(child) => matches!(child.try_wait(), Ok(None)),
+        None => false,
     }
 }
 
 /// Blocking teardown used on app exit: polite shutdown, then reap the sidecar.
 pub fn shutdown_blocking(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
-    send_raw(&runtime, &serde_json::json!({"id": 900, "command": "shutdown"}));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
-    loop {
-        if let Some(child) = runtime.child.lock().unwrap().as_mut() {
-            if child.try_wait().ok().flatten().is_some() {
-                break;
-            }
-        } else {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            if let Some(child) = runtime.child.lock().unwrap().as_mut() {
-                let _ = child.kill();
-            }
+    runtime.shutting_down.store(true, Ordering::SeqCst);
+    let _ = send_raw(
+        &runtime,
+        &serde_json::json!({"id": 900, "command": "shutdown"}),
+    );
+
+    let stopped_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < stopped_deadline {
+        if runtime.state.lock().unwrap().status == Status::Stopped {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    *runtime.stdin.lock().unwrap() = None;
+
+    let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while child_alive(&runtime) && std::time::Instant::now() < exit_deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if child_alive(&runtime) {
+        if let Some(child) = runtime.child.lock().unwrap().as_mut() {
+            let _ = child.kill();
+        }
     }
 }

@@ -2,5 +2,12 @@
   "desktopVersion": "0.1.0",
   "harnessVersion": "0.1.0-rc.6",
   "nodeVersion": "24.18.0",
-  "sidecarVersion": "0.1.0"
+  "sidecarVersion": "0.1.0",
+  "nodeSha256": {
+    "win32-x64": "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
+    "darwin-arm64": "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+    "darwin-x64": "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
+    "linux-x64": "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742",
+    "linux-arm64": "58c9520501f6ae2b52d5b210444e24b9d0c029a58c5011b797bc1fe7105886f6"
+  }
 }

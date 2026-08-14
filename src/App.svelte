@@ -135,7 +135,7 @@
     return status === "starting" ? "active" : "done";
   }
 
-  const booting = status === "idle" || status === "starting" || status === "stopping";
+  let booting = $derived(status === "idle" || status === "starting" || status === "stopping");
 </script>
 
 <div class="app">
@@ -228,7 +228,7 @@
       {#if logs.length === 0}
         <span class="l-empty">（暂无日志）</span>
       {:else}
-        {#each logs as [stream, line] (line)}
+        {#each logs as [stream, line], i (i)}
           <div class="l-{stream}">{line}</div>
         {/each}
       {/if}

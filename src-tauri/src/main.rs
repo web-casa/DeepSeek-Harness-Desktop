@@ -7,7 +7,18 @@ mod harness;
 mod paths;
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_window_event(|window, event| {
+        if window.label() == "bootstrap" {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        }
+    });
+
+    builder
         .setup(|app| {
             harness::init(&app.handle().clone());
             Ok(())

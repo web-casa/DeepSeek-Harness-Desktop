@@ -10,7 +10,7 @@
 //! pinned Desktop runtime can never corrupt a user's CLI profiles.
 
 use std::path::PathBuf;
-use tauri::{Manager, path::BaseDirectory};
+use tauri::{path::BaseDirectory, Manager};
 
 pub struct RuntimePaths {
     pub sidecar: PathBuf,
@@ -19,13 +19,19 @@ pub struct RuntimePaths {
     pub dsh_home: PathBuf,
 }
 
-pub fn resolve(app: &tauri::AppHandle) -> RuntimePaths {
+pub fn resolve(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
     let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
     let sidecar_name = format!("sidecar{exe_suffix}");
     let node_name = format!("node{exe_suffix}");
 
     let (sidecar, node, harness_dir) = if let Ok(d) = std::env::var("DSH_RUNTIME_DIR") {
         let base = PathBuf::from(d);
+        if base.as_os_str().is_empty() {
+            return Err("DSH_RUNTIME_DIR is set but empty".to_string());
+        }
+        if !base.is_absolute() {
+            return Err("DSH_RUNTIME_DIR must be an absolute path".to_string());
+        }
         (
             base.join(&sidecar_name),
             base.join(&node_name),
@@ -43,7 +49,7 @@ pub fn resolve(app: &tauri::AppHandle) -> RuntimePaths {
         let base = app
             .path()
             .resolve("runtime", BaseDirectory::Resource)
-            .unwrap_or_default();
+            .map_err(|e| format!("无法解析运行时资源目录: {e}"))?;
         (
             base.join(&sidecar_name),
             base.join(&node_name),
@@ -56,14 +62,14 @@ pub fn resolve(app: &tauri::AppHandle) -> RuntimePaths {
     } else {
         app.path()
             .app_data_dir()
-            .unwrap_or_else(|_| std::env::temp_dir().join("dsh-desktop"))
+            .map_err(|e| format!("无法解析应用数据目录: {e}"))?
             .join("harness")
     };
 
-    RuntimePaths {
+    Ok(RuntimePaths {
         sidecar,
         node,
         harness_dir,
         dsh_home,
-    }
+    })
 }

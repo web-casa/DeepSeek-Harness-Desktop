@@ -5,8 +5,9 @@
 // .zip/.tar.gz, GNU tar on Linux handles .tar.xz), so the script has zero
 // npm dependencies.
 
-import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync, copyFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync, copyFileSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readManifest, runtimeDir, nodePath, tmpDir, fail, ok, info } from "./lib/common.ts";
 
@@ -61,8 +62,10 @@ function run(cmd: string, args: string[]): void {
   if (res.status !== 0) fail(`${cmd} ${args.join(" ")} exited with ${res.status}`);
 }
 
+const manifest = readManifest();
+const platformKey = `${process.platform}-${process.arch}`;
 const dist = distFor();
-const v = readManifest().nodeVersion;
+const v = manifest.nodeVersion;
 // Scratch stays OUTSIDE src-tauri/resources/runtime — everything in there
 // gets bundled into the app. Only the final binary is copied in.
 const scratch = join(tmpDir, "node-dist");
@@ -70,6 +73,7 @@ const archive = join(scratch, dist.file);
 const extractDir = join(scratch, "extract");
 
 mkdirSync(runtimeDir, { recursive: true });
+mkdirSync(scratch, { recursive: true });
 rmSync(extractDir, { recursive: true, force: true });
 mkdirSync(extractDir, { recursive: true });
 
@@ -77,6 +81,13 @@ if (!existsSync(archive)) {
   await download(`https://nodejs.org/dist/v${v}/${dist.file}`, archive);
 } else {
   info(`reusing cached archive ${dist.file}`);
+}
+
+const expectedSha256 = manifest.nodeSha256[platformKey];
+if (!expectedSha256) fail(`runtime-manifest.json is missing nodeSha256 for ${platformKey}`);
+const actualSha256 = createHash("sha256").update(readFileSync(archive)).digest("hex");
+if (actualSha256.toLowerCase() !== expectedSha256.toLowerCase()) {
+  fail(`SHA-256 mismatch for ${dist.file}: expected ${expectedSha256}, got ${actualSha256}`);
 }
 
 info(`extracting ${dist.file}`);

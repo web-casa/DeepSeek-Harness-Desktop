@@ -18,6 +18,7 @@ export interface RuntimeManifest {
   harnessVersion: string;
   nodeVersion: string;
   sidecarVersion: string;
+  nodeSha256: Record<string, string>;
 }
 
 export function readManifest(): RuntimeManifest {

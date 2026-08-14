@@ -4,7 +4,7 @@
 //! only the local "bootstrap" window has the `allow-*` grants; the remote
 //! Harness WebView has an empty capability set and cannot invoke anything.
 
-use crate::harness::{Runtime, send_raw, snapshot_payload};
+use crate::harness::{child_alive, send_raw, snapshot_payload, Runtime};
 use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 
@@ -25,18 +25,50 @@ pub fn get_versions(runtime: State<'_, Runtime>) -> Value {
 
 #[tauri::command]
 pub fn restart(runtime: State<'_, Runtime>) -> Result<(), String> {
-    {
+    if !child_alive(&runtime) {
+        let error = "sidecar 未运行".to_string();
         let mut s = runtime.state.lock().unwrap();
-        s.last_error = None;
-        s.status = crate::harness::Status::Starting;
+        s.last_error = Some(error.clone());
+        s.status = crate::harness::Status::Crashed;
+        return Err(error);
     }
-    send_raw(&runtime, &serde_json::json!({"id": 100, "command": "restart"}));
+
+    if let Err(error) = send_raw(
+        &runtime,
+        &serde_json::json!({"id": 100, "command": "restart"}),
+    ) {
+        let mut s = runtime.state.lock().unwrap();
+        s.last_error = Some(error.clone());
+        s.status = crate::harness::Status::Crashed;
+        return Err(error);
+    }
+
+    let mut s = runtime.state.lock().unwrap();
+    s.last_error = None;
+    s.status = crate::harness::Status::Starting;
     Ok(())
 }
 
 #[tauri::command]
 pub fn shutdown(runtime: State<'_, Runtime>) -> Result<(), String> {
-    send_raw(&runtime, &serde_json::json!({"id": 101, "command": "shutdown"}));
+    if !child_alive(&runtime) {
+        let error = "sidecar 未运行".to_string();
+        let mut s = runtime.state.lock().unwrap();
+        s.last_error = Some(error.clone());
+        s.status = crate::harness::Status::Crashed;
+        return Err(error);
+    }
+
+    if let Err(error) = send_raw(
+        &runtime,
+        &serde_json::json!({"id": 101, "command": "shutdown"}),
+    ) {
+        let mut s = runtime.state.lock().unwrap();
+        s.last_error = Some(error.clone());
+        s.status = crate::harness::Status::Crashed;
+        return Err(error);
+    }
+
     Ok(())
 }
 
@@ -49,8 +81,7 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
         .url
         .clone()
         .ok_or_else(|| "Harness 尚未就绪".to_string())?;
-    let parsed =
-        tauri::Url::parse(&url).map_err(|e| format!("无效 URL: {e}"))?;
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("无效 URL: {e}"))?;
     let app = app.clone();
     let app_in = app.clone();
     let _ = app.run_on_main_thread(move || {

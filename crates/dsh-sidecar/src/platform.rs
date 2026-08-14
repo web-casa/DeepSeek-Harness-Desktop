@@ -55,18 +55,17 @@ mod imp {
             let pid = child.id();
             Ok(PlatformChild {
                 child,
-                kill: Kill {
-                    pgid: pid as i32,
-                },
+                kill: Kill { pgid: pid as i32 },
             })
         }
 
         /// Polite shutdown: give the tree a chance to clean up.
-        pub fn graceful(&self) {
+        pub fn graceful(&self) -> bool {
             // Safe: pgid refers to a live process group we created.
             unsafe {
                 libc::kill(-self.kill.pgid, libc::SIGTERM);
             }
+            true
         }
 
         /// Immediate teardown of the whole tree.
@@ -94,8 +93,18 @@ mod imp {
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+    struct JobGuard(HANDLE);
+
+    impl Drop for JobGuard {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
     struct Kill {
-        job: HANDLE,
+        job: JobGuard,
         pid: u32,
     }
 
@@ -116,16 +125,45 @@ mod imp {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-            let child = cmd.spawn()?;
+            let mut child = cmd.spawn()?;
             let pid = child.id();
-            let job = unsafe { make_job() };
-            if !job.is_null() {
-                // Safe: job is a valid handle, child handle lives in `child`.
-                unsafe {
-                    if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
-                        CloseHandle(job);
-                    }
-                }
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                let error = io::Error::last_os_error();
+                let _ = child.kill();
+                return Err(io::Error::other(format!(
+                    "job object setup failed: CreateJobObjectW: {error}"
+                )));
+            }
+            let job = JobGuard(job);
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set_ok = unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if set_ok == 0 {
+                let error = io::Error::last_os_error();
+                let _ = child.kill();
+                return Err(io::Error::other(format!(
+                    "job object setup failed: SetInformationJobObject: {error}"
+                )));
+            }
+
+            // Safe: job is a valid handle, child handle lives in `child`.
+            let assign_ok =
+                unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) };
+            if assign_ok == 0 {
+                let error = io::Error::last_os_error();
+                let _ = child.kill();
+                return Err(io::Error::other(format!(
+                    "job object setup failed: AssignProcessToJobObject: {error}"
+                )));
             }
             Ok(PlatformChild {
                 child,
@@ -135,43 +173,18 @@ mod imp {
 
         /// Polite shutdown: CTRL_BREAK to the child's console process group.
         /// Node treats it as SIGBREAK and tears down its own subprocesses.
-        pub fn graceful(&self) {
-            if self.kill.pid != 0 {
-                unsafe {
-                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.kill.pid);
-                }
-            }
+        pub fn graceful(&self) -> bool {
+            self.kill.pid != 0
+                && unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.kill.pid) != 0 }
         }
 
         /// Immediate teardown of the whole tree via the Job Object.
         pub fn force(&self) {
-            if !self.kill.job.is_null() {
-                // Safe: job handle was validated at spawn time.
-                unsafe {
-                    TerminateJobObject(self.kill.job, 1);
-                }
+            // Safe: job handle was validated at spawn time.
+            unsafe {
+                TerminateJobObject(self.kill.job.0, 1);
             }
         }
-    }
-
-    unsafe fn make_job() -> HANDLE {
-        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job.is_null() {
-            return std::ptr::null_mut();
-        }
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let ok = SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &info as *const _ as *const core::ffi::c_void,
-            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        );
-        if ok == 0 {
-            CloseHandle(job);
-            return std::ptr::null_mut();
-        }
-        job
     }
 }
 

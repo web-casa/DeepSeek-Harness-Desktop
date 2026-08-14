@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! dsh-sidecar: a tiny process supervisor for the DeepSeek Harness runtime.
 //!
 //! It owns one job: keep the bundled Node + `dsh web` alive, report its state
@@ -25,18 +27,23 @@ mod platform;
 use platform::{PlatformChild, SpawnSpec};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(100);
 const FORCE_GRACE: Duration = Duration::from_secs(5);
+const NO_CONSOLE_GRACE: Duration = Duration::from_secs(2);
 
 /// Set by OS signal handlers: any termination signal becomes a clean tree
 /// teardown. Windows is additionally covered by the Job Object
 /// (KILL_ON_JOB_CLOSE), so no handlers are needed there.
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Tags output readers to their child, so late lines from a prior process
+/// cannot affect the process currently being supervised.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
 extern "C" fn on_termination_signal(_sig: libc::c_int) {
@@ -179,11 +186,14 @@ enum StopReason {
 struct Running {
     child: PlatformChild,
     pid: u32,
+    gen: u64,
 }
 
 impl Running {
-    fn spawn(spec: &SpawnSpec, tx: &Sender<String>) -> Result<Self, String> {
-        let mut child = PlatformChild::spawn(spec).map_err(|e| format!("failed to spawn node: {e}"))?;
+    fn spawn(spec: &SpawnSpec, tx: &Sender<(u64, &'static str, String)>) -> Result<Self, String> {
+        let gen = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let mut child =
+            PlatformChild::spawn(spec).map_err(|e| format!("failed to spawn node: {e}"))?;
         let pid = child.child.id();
         for (stream, pipe) in [
             (
@@ -207,14 +217,14 @@ impl Running {
                 let tx = tx.clone();
                 thread::spawn(move || {
                     for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                        if !line.is_empty() && tx.send(format!("{stream}\u{1}{line}")).is_err() {
+                        if !line.is_empty() && tx.send((gen, stream, line)).is_err() {
                             break;
                         }
                     }
                 });
             }
         }
-        Ok(Running { child, pid })
+        Ok(Running { child, pid, gen })
     }
 
     fn try_exit(&mut self) -> Option<std::process::ExitStatus> {
@@ -229,7 +239,10 @@ fn main() {
 
     emit(json!({"type":"sidecar","version":env!("CARGO_PKG_VERSION")}));
 
-    let (line_tx, line_rx): (Sender<String>, Receiver<String>) = channel();
+    let (line_tx, line_rx): (
+        Sender<(u64, &'static str, String)>,
+        Receiver<(u64, &'static str, String)>,
+    ) = channel();
     let (cmd_tx, cmd_rx): (Sender<String>, Receiver<String>) = channel();
 
     // stdin reader: commands in, parent-death detection out (EOF).
@@ -244,6 +257,7 @@ fn main() {
     });
 
     let mut running: Option<Running> = None;
+    let mut current_gen = 0;
     let mut state = "stopped";
     let mut url: Option<String> = None;
     let mut last_spec: Option<SpawnSpec> = None;
@@ -258,14 +272,8 @@ fn main() {
         ($spec:expr) => {{
             match Running::spawn(&$spec, &line_tx) {
                 Ok(r) => {
+                    current_gen = r.gen;
                     running = Some(r);
-                    state = "starting";
-                    url = None;
-                    stop_reason = None;
-                    grace_deadline = None;
-                    forced = false;
-                    ready_deadline = Some(Instant::now() + ready_timeout);
-                    emit(json!({"type":"starting"}));
                     true
                 }
                 Err(e) => {
@@ -280,14 +288,21 @@ fn main() {
     macro_rules! begin_stop {
         ($reason:expr) => {{
             if let Some(r) = running.as_ref() {
-                r.child.graceful();
+                let grace = if r.child.graceful() {
+                    shutdown_grace
+                } else {
+                    emit(json!({"type":"log","stream":"sidecar","line":"graceful stop unavailable (no console); forcing shortly"}));
+                    NO_CONSOLE_GRACE
+                };
                 state = "stopping";
                 stop_reason = Some($reason);
-                grace_deadline = Some(Instant::now() + shutdown_grace);
+                grace_deadline = Some(Instant::now() + grace);
                 forced = false;
                 emit(json!({"type":"stopping"}));
             } else {
                 state = "stopped";
+                url = None;
+                emit(json!({"type":"stopped","code":null,"pid":null}));
             }
         }};
     }
@@ -329,7 +344,15 @@ fn main() {
                 Some(StopReason::Restart) => {
                     emit(json!({"type":"stopped","code":code,"pid":pid}));
                     if let Some(spec) = last_spec.clone() {
-                        spawn_spec!(spec);
+                        if spawn_spec!(spec) {
+                            state = "starting";
+                            url = None;
+                            stop_reason = None;
+                            grace_deadline = None;
+                            forced = false;
+                            ready_deadline = Some(Instant::now() + ready_timeout);
+                            emit(json!({"type":"starting"}));
+                        }
                     } else {
                         state = "stopped";
                         url = None;
@@ -346,7 +369,9 @@ fn main() {
                     url = None;
                 }
                 Some(StopReason::ReadinessTimeout) => {
-                    emit(json!({"type":"crashed","code":code,"pid":pid,"message":"killed after readiness timeout"}));
+                    emit(
+                        json!({"type":"crashed","code":code,"pid":pid,"message":"killed after readiness timeout"}),
+                    );
                     state = "crashed";
                     url = None;
                 }
@@ -358,7 +383,9 @@ fn main() {
             if stop_reason.is_none() {
                 if let (Some(deadline), true) = (ready_deadline, state == "starting") {
                     if Instant::now() >= deadline {
-                        emit(json!({"type":"error","code":"readiness-timeout","message":"dsh web did not print its readiness line in time; killing the tree"}));
+                        emit(
+                            json!({"type":"error","code":"readiness-timeout","message":"dsh web did not print its readiness line in time; killing the tree"}),
+                        );
                         begin_stop!(StopReason::ReadinessTimeout);
                     }
                 }
@@ -370,7 +397,9 @@ fn main() {
                         }
                         forced = true;
                         grace_deadline = Some(Instant::now() + FORCE_GRACE);
-                        emit(json!({"type":"log","stream":"sidecar","line":"graceful shutdown timed out; sent force kill"}));
+                        emit(
+                            json!({"type":"log","stream":"sidecar","line":"graceful shutdown timed out; sent force kill"}),
+                        );
                     } else if let Some(r) = running.as_mut() {
                         // Last resort: std kill on the direct child.
                         let _ = r.child.child.kill();
@@ -382,9 +411,8 @@ fn main() {
 
         // 3. Pump child output lines.
         match line_rx.recv_timeout(TICK) {
-            Ok(msg) => {
-                let (stream, line) = msg.split_once('\u{1}').unwrap_or(("stdout", &msg));
-                if let Some(u) = extract_local_url(line) {
+            Ok((gen, stream, line)) if gen == current_gen => {
+                if let Some(u) = extract_local_url(&line) {
                     if state == "starting" {
                         url = Some(u.clone());
                         state = "running";
@@ -394,6 +422,7 @@ fn main() {
                 }
                 emit(json!({"type":"log","stream":stream,"line":line}));
             }
+            Ok(_) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // Pipes closed while the child is still un-reaped: nothing to read.
@@ -423,14 +452,36 @@ fn main() {
                 std::process::exit(0);
             }
             Ok(line) => match parse_command(&line) {
-                Ok((id, Command::Start { node, script, args, cwd, env })) => {
+                Ok((
+                    id,
+                    Command::Start {
+                        node,
+                        script,
+                        args,
+                        cwd,
+                        env,
+                    },
+                )) => {
                     if running.is_some() {
                         ack_err(id, "already started");
                     } else {
-                        let spec = SpawnSpec { node, script, args, cwd, env };
+                        let spec = SpawnSpec {
+                            node,
+                            script,
+                            args,
+                            cwd,
+                            env,
+                        };
                         if spawn_spec!(spec) {
                             last_spec = Some(spec);
                             ack_ok(id);
+                            emit(json!({"type":"starting"}));
+                            state = "starting";
+                            url = None;
+                            stop_reason = None;
+                            grace_deadline = None;
+                            forced = false;
+                            ready_deadline = Some(Instant::now() + ready_timeout);
                         } else {
                             ack_err(id, "spawn failed; see error event");
                         }
@@ -438,21 +489,29 @@ fn main() {
                 }
                 Ok((id, Command::Shutdown)) => {
                     begin_stop!(StopReason::Shutdown);
-                    if running.is_none() {
-                        state = "stopped";
-                        url = None;
-                    }
                     ack_ok(id);
                 }
                 Ok((id, Command::Restart)) => {
                     if running.is_some() {
                         begin_stop!(StopReason::Restart);
+                        ack_ok(id);
                     } else if let Some(spec) = last_spec.clone() {
                         if spawn_spec!(spec) {
                             last_spec = Some(spec);
+                            state = "starting";
+                            url = None;
+                            stop_reason = None;
+                            grace_deadline = None;
+                            forced = false;
+                            ready_deadline = Some(Instant::now() + ready_timeout);
+                            ack_ok(id);
+                            emit(json!({"type":"starting"}));
+                        } else {
+                            ack_err(id, "spawn failed; see error event");
                         }
+                    } else {
+                        ack_err(id, "nothing to restart");
                     }
-                    ack_ok(id);
                 }
                 Ok((id, Command::Status)) => {
                     let pid = running.as_ref().map(|r| r.pid);
@@ -533,9 +592,18 @@ mod tests {
 
     #[test]
     fn parses_simple_commands() {
-        assert_eq!(parse_command(r#"{"command":"shutdown"}"#).unwrap(), (None, Command::Shutdown));
-        assert_eq!(parse_command(r#"{"command":"restart"}"#).unwrap(), (None, Command::Restart));
-        assert_eq!(parse_command(r#"{"command":"status"}"#).unwrap(), (None, Command::Status));
+        assert_eq!(
+            parse_command(r#"{"command":"shutdown"}"#).unwrap(),
+            (None, Command::Shutdown)
+        );
+        assert_eq!(
+            parse_command(r#"{"command":"restart"}"#).unwrap(),
+            (None, Command::Restart)
+        );
+        assert_eq!(
+            parse_command(r#"{"command":"status"}"#).unwrap(),
+            (None, Command::Status)
+        );
     }
 
     #[test]

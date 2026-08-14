@@ -10,6 +10,30 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoRoot, runtimeDir, harnessDir, readManifest, fail, ok, info } from "./lib/common.ts";
 
+function copyDirectoryPreservingSymlinks(src: string, dest: string): void {
+  if (process.platform !== "win32") {
+    cpSync(src, dest, { recursive: true, verbatimSymlinks: true });
+    return;
+  }
+
+  const res = spawnSync("robocopy", [
+    src,
+    dest,
+    "/E",
+    "/COPY:DAT",
+    "/DCOPY:DAT",
+    "/R:1",
+    "/W:1",
+    "/NFL",
+    "/NDL",
+    "/NJH",
+    "/NJS",
+  ], { stdio: "inherit" });
+  if (res.status === null || res.status < 0 || res.status > 7) {
+    fail(`robocopy failed with exit code ${res.status}`);
+  }
+}
+
 const manifest = readManifest();
 const runtimePkgPath = join(repoRoot, "runtime", "package.json");
 const runtimePkg = JSON.parse(readFileSync(runtimePkgPath, "utf8")) as {
@@ -60,9 +84,13 @@ if (installedVersion !== manifest.harnessVersion) {
 // Stage into the bundle resources dir.
 rmSync(harnessDir, { recursive: true, force: true });
 mkdirSync(harnessDir, { recursive: true });
-cpSync(join(repoRoot, "runtime", "node_modules"), join(harnessDir, "node_modules"), {
-  recursive: true,
-});
+copyDirectoryPreservingSymlinks(
+  join(repoRoot, "runtime", "node_modules"),
+  join(harnessDir, "node_modules"),
+);
+if (!existsSync(join(harnessDir, "node_modules", "@deepseek-ai", "dsh", "package.json"))) {
+  fail("staged @deepseek-ai/dsh package.json missing");
+}
 cpSync(runtimePkgPath, join(harnessDir, "package.json"));
 
 // Attribution: LICENSE from the dsh package; per-dependency notices come in P3.

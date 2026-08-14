@@ -66,5 +66,11 @@ jobs:
       - name: Prepare Harness runtime
         run: node scripts/prepare-harness.ts
 
+      - name: Check staged runtime links are relocatable
+        run: node scripts/check-runtime-links.ts
+
+      - name: Relocation smoke
+        run: node scripts/relocate-runtime.ts && node scripts/verify-runtime.ts --runtime-dir .tmp/relocated-runtime
+
       - name: Runtime smoke
         run: node scripts/verify-runtime.ts

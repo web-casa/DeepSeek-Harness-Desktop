@@ -9,15 +9,12 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   repoRoot,
-  runtimeDir,
-  harnessDir,
   readManifest,
-  sidecarPath,
-  nodePath,
   tmpDir,
+  exeSuffix,
   fail,
   ok,
   info,
@@ -37,14 +34,28 @@ interface Event {
 }
 
 const verbose = process.argv.includes("--verbose");
+const runtimeDirArg = process.argv.indexOf("--runtime-dir");
+if (runtimeDirArg >= 0 && !process.argv[runtimeDirArg + 1]) {
+  fail("--runtime-dir requires a path");
+}
+const runtimeDir = runtimeDirArg >= 0
+  ? resolve(process.argv[runtimeDirArg + 1])
+  : join(repoRoot, "src-tauri/resources/runtime");
+const harnessDir = join(runtimeDir, "harness");
+const sidecarPath = join(runtimeDir, `sidecar${exeSuffix}`);
+const nodePath = join(runtimeDir, `node${exeSuffix}`);
 const manifest = readManifest();
 
 function requireFile(path: string, label: string): void {
   if (!existsSync(path)) fail(`${label} missing at ${path} — run scripts/build-sidecar.ts / download-node.ts / prepare-harness.ts first`);
 }
 
-requireFile(sidecarPath(), "sidecar binary");
-requireFile(nodePath(), "bundled node");
+function runtimeFail(message: string): never {
+  throw new Error(message);
+}
+
+requireFile(sidecarPath, "sidecar binary");
+requireFile(nodePath, "bundled node");
 const dshBin = join(harnessDir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
 requireFile(dshBin, "dsh entry (lib/bin.js)");
 
@@ -88,7 +99,7 @@ function waitFor(
   });
 }
 
-const sidecar = spawn(sidecarPath(), [], {
+const sidecar = spawn(sidecarPath, [], {
   cwd: runtimeDir,
   stdio: ["pipe", "pipe", "inherit"],
 });
@@ -125,8 +136,8 @@ sidecar.on("exit", (code) => {
 async function probe(url: string): Promise<void> {
   const res = await fetch(url, { redirect: "follow" });
   const body = await res.text();
-  if (res.status !== 200) fail(`GET ${url} → HTTP ${res.status}`);
-  if (!/<!doctype|<html|<div/i.test(body)) fail(`GET ${url} returned a non-HTML body (${body.length} bytes)`);
+  if (res.status !== 200) runtimeFail(`GET ${url} → HTTP ${res.status}`);
+  if (!/<!doctype|<html|<div/i.test(body)) runtimeFail(`GET ${url} returned a non-HTML body (${body.length} bytes)`);
   ok(`HTTP ${res.status} · ${body.length} bytes · Harness UI served`);
 }
 
@@ -136,7 +147,7 @@ async function main(): Promise<void> {
   // --- boot -------------------------------------------------------------
   send({
     command: "start",
-    node: nodePath(),
+    node: nodePath,
     script: dshBin,
     args: ["web", "--host", "127.0.0.1", "--port", "0"],
     cwd: harnessDir,
@@ -150,8 +161,9 @@ async function main(): Promise<void> {
   // --- status -----------------------------------------------------------
   const statusId = send({ command: "status" });
   const status = (await waitFor((e) => e.type === "status" && e.id === statusId, "status", 5_000)) as Event;
+  if (typeof status.pid !== "number") runtimeFail(`status reply missing numeric pid: ${JSON.stringify(status)}`);
   if (status.state !== "running" || status.url !== ready.url) {
-    fail(`unexpected status reply: ${JSON.stringify(status)}`);
+    runtimeFail(`unexpected status reply: ${JSON.stringify(status)}`);
   }
   ok(`status → running, pid ${status.pid}`);
 
@@ -167,16 +179,32 @@ async function main(): Promise<void> {
   // --- shutdown + orphan check ------------------------------------------
   send({ command: "shutdown" });
   const stopped = (await waitFor((e) => e.type === "stopped", "stopped (shutdown)", 30_000, 2)) as Event;
+  if (typeof stopped.pid !== "number") runtimeFail(`stopped reply missing numeric pid: ${JSON.stringify(stopped)}`);
   ok(`shutdown → exited code ${stopped.code}`);
 
   // The harness pid (from the final stopped event) must be gone now.
   let alive = true;
   try {
-    process.kill(stopped.pid!, 0);
+    process.kill(stopped.pid, 0);
   } catch {
     alive = false;
   }
-  if (alive) fail(`orphan process: harness pid ${stopped.pid} still alive after shutdown`);
+  if (alive) runtimeFail(`orphan process: harness pid ${stopped.pid} still alive after shutdown`);
+
+  if (process.platform !== "win32") {
+    let groupError: NodeJS.ErrnoException | undefined;
+    try {
+      process.kill(-stopped.pid, 0);
+    } catch (e) {
+      groupError = e as NodeJS.ErrnoException;
+    }
+    if (!groupError) {
+      runtimeFail(`orphan process group: harness process group ${stopped.pid} still alive after shutdown`);
+    }
+    if (groupError.code !== "ESRCH") {
+      runtimeFail(`could not verify harness process group ${stopped.pid}: ${groupError.message}`);
+    }
+  }
 
   // Sidecar itself: closing stdin (parent gone) must make it exit 0.
   sidecar.stdin.end();
@@ -184,19 +212,38 @@ async function main(): Promise<void> {
   while (sidecarExitCode === null && Date.now() - t0 < 30_000) {
     await new Promise((r) => setTimeout(r, 100));
   }
-  if (sidecarExitCode !== 0) fail(`sidecar did not exit 0 after stdin EOF (exit ${sidecarExitCode})`);
+  if (sidecarExitCode !== 0) runtimeFail(`sidecar did not exit 0 after stdin EOF (exit ${sidecarExitCode})`);
   ok("no orphan processes; sidecar exited cleanly on parent EOF");
 
   rmSync(dshHome, { recursive: true, force: true });
   console.log("\n  PASS — runtime smoke complete");
 }
 
-main().catch((e: Error) => {
-  console.error(`\n✗ ${e.message}`);
-  try {
-    sidecar.kill("SIGKILL");
-  } catch {
-    /* already gone */
+async function waitForSidecarExit(timeoutMs: number): Promise<void> {
+  const t0 = Date.now();
+  while (sidecarExitCode === null && Date.now() - t0 < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 100));
   }
+}
+
+main().catch(async (e: Error) => {
+  try {
+    try {
+      sidecar.stdin.end();
+    } catch {
+      /* sidecar stdin already closed */
+    }
+    await waitForSidecarExit(10_000);
+    if (sidecarExitCode === null) {
+      try {
+        sidecar.kill("SIGKILL");
+      } catch {
+        /* sidecar already exited */
+      }
+    }
+  } finally {
+    rmSync(dshHome, { recursive: true, force: true });
+  }
+  console.error(`\n✗ ${e.message}`);
   process.exit(1);
 });
