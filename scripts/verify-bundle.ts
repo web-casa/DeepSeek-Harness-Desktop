@@ -118,7 +118,7 @@ Scanning the drive for archives:
 Listing archive: installer.exe
 
 --
-Path = D:\\a\\dsh-gui\\dsh-gui\\src-tauri\\target\\release\\bundle\\nsis\\installer.exe
+Path = D:\\a\\DeepSeek-Harness-Desktop\\DeepSeek-Harness-Desktop\\src-tauri\\target\\release\\bundle\\nsis\\installer.exe
 Type = Nsis
 Physical Size = 54822827
 
