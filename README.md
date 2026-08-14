@@ -4,6 +4,9 @@
 不是 fork——真正的 Harness 完整保留（Node.js + node_modules + Cordis 插件），
 桌面层只负责生命周期：Tauri 管窗口，Rust sidecar 管 Harness 进程。
 
+仓库：https://github.com/web-casa/dsh-gui · 下载：https://github.com/web-casa/dsh-gui/releases
+（v0.1.0：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
+
 ```
 ┌────────────────────────────────────────────────┐
 │ Tauri 2（bootstrap 窗口 + Harness 窗口）         │
@@ -109,15 +112,12 @@ Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
   → tag v* 发版（新 Node/新 Harness 随 Desktop 一起更新）
 ```
 
-## 当前状态与已知边界（P1）
+## 当前状态与已知边界（v0.1.0）
 
-- ✅ sidecar 三平台编译通过；本机端到端冒烟全绿（含重定位冒烟：副本 runtime 独立运行）
-- ✅ 真实 Tauri 应用验证：app → sidecar → node → dsh web 全链、DSH_HOME 完整初始化、
-  组信号杀后零残留、退出无孤儿
-- ✅ P1：单实例锁（第二实例秒退并聚焦已有窗口）、窗口尺寸/位置记忆（window-state）、
-  崩溃自动恢复（1s/2s/4s backoff，最多 3 次后停止）、diagnostics 一键复制、
-  macOS 关闭窗口=隐藏
-- ⏳ Windows/macOS 冒烟与打包由 CI 验证（本仓库尚未推送远端）
+- ✅ CI 四平台全绿（ubuntu / windows-latest / macos-14 + Linux 单测），Windows
+  冒烟含 boot → readiness → HTTP 200 → restart → shutdown → 无孤儿 + 重定位冒烟
+- ✅ v0.1.0 发布：NSIS 52MB / DMG 98MB（draft prerelease）
+- ✅ 单实例锁、窗口状态记忆、崩溃自动恢复、diagnostics、macOS 关闭=隐藏
 - ⏳ 未接入：代码签名 / 公证 / 自动更新 / 插件安装（bundled pnpm）
 - 未签名构建：Windows SmartScreen、macOS Gatekeeper 需要用户手动放行
 - Linux 仅为开发环境，不作为发行目标；node-pty 在 Linux dev 下无 prebuild
