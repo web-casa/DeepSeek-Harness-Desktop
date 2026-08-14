@@ -1,38 +1,19 @@
 // Prepare the bundled Harness runtime:
-//   pnpm install (frozen lockfile, production) in runtime/  →
-//   copy node_modules + attribution into src-tauri/resources/runtime/harness/
+//   npm ci (production, flat layout) in runtime/  →
+//   materialize node_modules + attribution into src-tauri/resources/runtime/harness/
+//
+// npm's flat layout is what keeps paths short (Windows MAX_PATH) and lets
+// Node resolve @deepseek-ai/* from the real top-level tree; the materializer
+// then removes every remaining symlink (.bin shims, nested links).
 //
 // The runtime/package.json pins @deepseek-ai/dsh exactly; runtime-manifest.json
 // is cross-checked so the bundle and the manifest can never drift.
 
-import { existsSync, readFileSync, rmSync, mkdirSync, cpSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync, copyFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoRoot, runtimeDir, harnessDir, readManifest, fail, ok, info } from "./lib/common.ts";
-
-function copyDirectoryPreservingSymlinks(src: string, dest: string): void {
-  if (process.platform !== "win32") {
-    cpSync(src, dest, { recursive: true, verbatimSymlinks: true });
-    return;
-  }
-
-  const res = spawnSync("robocopy", [
-    src,
-    dest,
-    "/E",
-    "/COPY:DAT",
-    "/DCOPY:DAT",
-    "/R:1",
-    "/W:1",
-    "/NFL",
-    "/NDL",
-    "/NJH",
-    "/NJS",
-  ], { stdio: "inherit" });
-  if (res.status === null || res.status < 0 || res.status > 7) {
-    fail(`robocopy failed with exit code ${res.status}`);
-  }
-}
+import { materialize } from "./lib/materialize.ts";
 
 const manifest = readManifest();
 const runtimePkgPath = join(repoRoot, "runtime", "package.json");
@@ -49,21 +30,15 @@ if (pinned !== manifest.harnessVersion) {
   );
 }
 
-info(`installing @deepseek-ai/dsh@${pinned} (production) into runtime/`);
-const storeDir = join(repoRoot, ".pnpm-store");
-mkdirSync(storeDir, { recursive: true });
+info(`installing @deepseek-ai/dsh@${pinned} (production, npm flat) into runtime/`);
 const env: NodeJS.ProcessEnv = {
   ...process.env,
   XDG_CACHE_HOME: join(repoRoot, ".tmp", "xdg-cache"),
   npm_config_cache: join(repoRoot, ".tmp", "npm-cache"),
 };
-const lockfile = join(repoRoot, "runtime", "pnpm-lock.yaml");
-const installArgs = existsSync(lockfile)
-  ? ["install", "--prod", "--frozen-lockfile", "--store-dir", storeDir]
-  : ["install", "--prod", "--store-dir", storeDir];
-// On Windows the pnpm shim is a .cmd file; spawnSync only resolves it through
-// a shell (cmd.exe handles PATHEXT/.cmd). Args are fixed strings — no injection.
-const res = spawnSync("pnpm", installArgs, {
+// npm ci: clean, reproducible install from the committed package-lock.json.
+// On Windows the npm shim is a .cmd file; spawnSync resolves it via a shell.
+const res = spawnSync("npm", ["ci", "--omit=dev", "--cache", env.npm_config_cache], {
   cwd: join(repoRoot, "runtime"),
   env,
   stdio: "inherit",
@@ -71,7 +46,7 @@ const res = spawnSync("pnpm", installArgs, {
 });
 if (res.status !== 0) {
   const detail = res.error ? ` (${res.error.message})` : ` (exit ${res.status})`;
-  fail(`pnpm install failed${detail}`);
+  fail(`npm ci failed${detail}`);
 }
 
 // Verify the installed version matches the manifest.
@@ -94,20 +69,20 @@ if (installedVersion !== manifest.harnessVersion) {
 // Stage into the bundle resources dir.
 rmSync(harnessDir, { recursive: true, force: true });
 mkdirSync(harnessDir, { recursive: true });
-copyDirectoryPreservingSymlinks(
+materialize(
   join(repoRoot, "runtime", "node_modules"),
   join(harnessDir, "node_modules"),
 );
 if (!existsSync(join(harnessDir, "node_modules", "@deepseek-ai", "dsh", "package.json"))) {
   fail("staged @deepseek-ai/dsh package.json missing");
 }
-cpSync(runtimePkgPath, join(harnessDir, "package.json"));
+copyFileSync(runtimePkgPath, join(harnessDir, "package.json"));
 
 // Attribution: LICENSE from the dsh package; per-dependency notices come in P3.
 const dshDir = join(harnessDir, "node_modules", "@deepseek-ai", "dsh");
 for (const file of ["LICENSE", "THIRD_PARTY_NOTICES.md", "README.zh.md", "README.md"]) {
   const src = join(dshDir, file);
-  if (existsSync(src)) cpSync(src, join(harnessDir, file));
+  if (existsSync(src)) materialize(src, join(harnessDir, file));
 }
 
 // A copy of the manifest travels with the bundle so About/diagnostics can
