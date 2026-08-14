@@ -25,12 +25,35 @@ mod platform;
 use platform::{PlatformChild, SpawnSpec};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(100);
 const FORCE_GRACE: Duration = Duration::from_secs(5);
+
+/// Set by OS signal handlers: any termination signal becomes a clean tree
+/// teardown. Windows is additionally covered by the Job Object
+/// (KILL_ON_JOB_CLOSE), so no handlers are needed there.
+static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_termination_signal(_sig: libc::c_int) {
+    EXIT_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_signal_handlers() {
+    unsafe {
+        libc::signal(libc::SIGTERM, on_termination_signal as usize);
+        libc::signal(libc::SIGINT, on_termination_signal as usize);
+        libc::signal(libc::SIGHUP, on_termination_signal as usize);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_signal_handlers() {}
 
 /// Extract `http://127.0.0.1:<port>` from the official readiness line:
 /// `dsh web: http://127.0.0.1:49321` (optionally with a ` (LAN: …)` suffix).
@@ -200,6 +223,7 @@ impl Running {
 }
 
 fn main() {
+    install_signal_handlers();
     let ready_timeout = env_ms("DSH_READY_TIMEOUT_MS", 120_000);
     let shutdown_grace = env_ms("DSH_SHUTDOWN_GRACE_MS", 10_000);
 
@@ -269,6 +293,26 @@ fn main() {
     }
 
     loop {
+        // 0. Termination signal received: tear the tree down and exit.
+        if EXIT_REQUESTED.load(Ordering::SeqCst) {
+            if let Some(r) = running.as_ref() {
+                r.child.force();
+                let deadline = Instant::now() + shutdown_grace;
+                while let Some(r) = running.as_mut() {
+                    if r.try_exit().is_some() {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = r.child.child.kill();
+                        let _ = r.try_exit();
+                        break;
+                    }
+                    thread::sleep(TICK);
+                }
+            }
+            std::process::exit(0);
+        }
+
         // 1. Reap the child if it exited.
         let mut exited: Option<(u32, Option<i32>)> = None;
         if let Some(r) = running.as_mut() {

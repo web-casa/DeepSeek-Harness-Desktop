@@ -32,8 +32,8 @@ pub fn resolve(app: &tauri::AppHandle) -> RuntimePaths {
             base.join("harness"),
         )
     } else if cfg!(debug_assertions) {
-        // `tauri dev`: the staged repo resources dir.
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources/runtime");
+        // `tauri dev`: the staged repo resources dir (src-tauri/resources/runtime).
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/runtime");
         (
             base.join(&sidecar_name),
             base.join(&node_name),

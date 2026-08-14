@@ -5,33 +5,12 @@
 //! Harness WebView has an empty capability set and cannot invoke anything.
 
 use crate::harness::{Runtime, send_raw, snapshot_payload};
-use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, State};
-
-#[derive(Serialize)]
-pub struct StatusPayload {
-    status: String,
-    url: Option<String>,
-    pid: Option<u32>,
-    last_error: Option<String>,
-    versions: Value,
-}
-
-fn payload(runtime: &Runtime) -> Value {
-    snapshot_payload(&runtime.state)
-}
+use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
-pub fn get_status(runtime: State<'_, Runtime>) -> StatusPayload {
-    let v = payload(&runtime);
-    serde_json::from_value(v).unwrap_or(StatusPayload {
-        status: "crashed".into(),
-        url: None,
-        pid: None,
-        last_error: Some("状态读取失败".into()),
-        versions: Value::Null,
-    })
+pub fn get_status(runtime: State<'_, Runtime>) -> Value {
+    snapshot_payload(&runtime.state)
 }
 
 #[tauri::command]
@@ -73,14 +52,15 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
     let parsed =
         tauri::Url::parse(&url).map_err(|e| format!("无效 URL: {e}"))?;
     let app = app.clone();
+    let app_in = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Some(win) = app.get_webview_window("harness") {
-            let _ = win.navigate(&parsed);
+        if let Some(win) = app_in.get_webview_window("harness") {
+            let _ = win.navigate(parsed.clone());
             let _ = win.show();
             let _ = win.set_focus();
         } else {
             let _ = tauri::WebviewWindowBuilder::new(
-                &app,
+                &app_in,
                 "harness",
                 tauri::WebviewUrl::External(parsed),
             )

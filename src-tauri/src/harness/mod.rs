@@ -4,19 +4,20 @@
 //! sidecar over NDJSON (the sidecar owns the Node/Harness tree). This keeps
 //! the privilege surface tiny and the protocol identical for CLI tooling.
 
-use crate::paths::RuntimePaths;
+use crate::paths::{resolve, RuntimePaths};
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager, Runtime as TauriRuntime};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MAX_LOGS: usize = 500;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
+    #[default]
     Idle,
     Starting,
     Running,
@@ -25,7 +26,7 @@ pub enum Status {
     Crashed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct Versions {
     pub desktop: String,
     pub harness: String,
@@ -65,8 +66,8 @@ fn set_error(state: &Mutex<SharedState>, message: impl Into<String>) {
 }
 
 /// Ask the sidecar for a status refresh (carries the real pid).
-fn refresh_pid(runtime: &Runtime) {
-    let mut stdin = runtime.stdin.lock().unwrap();
+fn refresh_pid(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
+    let mut stdin = stdin.lock().unwrap();
     if let Some(stdin) = stdin.as_mut() {
         let _ = writeln!(stdin, "{{\"id\":99,\"command\":\"status\"}}");
         let _ = stdin.flush();
@@ -74,17 +75,17 @@ fn refresh_pid(runtime: &Runtime) {
 }
 
 fn open_harness_window(app: &AppHandle, url: &str) {
-    let parsed = tauri::Url::parse(url);
-    let Ok(parsed) = parsed else { return };
+    let Ok(parsed) = tauri::Url::parse(url) else { return };
     let app = app.clone();
+    let app_in = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Some(win) = app.get_webview_window("harness") {
-            let _ = win.navigate(&parsed);
+        if let Some(win) = app_in.get_webview_window("harness") {
+            let _ = win.navigate(parsed.clone());
             let _ = win.show();
             let _ = win.set_focus();
         } else {
             let _ = tauri::WebviewWindowBuilder::new(
-                &app,
+                &app_in,
                 "harness",
                 tauri::WebviewUrl::External(parsed),
             )
@@ -96,38 +97,43 @@ fn open_harness_window(app: &AppHandle, url: &str) {
     });
 }
 
-fn handle_event<R: TauriRuntime>(app: &AppHandle<R>, runtime: &Runtime, ev: &Value) {
+fn handle_event(
+    app: &AppHandle,
+    state: &Arc<Mutex<SharedState>>,
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    ev: &Value,
+) {
     let ty = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match ty {
         "sidecar" => {
             if let Some(v) = ev.get("version").and_then(|v| v.as_str()) {
-                runtime.state.lock().unwrap().versions.sidecar = v.to_string();
+                state.lock().unwrap().versions.sidecar = v.to_string();
             }
         }
         "starting" => {
-            runtime.state.lock().unwrap().status = Status::Starting;
+            state.lock().unwrap().status = Status::Starting;
         }
         "ready" => {
             let url = ev.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
             {
-                let mut s = runtime.state.lock().unwrap();
+                let mut s = state.lock().unwrap();
                 s.status = Status::Running;
                 s.url = Some(url.clone());
                 s.last_error = None;
             }
-            refresh_pid(runtime);
+            refresh_pid(stdin);
             open_harness_window(app, &url);
         }
         "stopping" => {
-            runtime.state.lock().unwrap().status = Status::Stopping;
+            state.lock().unwrap().status = Status::Stopping;
         }
         "stopped" => {
             {
-                let mut s = runtime.state.lock().unwrap();
+                let mut s = state.lock().unwrap();
                 s.status = Status::Stopped;
                 s.pid = None;
             }
-            refresh_pid(runtime);
+            refresh_pid(stdin);
         }
         "crashed" => {
             let code = ev.get("code").and_then(|v| v.as_i64());
@@ -136,32 +142,32 @@ fn handle_event<R: TauriRuntime>(app: &AppHandle<R>, runtime: &Runtime, ev: &Val
                 .and_then(|v| v.as_str())
                 .map(|m| format!("Harness 进程异常退出 (code {code:?}): {m}"))
                 .unwrap_or_else(|| format!("Harness 进程异常退出 (code {code:?})"));
-            set_error(&runtime.state, msg);
+            set_error(state, msg);
         }
         "error" => {
             let msg = ev
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown sidecar error");
-            set_error(&runtime.state, msg.to_string());
+            set_error(state, msg.to_string());
         }
         "status" => {
             if let Some(pid) = ev.get("pid").and_then(|v| v.as_u64()) {
-                runtime.state.lock().unwrap().pid = Some(pid as u32);
+                state.lock().unwrap().pid = Some(pid as u32);
             }
         }
         "log" => {
             let stream = ev.get("stream").and_then(|v| v.as_str()).unwrap_or("stdout");
             let line = ev.get("line").and_then(|v| v.as_str()).unwrap_or("");
-            log_line(&runtime.state, stream, line);
+            log_line(state, stream, line);
         }
         _ => {}
     }
-    let snapshot = snapshot_payload(&runtime.state);
+    let snapshot = snapshot_payload(state);
     let _ = app.emit_to("bootstrap", "harness-event", &snapshot);
 }
 
-fn snapshot_payload(state: &Mutex<SharedState>) -> Value {
+pub fn snapshot_payload(state: &Arc<Mutex<SharedState>>) -> Value {
     let s = state.lock().unwrap();
     serde_json::json!({
         "status": s.status,
@@ -200,17 +206,19 @@ fn read_versions(paths: &RuntimePaths) -> Versions {
 
 /// Spawn the sidecar, wire the reader thread, and auto-start the Harness.
 pub fn init(app: &AppHandle) {
-    let paths = RuntimePaths::resolve(app);
+    let paths = resolve(app);
+
+    let stdin_arc: Arc<Mutex<Option<ChildStdin>>> = Arc::new(Mutex::new(None));
+    let child_arc: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
 
     if let Err(e) = std::fs::create_dir_all(&paths.dsh_home) {
         let state = Arc::new(Mutex::new(SharedState::default()));
         set_error(&state, format!("无法创建数据目录 {}: {e}", paths.dsh_home.display()));
-        let runtime = Runtime {
+        app.manage(Runtime {
             state,
-            stdin: Arc::new(Mutex::new(None)),
-            child: Arc::new(Mutex::new(None)),
-        };
-        app.manage(runtime);
+            stdin: stdin_arc.clone(),
+            child: child_arc.clone(),
+        });
         return;
     }
 
@@ -221,14 +229,12 @@ pub fn init(app: &AppHandle) {
         ..Default::default()
     }));
 
-    let runtime = Runtime {
+    app.manage(Runtime {
         state: state.clone(),
-        stdin: Arc::new(Mutex::new(None)),
-        child: Arc::new(Mutex::new(None)),
-    };
-    app.manage(runtime);
+        stdin: stdin_arc.clone(),
+        child: child_arc.clone(),
+    });
     let runtime = app.state::<Runtime>();
-    let runtime_handle = runtime.inner().clone();
 
     // Spawn the sidecar.
     let spawn_result = Command::new(&paths.sidecar)
@@ -237,7 +243,7 @@ pub fn init(app: &AppHandle) {
         .stderr(Stdio::piped())
         .spawn();
 
-    let (mut child, mut stdin, stdout, stderr) = match spawn_result {
+    let (mut child, stdin, stdout, stderr) = match spawn_result {
         Ok(mut c) => {
             let stdin = c.stdin.take();
             let stdout = c.stdout.take();
@@ -257,22 +263,21 @@ pub fn init(app: &AppHandle) {
     };
 
     if let Some(stdin) = stdin {
-        *runtime.stdin.lock().unwrap() = Some(stdin);
+        *stdin_arc.lock().unwrap() = Some(stdin);
     }
     if let Some(child) = child.take() {
-        *runtime.child.lock().unwrap() = Some(child);
+        *child_arc.lock().unwrap() = Some(child);
     }
 
     // Reader threads: stdout = NDJSON events, stderr = plain log lines.
-    let app_handle = app.clone();
     if let Some(stdout) = stdout {
-        let rt = runtime_handle.clone();
         let state_c = state.clone();
-        let app_c = app_handle.clone();
+        let stdin_c = stdin_arc.clone();
+        let app_c = app.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 match serde_json::from_str::<Value>(&line) {
-                    Ok(ev) => handle_event(&app_c, &rt, &ev),
+                    Ok(ev) => handle_event(&app_c, &state_c, &stdin_c, &ev),
                     Err(_) => log_line(&state_c, "sidecar", &line),
                 }
             }
@@ -306,10 +311,7 @@ pub fn init(app: &AppHandle) {
             "env": { "DSH_HOME": paths.dsh_home },
         });
         send_raw(&runtime, &cmd);
-        {
-            let mut s = state.lock().unwrap();
-            s.status = Status::Starting;
-        }
+        state.lock().unwrap().status = Status::Starting;
     } else {
         set_error(
             &state,

@@ -30,7 +30,6 @@
   let toast = $state<string | null>(null);
 
   let unlisten: (() => void) | null = null;
-  let logsTimer: ReturnType<typeof setInterval> | null = null;
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -114,27 +113,18 @@
       return;
     }
     unlisten = await onEvent((p) => apply(p));
-    logsTimer = setInterval(async () => {
-      if (logsOpen) logs = await getLogs();
-    }, 1000);
     return () => {
       unlisten?.();
-      if (logsTimer) clearInterval(logsTimer);
     };
   });
 
+  // Poll logs only while the console is open; clean up via effect return.
   $effect(() => {
-    logsOpen; // re-run timer decision when toggled
-    if (!inTauri) return;
-    if (logsOpen && logsTimer === null) {
-      logsTimer = setInterval(async () => {
-        logs = await getLogs();
-      }, 1000);
-    }
-    if (!logsOpen && logsTimer !== null) {
-      clearInterval(logsTimer);
-      logsTimer = null;
-    }
+    if (!inTauri || !logsOpen) return;
+    const timer = setInterval(async () => {
+      logs = await getLogs();
+    }, 1000);
+    return () => clearInterval(timer);
   });
 
   function stepClass(target: "check" | "start" | "ready"): string {

@@ -82,6 +82,15 @@ pnpm icons                         # 从 icon-source.png 重新生成平台图�
 
 超时可用 `DSH_READY_TIMEOUT_MS`（默认 120s）/ `DSH_SHUTDOWN_GRACE_MS`（默认 10s）调。
 
+### 进程树清理保证
+
+| 场景 | 清理路径 |
+|---|---|
+| 正常退出 / 关闭应用 | Tauri `RunEvent::Exit` → shutdown 命令 → 优雅停止（unix: SIGTERM 进程组；win: CTRL_BREAK）→ 超时后强杀 |
+| 应用崩溃（无信号波及 sidecar） | sidecar stdin EOF 检测 → 强杀整棵树 → exit 0 |
+| 整组信号（如终端 Ctrl+C / `timeout`） | sidecar 的 SIGTERM/SIGINT/SIGHUP 处理器 → 清理后 exit 0 |
+| sidecar 被 SIGKILL | unix 上无法兜底（已知边界）；Windows 由 Job Object `KILL_ON_JOB_CLOSE` 全兜底 |
+
 ## CI
 
 - **test.yml**：ubuntu 上 sidecar 单测 + 三 target 交叉编译检查 + 前端构建；
@@ -102,7 +111,9 @@ Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
 
 ## 当前状态与已知边界（P0）
 
-- ✅ sidecar 三平台编译通过；Linux 本机端到端冒烟全绿
+- ✅ sidecar 三平台编译通过（linux-arm64 本机、win-msvc、mac-arm64 cargo check）
+- ✅ 本机端到端冒烟全绿：boot → readiness → HTTP 200 → restart → HTTP 200 → shutdown → 无孤儿
+- ✅ 真实 Tauri 应用在 Xvfb 下运行验证：app → sidecar → node → dsh web 全链 + DSH_HOME 完整初始化 + 组信号杀后零残留
 - ⏳ Windows/macOS 冒烟与打包由 CI 验证（本仓库尚未推送远端）
 - ⏳ 未接入：代码签名 / 公证 / 自动更新 / 插件安装（bundled pnpm）/ 单实例锁
 - 未签名构建：Windows SmartScreen、macOS Gatekeeper 需要用户手动放行

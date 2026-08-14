@@ -40,7 +40,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "runtime": "resources/runtime"
+      "resources/runtime": "runtime"
     }
   }
 }

@@ -8,8 +8,7 @@
 import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync, copyFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { readManifest, runtimeDir, nodePath, fail, ok, info } from "./lib/common.ts";
+import { readManifest, runtimeDir, nodePath, tmpDir, fail, ok, info } from "./lib/common.ts";
 
 interface Dist {
   file: string;
@@ -64,8 +63,11 @@ function run(cmd: string, args: string[]): void {
 
 const dist = distFor();
 const v = readManifest().nodeVersion;
-const archive = join(runtimeDir, dist.file);
-const extractDir = join(runtimeDir, ".node-extract");
+// Scratch stays OUTSIDE src-tauri/resources/runtime — everything in there
+// gets bundled into the app. Only the final binary is copied in.
+const scratch = join(tmpDir, "node-dist");
+const archive = join(scratch, dist.file);
+const extractDir = join(scratch, "extract");
 
 mkdirSync(runtimeDir, { recursive: true });
 rmSync(extractDir, { recursive: true, force: true });
@@ -92,5 +94,4 @@ if (probe.status !== 0 || !probe.stdout.includes(`v${v}`)) {
 }
 
 rmSync(extractDir, { recursive: true, force: true });
-rmSync(archive, { force: true });
 ok(`node v${v} ready at ${nodePath()}`);

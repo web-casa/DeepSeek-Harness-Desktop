@@ -27,7 +27,7 @@ fn main() {
                 // The sidecar kills the whole Node/Harness tree on stdin EOF,
                 // and the Windows Job Object guarantees cleanup even if we
                 // crash. This is the polite path.
-                harness::shutdown_blocking(&app.handle().clone());
+                harness::shutdown_blocking(app);
             }
         });
 }
