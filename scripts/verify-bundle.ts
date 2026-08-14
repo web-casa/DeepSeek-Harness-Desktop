@@ -225,7 +225,6 @@ function runNsisChecks(): void {
   info(`NSIS archive contains ${entries.length} entries`);
 
   const required = [
-    `${productName}.exe`,
     "runtime/node.exe",
     "runtime/sidecar.exe",
     ...HARNESS_CORE,
@@ -238,10 +237,22 @@ function runNsisChecks(): void {
     ok(`present: ${path}`);
   }
 
+  // Main GUI binary: exactly one top-level .exe (tauri names it after
+  // productName or the crate name depending on version — discover it).
+  const topLevelExes = entries.filter(
+    (p) => !p.includes("/") && p.toLowerCase().endsWith(".exe"),
+  );
+  if (topLevelExes.length !== 1) {
+    fail(
+      `expected exactly 1 top-level .exe in NSIS, found: ${topLevelExes.join(", ") || "none"}`,
+    );
+  }
+  ok(`main binary entry: ${topLevelExes[0]}`);
+
   const extractDir = join(tmpDir, "nsis-extract");
   rmSync(extractDir, { recursive: true, force: true });
   mkdirSync(extractDir, { recursive: true });
-  const mainExe = extractNsisFile(artifact, `${productName}.exe`, extractDir);
+  const mainExe = extractNsisFile(artifact, topLevelExes[0], extractDir);
   checkBinaryType(mainExe, "PE", "main binary");
   rmSync(extractDir, { recursive: true, force: true });
 }
