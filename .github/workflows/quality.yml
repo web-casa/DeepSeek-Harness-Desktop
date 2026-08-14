@@ -33,7 +33,12 @@ jobs:
       - name: Install cargo tools (nextest, llvm-cov, deny, vet)
         uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1  # v2 (SHA-pinned)
         with:
-          tool: cargo-nextest,cargo-llvm-cov,cargo-deny,cargo-vet
+          # Versions pinned to the locally verified set: a floating @latest
+          # already broke CI once (cargo-vet 0.10.0 in CI rejects the
+          # trusted-publisher entries that 0.10.2 — local and crates.io
+          # latest — generates and accepts). cargo-vet@0.10.2 has no GitHub
+          # release, so install-action falls back to cargo-binstall (crates.io).
+          tool: cargo-nextest@0.9.143,cargo-llvm-cov@0.8.7,cargo-deny@0.20.2,cargo-vet@0.10.2
 
       - name: Install llvm-tools for coverage
         run: rustup component add llvm-tools-preview
