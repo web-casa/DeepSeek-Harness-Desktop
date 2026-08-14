@@ -1,0 +1,25 @@
+name: 功能建议 / Feature request
+description: 桌面层功能建议。Suggest a desktop-layer feature.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议 / Proposal
+      placeholder: 描述想要的功能及其使用场景。Describe the feature and the scenario it serves.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 价值 / Why
+      placeholder: 为什么值得做？为什么是桌面层而不是 Harness 本身该做的？
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 边界 / Scope（可选）
+      description: 注意：本项目不改 Harness Web UI/上游代码，只做打包与生命周期层。
+    validations:
+      required: false

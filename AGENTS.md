@@ -35,6 +35,22 @@ Tauri 管窗口/托盘，sidecar 管 Harness 进程树，Harness Web UI 原样�
 
 发布前必跑 `pnpm release:preflight`（tag 推送时 CI 亦跑并做 tag 绑定）。
 
+## Harness 升级启动契约（bump pin 前必读）
+
+DSH CLI 的启动契约随版本演进，社区同类项目已实证踩坑（如较新版本要求
+`--expose-internals`；README 可能滞后于实现，勿尽信）。升级 harness 时：
+
+1. bump `runtime/package.json` pin + `npm install` 刷新 lock +
+   manifest.harnessVersion；
+2. 对照新版 `dsh --help` / `dsh web --help` 复核契约并记录变化（当前钉
+   0.1.0-rc.6 的基线：`web` = `--profile web` 别名；flag 仅
+   `--host`/`--port`/`--trusted-host`；**无** `--expose-internals`/
+   `--use-system-ca`；就绪行 MARKER 为 `dsh web: http://127.0.0.1:`；
+   `DSH_TELEMETRY_DISABLED` 任意非空即关闭 session 遥测）；
+3. 若契约变化，同步三端：sidecar `extract_local_url` MARKER、
+   Tauri `start_harness` args、`verify-runtime.ts` 冒烟断言；
+4. 全量冒烟（`verify-runtime` + `verify-heartbeat`）+ golden 测试复核。
+
 ## 禁区清单
 
 - **不改 Harness Web UI / 上游代码**；只 pin npm 包。

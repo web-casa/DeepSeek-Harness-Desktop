@@ -5,6 +5,7 @@
 桌面层只负责生命周期：Tauri 管窗口，Rust sidecar 管 Harness 进程。
 
 仓库：https://github.com/web-casa/DeepSeek-Harness-Desktop · 下载：https://github.com/web-casa/DeepSeek-Harness-Desktop/releases
+文档：[SECURITY.md](SECURITY.md) · [FORKING.md](FORKING.md) · [RELEASING.md](RELEASING.md) · [AGENTS.md](AGENTS.md)
 （v0.2.0：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
 
 ```
