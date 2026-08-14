@@ -75,19 +75,26 @@ function lastLogs(count: number): string {
   return logEvents.map((e) => `[${e.stream}] ${e.line}`).join("\n    ");
 }
 
+// Waits for predicate matches BEYOND a baseline: baseline = the number of
+// matches already accumulated before the command that should produce the new
+// event. Counting globally (minCount=N) silently breaks — and can assert the
+// WRONG pid in the orphan check — if the sidecar ever emits extra events of
+// the same type (e.g. a multi-stage stop). Baseline makes the assertion
+// "a NEW stopped/ready appeared after MY command", independent of history.
 function waitFor(
   pred: (e: Event) => boolean,
   what: string,
   timeoutMs: number,
   minCount = 1,
+  baseline = 0,
 ): Promise<Event> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const iv = setInterval(() => {
       const hits = events.filter(pred);
-      if (hits.length >= minCount) {
+      if (hits.length >= baseline + minCount) {
         clearInterval(iv);
-        resolve(hits[minCount - 1]);
+        resolve(hits[baseline + minCount - 1]);
         return;
       }
       const fatal = events.find((e) => e.type === "error" || e.type === "crashed");
@@ -105,7 +112,7 @@ function waitFor(
         const tail = events.slice(-6).map((e) => `[${e.stream ?? e.type}] ${e.line ?? e.message ?? ""}`).join("\n    ");
         reject(
           new Error(
-            `timeout waiting for ${what} (got ${hits.length}/${minCount});\n  last events:\n    ${tail}\n  recent child logs:\n    ${lastLogs(25)}`,
+            `timeout waiting for ${what} (got ${hits.length - baseline}/${minCount} after baseline ${baseline});\n  last events:\n    ${tail}\n  recent child logs:\n    ${lastLogs(25)}`,
           ),
         );
       }
@@ -182,21 +189,42 @@ async function main(): Promise<void> {
   ok(`status → running, pid ${status.pid}`);
 
   // --- restart ----------------------------------------------------------
+  // Baselines are snapshots BEFORE the command: only events that appear
+  // AFTER the restart/shutdown request count, so extra stopped/ready events
+  // emitted by a future sidecar cannot shift the assertion onto the wrong
+  // pid (and produce a false-green orphan check).
+  const stoppedBeforeRestart = events.filter((e) => e.type === "stopped").length;
+  const readyBeforeRestart = events.filter((e) => e.type === "ready").length;
   send({ command: "restart" });
-  await waitFor((e) => e.type === "stopped", "stopped (restart)", 30_000, 1);
+  await waitFor((e) => e.type === "stopped", "stopped (restart)", 30_000, 1, stoppedBeforeRestart);
   info("restart: tree stopped");
-  // NOTE: events are cumulative — the 2nd ready is the one from the new child.
-  const ready2 = await waitFor((e) => e.type === "ready", "ready (after restart)", 180_000, 2);
+  const ready2 = await waitFor(
+    (e) => e.type === "ready",
+    "ready (after restart)",
+    180_000,
+    1,
+    readyBeforeRestart,
+  );
   ok(`restart readiness → ${ready2.url}`);
   await probe(ready2.url!);
 
   // --- shutdown + orphan check ------------------------------------------
+  const stoppedBeforeShutdown = events.filter((e) => e.type === "stopped").length;
   send({ command: "shutdown" });
-  const stopped = (await waitFor((e) => e.type === "stopped", "stopped (shutdown)", 30_000, 2)) as Event;
+  const stopped = (await waitFor(
+    (e) => e.type === "stopped",
+    "stopped (shutdown)",
+    30_000,
+    1,
+    stoppedBeforeShutdown,
+  )) as Event;
   if (typeof stopped.pid !== "number") runtimeFail(`stopped reply missing numeric pid: ${JSON.stringify(stopped)}`);
   ok(`shutdown → exited code ${stopped.code}`);
 
   // The harness pid (from the final stopped event) must be gone now.
+  // signal 0 probes existence without delivering anything; on Windows the
+  // signal argument is ignored by the OS but the ESRCH existence check is
+  // identical (process.kill throws when the pid no longer exists).
   let alive = true;
   try {
     process.kill(stopped.pid, 0);

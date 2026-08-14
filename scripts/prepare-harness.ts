@@ -18,6 +18,7 @@ import {
   renameSync,
   mkdirSync,
   readdirSync,
+  type Dirent,
 } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -26,36 +27,39 @@ import { materialize } from "./lib/materialize.ts";
 
 // Collect every package's license file into licenses/<rel-path> so the
 // installer carries third-party attribution for the whole dependency tree.
-// Scoped packages live at node_modules/@scope/<name>: the scope directory
-// itself carries no license, so both levels are walked (the old top-level-
-// only scan silently skipped every scoped package's attribution).
+// One recursive walk covers ALL package locations: top-level, scoped
+// (@scope/<name>), and nested node_modules (un-hoisted version conflicts).
+// A directory is a package iff it contains package.json — the tree walk
+// never assumes a specific layout, so npm layout changes cannot silently
+// drop attribution again.
 function collectLicenses(nodeModules: string, outDir: string): void {
   let collected = 0;
   const candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING"];
-  const visit = (pkgDir: string, rel: string): void => {
-    for (const file of candidates) {
-      const src = join(pkgDir, file);
-      if (existsSync(src)) {
-        const destDir = join(outDir, rel);
-        mkdirSync(destDir, { recursive: true });
-        copyFileSync(src, join(destDir, file));
-        collected += 1;
-        return;
+  const walk = (dir: string, rel: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable subtree (e.g. dangling entry) — not a package
+    }
+    if (entries.some((e) => e.isFile() && e.name === "package.json")) {
+      for (const file of candidates) {
+        const src = join(dir, file);
+        if (existsSync(src)) {
+          const destDir = join(outDir, rel);
+          mkdirSync(destDir, { recursive: true });
+          copyFileSync(src, join(destDir, file));
+          collected += 1;
+          break;
+        }
       }
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      walk(join(dir, entry.name), rel === "" ? entry.name : join(rel, entry.name));
     }
   };
-  for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    if (entry.name.startsWith("@")) {
-      const scopeDir = join(nodeModules, entry.name);
-      for (const sub of readdirSync(scopeDir, { withFileTypes: true })) {
-        if (!sub.isDirectory()) continue;
-        visit(join(scopeDir, sub.name), join(entry.name, sub.name));
-      }
-    } else {
-      visit(join(nodeModules, entry.name), entry.name);
-    }
-  }
+  walk(nodeModules, "");
   info(`collected ${collected} third-party license files into licenses/`);
 }
 
