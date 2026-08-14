@@ -31,6 +31,13 @@ function hostTriple(): string {
 }
 
 const triple = target ?? hostTriple();
+if (target && target !== hostTriple()) {
+  fail(
+    `cross-compilation (--target ${target} on ${hostTriple()}) is not supported for staging: ` +
+      "the staged binary name is derived from the host platform and would not match verify-bundle. " +
+      "Build on the target platform (CI does this per-OS).",
+  );
+}
 info(`building dsh-sidecar for ${triple}`);
 
 const args = [
@@ -52,6 +59,22 @@ mkdirSync(runtimeDir, { recursive: true });
 copyFileSync(built, sidecarPath());
 if (exe === "") chmodSync(sidecarPath(), 0o755);
 
+// Probe must PASS: the staged binary has to answer a status command with a
+// valid status event (same strictness as download-node's --version check).
 const probe = spawnSync(sidecarPath(), [], { input: '{"command":"status"}\n', encoding: "utf8", timeout: 5000 });
+const probeLines = (probe.stdout ?? "").trim().split("\n").filter(Boolean);
+const lastLine = probeLines[probeLines.length - 1] ?? "";
+let probeOk = false;
+try {
+  const parsed = JSON.parse(lastLine) as { type?: string };
+  probeOk = parsed.type === "status";
+} catch {
+  probeOk = false;
+}
+if (!probeOk) {
+  fail(
+    `staged sidecar failed its probe: ${lastLine || probe.stderr || "no output"} (status ${probe.status})`,
+  );
+}
 ok(`dsh-sidecar staged at ${sidecarPath()}`);
-info(`probe reply: ${(probe.stdout ?? probe.stderr ?? "").trim().split("\n").pop()}`);
+info(`probe reply: ${lastLine}`);

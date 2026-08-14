@@ -6,7 +6,7 @@
 
 use crate::harness::{
     child_alive, open_harness_window, reset_restart_attempts, respawn_sidecar, send_raw,
-    snapshot_payload, Runtime,
+    snapshot_payload, Runtime, CMD_ID_RESTART, CMD_ID_SHUTDOWN,
 };
 use serde_json::Value;
 use tauri::{AppHandle, State};
@@ -62,7 +62,7 @@ pub fn restart(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String
 
     if let Err(error) = send_raw(
         &runtime,
-        &serde_json::json!({"id": 100, "command": "restart"}),
+        &serde_json::json!({"id": CMD_ID_RESTART, "command": "restart"}),
     ) {
         let mut s = runtime.state.lock().unwrap();
         s.last_error = Some(error.clone());
@@ -80,16 +80,16 @@ pub fn restart(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String
 #[tauri::command]
 pub fn shutdown(runtime: State<'_, Runtime>) -> Result<(), String> {
     if !child_alive(&runtime) {
-        let error = "sidecar 未运行".to_string();
-        let mut s = runtime.state.lock().unwrap();
-        s.last_error = Some(error.clone());
-        s.status = crate::harness::Status::Crashed;
+        // Keep the real status (Stopped/Idle stays what it is) — only the
+        // message explains why nothing happened.
+        let error = "sidecar 未运行，无需停止".to_string();
+        runtime.state.lock().unwrap().last_error = Some(error.clone());
         return Err(error);
     }
 
     if let Err(error) = send_raw(
         &runtime,
-        &serde_json::json!({"id": 101, "command": "shutdown"}),
+        &serde_json::json!({"id": CMD_ID_SHUTDOWN, "command": "shutdown"}),
     ) {
         let mut s = runtime.state.lock().unwrap();
         s.last_error = Some(error.clone());

@@ -71,7 +71,15 @@ function find7z(): string {
 
 function parseSltListing(text: string): string[] {
   const entries: string[] = [];
+  // The -slt output opens with an archive-level block (Path = <archive path>)
+  // that must NOT be treated as a content entry. Only collect paths after the
+  // long dash separator that precedes the first real entry.
+  let inEntries = false;
   for (const line of text.split(/\r?\n/)) {
+    if (!inEntries) {
+      if (/^-{10,}$/.test(line)) inEntries = true;
+      continue;
+    }
     if (line.startsWith("Path = ")) {
       entries.push(line.slice("Path = ".length).replace(/\\/g, "/"));
     }
@@ -107,6 +115,11 @@ Scanning the drive for archives:
 Listing archive: installer.exe
 
 --
+Path = D:\\a\\dsh-gui\\dsh-gui\\src-tauri\\target\\release\\bundle\\nsis\\installer.exe
+Type = Nsis
+Physical Size = 54822827
+
+----------
 Path = DeepSeek Harness Desktop.exe
 Folder = -
 Size = 18937433
@@ -135,8 +148,13 @@ Size = 2001
       fail(`self-test: parser missed ${path} (parsed ${entries.length} entries)`);
     }
   }
-  if (entries.length !== 3) fail(`self-test: expected 3 entries, got ${entries.length}`);
-  ok("self-test: 7z -slt parser handles spaces and backslashes");
+  if (entries.length !== 3) {
+    fail(`self-test: expected 3 entries (header block excluded), got ${entries.length}: ${entries.join(", ")}`);
+  }
+  if (entries.some((e) => e.toLowerCase().endsWith("installer.exe"))) {
+    fail("self-test: parser must exclude the archive-level header block");
+  }
+  ok("self-test: 7z -slt parser excludes header block, handles spaces and backslashes");
 }
 
 function extractNsisFile(artifact: string, innerPath: string, outDir: string): string {
@@ -171,13 +189,15 @@ function attachDmg(artifact: string): { mount: string; appRoot: string } {
 
 function detachDmg(mount: string): void {
   // Never throw from here: cleanup must not mask the primary error. Retry
-  // with -force once, then leave a loud warning.
+  // with -force once; only remove the mountpoint after a successful detach
+  // (rm -r on a still-mounted read-only volume would throw and mask errors).
   let res = spawnSync("hdiutil", ["detach", mount], { encoding: "utf8" });
   if (res.status !== 0) {
     res = spawnSync("hdiutil", ["detach", "-force", mount], { encoding: "utf8" });
   }
-  rmSync(mount, { recursive: true, force: true });
-  if (res.status !== 0) {
+  if (res.status === 0) {
+    rmSync(mount, { recursive: true, force: true });
+  } else {
     console.warn(`⚠ hdiutil detach failed for ${mount}: ${res.stderr}`);
   }
 }

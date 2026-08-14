@@ -76,9 +76,15 @@ function materializeInner(src: string, dest: string, ancestors: Set<string>, roo
     try {
       // Hardlink: repeated targets (pnpm dedup) share one inode.
       linkSync(src, dest);
-    } catch {
-      // EXDEV / no-hardlink filesystems: fall back to a real copy.
-      copyFileSync(src, dest);
+    } catch (e) {
+      // Only fall back to a real copy when hardlinks are unavailable; real
+      // failures (ENOSPC, EIO, …) must surface instead of being retried.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EXDEV" || code === "EPERM" || code === "EACCES" || code === "ENOSYS") {
+        copyFileSync(src, dest);
+      } else {
+        throw e;
+      }
     }
     return;
   }

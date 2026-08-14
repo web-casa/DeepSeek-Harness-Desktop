@@ -52,10 +52,16 @@ extern "C" fn on_termination_signal(_sig: libc::c_int) {
 
 #[cfg(unix)]
 fn install_signal_handlers() {
+    // sigaction (not the deprecated libc::signal): SA_RESTART keeps the
+    // supervisor loop's syscalls from being interrupted by stray signals.
     unsafe {
-        libc::signal(libc::SIGTERM, on_termination_signal as usize);
-        libc::signal(libc::SIGINT, on_termination_signal as usize);
-        libc::signal(libc::SIGHUP, on_termination_signal as usize);
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_termination_signal as usize;
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut());
     }
 }
 
@@ -131,9 +137,14 @@ pub fn parse_command(line: &str) -> Result<(Option<u64>, Command), String> {
                 .and_then(|e| e.as_object())
                 .map(|o| {
                     o.iter()
-                        .map(|(k, val)| (k.clone(), val.as_str().unwrap_or("").to_string()))
-                        .collect()
+                        .map(|(k, val)| {
+                            val.as_str()
+                                .map(|v| (k.clone(), v.to_string()))
+                                .ok_or_else(|| format!("start: env value for {k:?} must be a string"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
                 })
+                .transpose()?
                 .unwrap_or_default();
             Command::Start {
                 node,
@@ -595,5 +606,15 @@ mod tests {
         assert!(parse_command("not json").is_err());
         assert!(parse_command(r#"{"command":"fly"}"#).is_err());
         assert!(parse_command(r#"{"command":"start","node":"n"}"#).is_err());
+    }
+
+    #[test]
+    fn rejects_non_string_env_values() {
+        let result = parse_command(
+            r#"{"command":"start","node":"n","script":"s","args":[],"cwd":"c","env":{"DSH_HOME":123}}"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("must be a string"), "unexpected error: {err}");
     }
 }

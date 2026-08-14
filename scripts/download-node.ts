@@ -5,7 +5,7 @@
 // .zip/.tar.gz, GNU tar on Linux handles .tar.xz), so the script has zero
 // npm dependencies.
 
-import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync, copyFileSync, createReadStream } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, rmSync, renameSync, chmodSync, copyFileSync, createReadStream } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -32,28 +32,56 @@ function distFor(): Dist {
   return dist;
 }
 
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
+const DOWNLOAD_RETRIES = 3;
+
 async function download(url: string, dest: string): Promise<void> {
   info(`downloading ${url}`);
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok || !res.body) fail(`download failed: HTTP ${res.status}`);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= DOWNLOAD_RETRIES; attempt++) {
+    try {
+      await downloadOnce(url, dest);
+      return;
+    } catch (e) {
+      lastError = e;
+      if (attempt < DOWNLOAD_RETRIES) {
+        info(`download attempt ${attempt} failed (${(e as Error).message}); retrying…`);
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
+    }
+  }
+  fail(`download failed after ${DOWNLOAD_RETRIES} attempts: ${(lastError as Error).message}`);
+}
+
+async function downloadOnce(url: string, dest: string): Promise<void> {
+  const res = await fetch(url, {
+    redirect: "follow",
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  });
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
   const total = Number(res.headers.get("content-length") ?? 0);
   const reader = res.body.getReader();
   const out = createWriteStream(dest);
   let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    received += value.byteLength;
-    out.write(Buffer.from(value));
-    if (total > 0 && received % (16 * 1024 * 1024) < 64 * 1024) {
-      process.stdout.write(`\r  ${((received / total) * 100).toFixed(0)}% (${(received / 1048576).toFixed(0)} MB)`);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      out.write(Buffer.from(value));
+      if (total > 0 && received % (16 * 1024 * 1024) < 64 * 1024) {
+        process.stdout.write(`\r  ${((received / total) * 100).toFixed(0)}% (${(received / 1048576).toFixed(0)} MB)`);
+      }
     }
+    out.end();
+    await new Promise<void>((resolve, reject) => {
+      out.on("finish", resolve);
+      out.on("error", reject);
+    });
+  } catch (e) {
+    out.destroy();
+    throw e;
   }
-  out.end();
-  await new Promise<void>((resolve, reject) => {
-    out.on("finish", resolve);
-    out.on("error", reject);
-  });
   process.stdout.write("\r");
 }
 
@@ -77,8 +105,13 @@ mkdirSync(scratch, { recursive: true });
 rmSync(extractDir, { recursive: true, force: true });
 mkdirSync(extractDir, { recursive: true });
 
+// Download to a .part file and rename on success: an interrupted download
+// must never poison the cache (a partial archive would fail SHA-256 forever).
+const partFile = `${archive}.part`;
+rmSync(partFile, { force: true });
 if (!existsSync(archive)) {
-  await download(`https://nodejs.org/dist/v${v}/${dist.file}`, archive);
+  await download(`https://nodejs.org/dist/v${v}/${dist.file}`, partFile);
+  renameSync(partFile, archive);
 } else {
   info(`reusing cached archive ${dist.file}`);
 }
@@ -97,7 +130,10 @@ async function sha256File(path: string): Promise<string> {
 }
 const actualSha256 = await sha256File(archive);
 if (actualSha256.toLowerCase() !== expectedSha256.toLowerCase()) {
-  fail(`SHA-256 mismatch for ${dist.file}: expected ${expectedSha256}, got ${actualSha256}`);
+  // Drop the bad archive so the next run re-downloads instead of failing
+  // on the poisoned cache again.
+  rmSync(archive, { force: true });
+  fail(`SHA-256 mismatch for ${dist.file}: expected ${expectedSha256}, got ${actualSha256} (cached archive removed; rerun to re-download)`);
 }
 
 info(`extracting ${dist.file}`);

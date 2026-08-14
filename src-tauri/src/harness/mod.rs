@@ -59,11 +59,18 @@ pub struct Runtime {
 /// exponential backoff, then give up and surface the error.
 const MAX_RESTART_ATTEMPTS: u32 = 3;
 
+/// NDJSON command ids — one place to change protocol bookkeeping.
+pub(crate) const CMD_ID_START: u64 = 1;
+pub(crate) const CMD_ID_STATUS: u64 = 99;
+pub(crate) const CMD_ID_RESTART: u64 = 100;
+pub(crate) const CMD_ID_SHUTDOWN: u64 = 101;
+pub(crate) const CMD_ID_EXIT_SHUTDOWN: u64 = 900;
+
 /// Send a raw command line through the sidecar stdin, if available.
 fn send_restart(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
     let mut stdin = stdin.lock().unwrap();
     if let Some(stdin) = stdin.as_mut() {
-        let _ = writeln!(stdin, "{{\"id\":100,\"command\":\"restart\"}}");
+        let _ = writeln!(stdin, "{{\"id\":{CMD_ID_RESTART},\"command\":\"restart\"}}");
         let _ = stdin.flush();
     }
 }
@@ -111,7 +118,7 @@ fn set_error(state: &Mutex<SharedState>, message: impl Into<String>) {
 fn refresh_pid(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
     let mut stdin = stdin.lock().unwrap();
     if let Some(stdin) = stdin.as_mut() {
-        let _ = writeln!(stdin, "{{\"id\":99,\"command\":\"status\"}}");
+        let _ = writeln!(stdin, "{{\"id\":{CMD_ID_STATUS},\"command\":\"status\"}}");
         let _ = stdin.flush();
     }
 }
@@ -148,14 +155,24 @@ pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
     });
 }
 
-fn handle_event(
-    app: &AppHandle,
-    state: &Arc<Mutex<SharedState>>,
-    stdin: &Arc<Mutex<Option<ChildStdin>>>,
-    shutting_down: &Arc<AtomicBool>,
-    restart_attempts: &Arc<AtomicU32>,
+/// Side effects requested by the pure state transition, executed by the
+/// caller (which owns AppHandle, stdin and threads).
+#[derive(Debug, PartialEq, Eq)]
+enum SideEffect {
+    OpenWindow(String),
+    RefreshPid,
+    ScheduleAutoRestart(u32),
+}
+
+/// Pure core of handle_event: mutates SharedState only and returns the side
+/// effects the caller must execute. Unit-testable without Tauri machinery.
+fn apply_state_event(
+    state: &Mutex<SharedState>,
+    shutting_down: &AtomicBool,
+    restart_attempts: &AtomicU32,
     ev: &Value,
-) {
+) -> Vec<SideEffect> {
+    let mut effects = Vec::new();
     let ty = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match ty {
         "ack" => {
@@ -189,8 +206,8 @@ fn handle_event(
             }
             // A successful boot resets the crash counter.
             restart_attempts.store(0, Ordering::SeqCst);
-            refresh_pid(stdin);
-            open_harness_window(app, &url);
+            effects.push(SideEffect::RefreshPid);
+            effects.push(SideEffect::OpenWindow(url));
         }
         "stopping" => {
             state.lock().unwrap().status = Status::Stopping;
@@ -201,22 +218,19 @@ fn handle_event(
                 s.status = Status::Stopped;
                 s.pid = None;
             }
-            refresh_pid(stdin);
+            effects.push(SideEffect::RefreshPid);
         }
         "crashed" => {
             let code = ev.get("code").and_then(|v| v.as_i64());
             if shutting_down.load(Ordering::SeqCst) {
-                return;
+                return effects;
             }
             let attempts = restart_attempts.fetch_add(1, Ordering::SeqCst) + 1;
             if attempts <= MAX_RESTART_ATTEMPTS {
-                {
-                    let mut s = state.lock().unwrap();
-                    s.last_error = Some(format!(
-                        "Harness 进程异常退出 (code {code:?})，正在自动重启（第 {attempts}/{MAX_RESTART_ATTEMPTS} 次）…"
-                    ));
-                }
-                schedule_auto_restart(state, stdin, shutting_down, attempts);
+                state.lock().unwrap().last_error = Some(format!(
+                    "Harness 进程异常退出 (code {code:?})，正在自动重启（第 {attempts}/{MAX_RESTART_ATTEMPTS} 次）…"
+                ));
+                effects.push(SideEffect::ScheduleAutoRestart(attempts));
             } else {
                 set_error(
                     state,
@@ -247,6 +261,26 @@ fn handle_event(
             log_line(state, stream, line);
         }
         _ => {}
+    }
+    effects
+}
+
+fn handle_event(
+    app: &AppHandle,
+    state: &Arc<Mutex<SharedState>>,
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    shutting_down: &Arc<AtomicBool>,
+    restart_attempts: &Arc<AtomicU32>,
+    ev: &Value,
+) {
+    for effect in apply_state_event(state, shutting_down, restart_attempts, ev) {
+        match effect {
+            SideEffect::OpenWindow(url) => open_harness_window(app, &url),
+            SideEffect::RefreshPid => refresh_pid(stdin),
+            SideEffect::ScheduleAutoRestart(attempts) => {
+                schedule_auto_restart(state, stdin, shutting_down, attempts)
+            }
+        }
     }
     let snapshot = snapshot_payload(state);
     let _ = app.emit_to("bootstrap", "harness-event", &snapshot);
@@ -437,7 +471,7 @@ fn start_harness(runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> 
         .join("lib")
         .join("bin.js");
     let cmd = serde_json::json!({
-        "id": 1,
+        "id": CMD_ID_START,
         "command": "start",
         "node": paths.node,
         "script": dsh_bin,
@@ -561,13 +595,15 @@ pub fn child_alive(runtime: &Runtime) -> bool {
 /// Blocking teardown used on app exit: polite shutdown, then reap the sidecar.
 /// The Stopped-wait matches the sidecar's own graceful window
 /// (DSH_SHUTDOWN_GRACE_MS, default 10s) so the harness actually gets its full
-/// chance to exit cleanly before the stdin-EOF force path takes over.
+/// chance to exit cleanly before the stdin-EOF force path takes over. The wait
+/// is skipped entirely when there is no live child (init failed, sidecar
+/// already dead) or the state already settled.
 pub fn shutdown_blocking(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
     runtime.shutting_down.store(true, Ordering::SeqCst);
     let _ = send_raw(
         &runtime,
-        &serde_json::json!({"id": 900, "command": "shutdown"}),
+        &serde_json::json!({"id": CMD_ID_EXIT_SHUTDOWN, "command": "shutdown"}),
     );
 
     let grace = std::env::var("DSH_SHUTDOWN_GRACE_MS")
@@ -576,8 +612,9 @@ pub fn shutdown_blocking(app: &AppHandle) {
         .map(std::time::Duration::from_millis)
         .unwrap_or(std::time::Duration::from_secs(10));
     let stopped_deadline = std::time::Instant::now() + grace;
-    while std::time::Instant::now() < stopped_deadline {
-        if runtime.state.lock().unwrap().status == Status::Stopped {
+    while child_alive(&runtime) && std::time::Instant::now() < stopped_deadline {
+        let status = runtime.state.lock().unwrap().status;
+        if status == Status::Stopped || status == Status::Crashed {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -593,5 +630,153 @@ pub fn shutdown_blocking(app: &AppHandle) {
         if let Some(child) = runtime.child.lock().unwrap().as_mut() {
             let _ = child.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fresh() -> (Mutex<SharedState>, AtomicBool, AtomicU32) {
+        (
+            Mutex::new(SharedState {
+                status: Status::Idle,
+                ..Default::default()
+            }),
+            AtomicBool::new(false),
+            AtomicU32::new(0),
+        )
+    }
+
+    #[test]
+    fn ready_event_sets_running_and_requests_window() {
+        let (state, shutting_down, attempts) = fresh();
+        attempts.store(2, Ordering::SeqCst);
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"ready","url":"http://127.0.0.1:41234"}),
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.status, Status::Running);
+        assert_eq!(s.url.as_deref(), Some("http://127.0.0.1:41234"));
+        assert_eq!(s.last_error, None);
+        drop(s);
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            effects,
+            vec![
+                SideEffect::RefreshPid,
+                SideEffect::OpenWindow("http://127.0.0.1:41234".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn crashed_event_schedules_backoff_restart() {
+        let (state, shutting_down, attempts) = fresh();
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"crashed","code":1}),
+        );
+        let s = state.lock().unwrap();
+        assert!(s.last_error.as_deref().unwrap().contains("自动重启"));
+        assert_eq!(s.status, Status::Idle, "status unchanged until restart");
+        drop(s);
+        assert_eq!(effects, vec![SideEffect::ScheduleAutoRestart(1)]);
+    }
+
+    #[test]
+    fn crashed_event_gives_up_after_max_attempts() {
+        let (state, shutting_down, attempts) = fresh();
+        attempts.store(MAX_RESTART_ATTEMPTS, Ordering::SeqCst);
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"crashed","code":1}),
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.status, Status::Crashed);
+        assert!(s.last_error.as_deref().unwrap().contains("停止自动重启"));
+        drop(s);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn crashed_event_suppressed_while_shutting_down() {
+        let (state, shutting_down, attempts) = fresh();
+        shutting_down.store(true, Ordering::SeqCst);
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"crashed","code":1}),
+        );
+        assert!(effects.is_empty());
+        let s = state.lock().unwrap();
+        assert_eq!(s.status, Status::Idle);
+        assert_eq!(s.last_error, None);
+    }
+
+    #[test]
+    fn failed_ack_sets_crashed_with_message() {
+        let (state, shutting_down, attempts) = fresh();
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"ack","id":100,"ok":false,"error":"nothing to restart"}),
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.status, Status::Crashed);
+        assert_eq!(s.last_error.as_deref(), Some("nothing to restart"));
+        drop(s);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn stopped_event_clears_pid_and_refreshes() {
+        let (state, shutting_down, attempts) = fresh();
+        state.lock().unwrap().pid = Some(4242);
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"stopped","code":0}),
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.status, Status::Stopped);
+        assert_eq!(s.pid, None);
+        drop(s);
+        assert_eq!(effects, vec![SideEffect::RefreshPid]);
+    }
+
+    #[test]
+    fn status_event_updates_pid() {
+        let (state, shutting_down, attempts) = fresh();
+        apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"status","id":99,"state":"running","pid":123}),
+        );
+        assert_eq!(state.lock().unwrap().pid, Some(123));
+    }
+
+    #[test]
+    fn unknown_event_has_no_effect() {
+        let (state, shutting_down, attempts) = fresh();
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"mystery"}),
+        );
+        assert!(effects.is_empty());
     }
 }
