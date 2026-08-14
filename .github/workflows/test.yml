@@ -34,6 +34,9 @@ jobs:
       - name: Frontend install & build
         run: pnpm install --frozen-lockfile && pnpm build
 
+      - name: Bundle verifier self-test
+        run: node scripts/verify-bundle.ts --self-test
+
   smoke:
     name: Runtime smoke (${{ matrix.os }})
     strategy:

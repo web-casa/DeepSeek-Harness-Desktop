@@ -67,6 +67,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # Installer content assertion: main binary type, full runtime tree,
+      # platform-specific node-pty prebuild, zero symlinks in the harness tree.
+      - name: Verify bundle contents
+        run: node scripts/verify-bundle.ts --bundle ${{ matrix.bundle }}
+
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
         with:
@@ -76,6 +81,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
+    # Only real tag pushes publish; workflow_dispatch is the build+verify-only
+    # test channel.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -90,5 +98,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           files: artifacts/*
