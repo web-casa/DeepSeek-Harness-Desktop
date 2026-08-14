@@ -145,7 +145,7 @@ Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
 
 - ✅ CI 四平台全绿（ubuntu / windows-latest / macos-14 + Linux 单测），Windows
   冒烟含 boot → readiness → HTTP 200 → restart → shutdown → 无孤儿 + 重定位冒烟
-- ✅ v0.2.0 发布：Windows x64 NSIS / macOS arm64 DMG + SHA-256（draft release）
+- ✅ v0.2.0 发布：NSIS 52MB / DMG 98MB + SHA-256（draft release，见 releases 页）
 - ✅ 单实例锁、窗口状态记忆、崩溃自动恢复、diagnostics、macOS 关闭=隐藏
 - ⏳ 未接入：代码签名 / 公证 / 自动更新 / 插件安装（bundled pnpm）
 - 未签名构建：Windows SmartScreen、macOS Gatekeeper 需要用户手动放行
