@@ -237,14 +237,17 @@ function runNsisChecks(): void {
     ok(`present: ${path}`);
   }
 
-  // Main GUI binary: exactly one top-level .exe (tauri names it after
-  // productName or the crate name depending on version — discover it).
+  // Main GUI binary: exactly one top-level .exe (tauri names it after the
+  // crate name; uninstall.exe lives alongside it — exclude uninstallers).
   const topLevelExes = entries.filter(
-    (p) => !p.includes("/") && p.toLowerCase().endsWith(".exe"),
+    (p) =>
+      !p.includes("/") &&
+      p.toLowerCase().endsWith(".exe") &&
+      !p.toLowerCase().startsWith("uninst"),
   );
   if (topLevelExes.length !== 1) {
     fail(
-      `expected exactly 1 top-level .exe in NSIS, found: ${topLevelExes.join(", ") || "none"}`,
+      `expected exactly 1 top-level app .exe in NSIS, found: ${topLevelExes.join(", ") || "none"}`,
     );
   }
   ok(`main binary entry: ${topLevelExes[0]}`);
