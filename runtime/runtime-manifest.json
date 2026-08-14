@@ -1,8 +1,8 @@
 {
-  "desktopVersion": "0.1.0",
+  "desktopVersion": "0.1.1",
   "harnessVersion": "0.1.0-rc.6",
   "nodeVersion": "24.19.0",
-  "sidecarVersion": "0.1.0",
+  "sidecarVersion": "0.1.1",
   "nodeSha256": {
     "win32-x64": "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73",
     "darwin-arm64": "8294b7aa9b03997481c06babf1e8b270c859358f27da57a11509afe537ac381d",
