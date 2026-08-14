@@ -7,7 +7,8 @@ on:
     inputs:
       tag:
         type: string
-        required: true
+        required: false
+        description: "Tag/branch to build & verify (defaults to the default branch). Does not publish."
 
 jobs:
   build:
@@ -29,6 +30,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -51,6 +54,9 @@ jobs:
 
       - name: Prepare Harness runtime
         run: node scripts/prepare-harness.ts
+
+      - name: Assert staged runtime has no symlinks
+        run: node scripts/check-runtime-links.ts
 
       # Smoke the exact runtime that will be bundled, BEFORE bundling.
       - name: Runtime smoke (pre-bundle)

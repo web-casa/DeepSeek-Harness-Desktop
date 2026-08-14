@@ -160,18 +160,26 @@ function attachDmg(artifact: string): { mount: string; appRoot: string } {
     ["attach", "-nobrowse", "-readonly", "-mountpoint", mount, artifact],
     { encoding: "utf8" },
   );
-  if (res.status !== 0) fail(`hdiutil attach failed: ${res.stderr}`);
+  if (res.status !== 0) throw new Error(`hdiutil attach failed: ${res.stderr}`);
   const appRoot = join(mount, `${productName}.app`);
   if (!existsSync(appRoot)) {
     const listing = readdirSync(mount).join(", ");
-    fail(`.app bundle not found in DMG (entries: ${listing})`);
+    throw new Error(`.app bundle not found in DMG (entries: ${listing})`);
   }
   return { mount, appRoot };
 }
 
 function detachDmg(mount: string): void {
-  spawnSync("hdiutil", ["detach", mount], { encoding: "utf8" });
+  // Never throw from here: cleanup must not mask the primary error. Retry
+  // with -force once, then leave a loud warning.
+  let res = spawnSync("hdiutil", ["detach", mount], { encoding: "utf8" });
+  if (res.status !== 0) {
+    res = spawnSync("hdiutil", ["detach", "-force", mount], { encoding: "utf8" });
+  }
   rmSync(mount, { recursive: true, force: true });
+  if (res.status !== 0) {
+    console.warn(`⚠ hdiutil detach failed for ${mount}: ${res.stderr}`);
+  }
 }
 
 function walkFiles(root: string): string[] {
@@ -232,7 +240,7 @@ function runNsisChecks(): void {
   ];
   for (const path of required) {
     if (!entrySet.has(path.toLowerCase())) {
-      fail(`NSIS missing required entry: ${path}`);
+      throw new Error(`NSIS missing required entry: ${path}`);
     }
     ok(`present: ${path}`);
   }
@@ -246,7 +254,7 @@ function runNsisChecks(): void {
       !p.toLowerCase().startsWith("uninst"),
   );
   if (topLevelExes.length !== 1) {
-    fail(
+    throw new Error(
       `expected exactly 1 top-level app .exe in NSIS, found: ${topLevelExes.join(", ") || "none"}`,
     );
   }
@@ -255,9 +263,12 @@ function runNsisChecks(): void {
   const extractDir = join(tmpDir, "nsis-extract");
   rmSync(extractDir, { recursive: true, force: true });
   mkdirSync(extractDir, { recursive: true });
-  const mainExe = extractNsisFile(artifact, topLevelExes[0], extractDir);
-  checkBinaryType(mainExe, "PE", "main binary");
-  rmSync(extractDir, { recursive: true, force: true });
+  try {
+    const mainExe = extractNsisFile(artifact, topLevelExes[0], extractDir);
+    checkBinaryType(mainExe, "PE", "main binary");
+  } finally {
+    rmSync(extractDir, { recursive: true, force: true });
+  }
 }
 
 function runDmgChecks(): void {
@@ -278,7 +289,7 @@ function runDmgChecks(): void {
     ];
     for (const path of required) {
       if (!relSet.has(path.toLowerCase())) {
-        fail(`DMG missing required file: ${path}`);
+        throw new Error(`DMG missing required file: ${path}`);
       }
       ok(`present: ${path}`);
     }
@@ -286,7 +297,9 @@ function runDmgChecks(): void {
     const links = countSymlinks(
       join(appRoot, "Contents", "Resources", "runtime", "harness", "node_modules"),
     );
-    if (links > 0) fail(`bundled harness tree contains ${links} symlink(s)`);
+    if (links > 0) {
+      throw new Error(`bundled harness tree contains ${links} symlink(s)`);
+    }
     ok("bundled harness tree is fully materialized (no symlinks)");
 
     checkBinaryType(
@@ -299,9 +312,14 @@ function runDmgChecks(): void {
   }
 }
 
-if (bundleType === "nsis") {
-  runNsisChecks();
-} else {
-  runDmgChecks();
+try {
+  if (bundleType === "nsis") {
+    runNsisChecks();
+  } else {
+    runDmgChecks();
+  }
+} catch (e) {
+  console.error(`\n✗ ${(e as Error).message}`);
+  process.exit(1);
 }
 ok(`${bundleType} bundle verification passed`);

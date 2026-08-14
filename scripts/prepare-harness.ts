@@ -9,7 +9,14 @@
 // The runtime/package.json pins @deepseek-ai/dsh exactly; runtime-manifest.json
 // is cross-checked so the bundle and the manifest can never drift.
 
-import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync, copyFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  copyFileSync,
+  renameSync,
+} from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoRoot, runtimeDir, harnessDir, readManifest, fail, ok, info } from "./lib/common.ts";
@@ -66,31 +73,40 @@ if (installedVersion !== manifest.harnessVersion) {
   fail(`installed @deepseek-ai/dsh@${installedVersion} != manifest ${manifest.harnessVersion}`);
 }
 
-// Stage into the bundle resources dir.
-rmSync(harnessDir, { recursive: true, force: true });
-mkdirSync(harnessDir, { recursive: true });
-materialize(
-  join(repoRoot, "runtime", "node_modules"),
-  join(harnessDir, "node_modules"),
-);
-if (!existsSync(join(harnessDir, "node_modules", "@deepseek-ai", "dsh", "package.json"))) {
-  fail("staged @deepseek-ai/dsh package.json missing");
-}
-copyFileSync(runtimePkgPath, join(harnessDir, "package.json"));
+// Stage atomically: materialize into a sibling temp dir, validate, then swap.
+// A failed or concurrent build must never observe a half-written runtime.
+const staging = `${harnessDir}.staging-${process.pid}`;
+rmSync(staging, { recursive: true, force: true });
+try {
+  materialize(
+    join(repoRoot, "runtime", "node_modules"),
+    join(staging, "node_modules"),
+  );
+  if (!existsSync(join(staging, "node_modules", "@deepseek-ai", "dsh", "package.json"))) {
+    throw new Error("staged @deepseek-ai/dsh package.json missing");
+  }
+  copyFileSync(runtimePkgPath, join(staging, "package.json"));
 
-// Attribution: LICENSE from the dsh package; per-dependency notices come in P3.
-const dshDir = join(harnessDir, "node_modules", "@deepseek-ai", "dsh");
-for (const file of ["LICENSE", "THIRD_PARTY_NOTICES.md", "README.zh.md", "README.md"]) {
-  const src = join(dshDir, file);
-  if (existsSync(src)) materialize(src, join(harnessDir, file));
-}
+  // Attribution: LICENSE from the dsh package; per-dependency notices come in P3.
+  const dshDir = join(staging, "node_modules", "@deepseek-ai", "dsh");
+  for (const file of ["LICENSE", "THIRD_PARTY_NOTICES.md", "README.zh.md", "README.md"]) {
+    const src = join(dshDir, file);
+    if (existsSync(src)) materialize(src, join(staging, file));
+  }
 
-// A copy of the manifest travels with the bundle so About/diagnostics can
-// report exact versions without network access.
-writeFileSync(
-  join(harnessDir, "runtime-manifest.json"),
-  JSON.stringify(manifest, null, 2) + "\n",
-);
+  // A copy of the manifest travels with the bundle so About/diagnostics can
+  // report exact versions without network access.
+  writeFileSync(
+    join(staging, "runtime-manifest.json"),
+    JSON.stringify(manifest, null, 2) + "\n",
+  );
+
+  rmSync(harnessDir, { recursive: true, force: true });
+  renameSync(staging, harnessDir);
+} catch (e) {
+  rmSync(staging, { recursive: true, force: true });
+  throw e;
+}
 
 ok(`harness runtime staged at ${harnessDir}`);
 info(`@deepseek-ai/dsh ${installedVersion} · desktop ${manifest.desktopVersion}`);

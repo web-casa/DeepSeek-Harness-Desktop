@@ -43,7 +43,7 @@
 
 ```
 crates/dsh-sidecar/        Rust 监督器（独立 crate，三平台可编译）
-runtime/                   pin 版本 + pnpm lock + allowBuilds（node-pty/koffi 等）
+runtime/                   pin 版本 + npm package-lock + 脚本白名单（node-pty/koffi 等）
 scripts/                   下载 Node / 准备 runtime / 构建 sidecar / 端到端冒烟
 src/                       bootstrap 前端（Svelte 5 + Vite）
 src-tauri/                 Tauri 壳：状态机、ACL 化命令、capabilities、打包配置
@@ -111,7 +111,7 @@ pnpm icons                         # 从 icon-source.png 重新生成平台图�
 ```
 Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
   → 改 runtime/package.json + runtime-manifest.json
-  → pnpm install（锁文件更新）
+  → cd runtime && npm install（刷新 package-lock.json；新脚本需先加 .npmrc 白名单）
   → CI 三平台冒烟全绿
   → tag v* 发版（新 Node/新 Harness 随 Desktop 一起更新）
 ```
