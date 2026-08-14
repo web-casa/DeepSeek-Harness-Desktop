@@ -767,6 +767,12 @@ pub fn init(app: &AppHandle) {
 /// restart command; sidecar dead → respawn the whole chain. Publishes state.
 pub fn request_restart(app: &AppHandle) -> Result<(), String> {
     let runtime = app.state::<Runtime>();
+    // App teardown has begun (shutdown_blocking sets this before dropping the
+    // stdin pipe): a respawn now would be EOF-killed moments later — refuse
+    // instead of spawning an orphan. Closes the tray-restart vs exit race.
+    if runtime.shutting_down.load(Ordering::SeqCst) {
+        return Err("应用正在退出，无法重启".to_string());
+    }
     // Supersede any queued crash auto-restart: the user is in control now.
     runtime.restart_gen.fetch_add(1, Ordering::SeqCst);
     if !child_alive(&runtime) {
@@ -820,6 +826,13 @@ pub fn respawn_sidecar(app: &AppHandle) -> Result<(), String> {
     let runtime = app.state::<Runtime>();
     if child_alive(&runtime) {
         return Ok(());
+    }
+    // Defense in depth: request_restart guards this first, and the crash
+    // auto-restart scheduler checks the same flag before firing. A respawn
+    // racing app exit would spawn a sidecar that shutdown_blocking kills
+    // immediately via stdin EOF — never do that.
+    if runtime.shutting_down.load(Ordering::SeqCst) {
+        return Err("应用正在退出，无法重启".to_string());
     }
     let paths = runtime
         .paths

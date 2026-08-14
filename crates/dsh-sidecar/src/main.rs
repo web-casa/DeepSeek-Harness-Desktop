@@ -43,7 +43,11 @@ pub fn quote_arg(arg: &str) -> String {
     if arg.is_empty() {
         return "\"\"".to_string();
     }
-    if !arg.contains([' ', '\t', '"']) {
+    // Newlines/CRs also force quoting: unquoted they act as whitespace for
+    // CommandLineToArgvW and would split the argument; quoted they are
+    // literal (they cannot legally appear in an argv, but must not corrupt
+    // the parse of the surrounding command line either way).
+    if !arg.contains([' ', '\t', '"', '\n', '\r']) {
         return arg.to_string();
     }
     let mut out = String::with_capacity(arg.len() + 2);
@@ -71,12 +75,20 @@ pub fn quote_arg(arg: &str) -> String {
 
 /// Cap a single log line: `BufReader::lines` reads unbounded, and whatever we
 /// forward is amplified through the supervisor and the Tauri logs ring.
+///
+/// The cut must land on a UTF-8 character boundary — slicing at byte MAX_LINE
+/// can panic in the middle of a multi-byte character (Chinese logs).
 fn truncate_line(line: String) -> String {
     if line.len() <= MAX_LINE {
         return line;
     }
-    let mut out = String::with_capacity(MAX_LINE + 24);
-    out.push_str(&line[..MAX_LINE]);
+    // Find the largest character boundary at or below MAX_LINE bytes.
+    let mut cut = MAX_LINE;
+    while cut > 0 && !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + 24);
+    out.push_str(&line[..cut]);
     out.push_str("… [line truncated]");
     out
 }
@@ -855,6 +867,21 @@ mod tests {
                 let keep = s.chars().count().min(MAX_LINE);
                 prop_assert!(out.starts_with(&s.chars().take(keep).collect::<String>()));
             }
+
+            // Long lines made only of multi-byte chars: byte 8192 lands
+            // mid-character for most n — regression for the byte-slice panic.
+            // ("中" = 3 bytes, "🙂" = 4 bytes → 7-byte units; 8192 % 7 = 2.)
+            #[test]
+            fn truncate_line_multibyte_heavy_never_panics(n in 1200usize..6000usize) {
+                let line = "中🙂".repeat(n);
+                prop_assert!(line.len() > MAX_LINE, "setup: must exceed the cap");
+                let out = truncate_line(line);
+                let prefix = out
+                    .strip_suffix("… [line truncated]")
+                    .expect("marker required past the cap");
+                prop_assert!(prefix.len() <= MAX_LINE);
+                prop_assert!(prefix.is_char_boundary(prefix.len()));
+            }
         }
     }
 
@@ -979,5 +1006,28 @@ mod tests {
             json!({"type":"error","code":"readiness-timeout","message":"m"}).to_string(),
             r#"{"code":"readiness-timeout","message":"m","type":"error"}"#
         );
+    }
+
+    #[test]
+    fn truncate_line_is_char_boundary_safe() {
+        const MARKER: &str = "… [line truncated]";
+        // '中' is 3 bytes: 2731 * 3 = 8193, so byte 8192 falls 2 bytes into the
+        // final char. The buggy byte-slice version panics on exactly this input.
+        let line = "中".repeat(2731);
+        assert_eq!(line.len(), MAX_LINE + 1);
+        assert!(
+            !line.is_char_boundary(MAX_LINE),
+            "setup: boundary must be mid-char"
+        );
+        let out = truncate_line(line.clone());
+        let kept = out.strip_suffix(MARKER).expect("truncation marker present");
+        assert!(kept.len() <= MAX_LINE);
+        assert!(
+            line.starts_with(kept),
+            "kept prefix must come from the source"
+        );
+        assert!(kept.is_char_boundary(kept.len()) || kept.is_empty());
+        // The cut really landed inside the multi-byte char: 8190 = 2730 * 3.
+        assert_eq!(kept, "中".repeat(2730));
     }
 }

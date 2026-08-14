@@ -204,6 +204,12 @@
       <div class="notice-box">{lastError}</div>
     {/if}
 
+    <!-- Stopped + lastError: e.g. "shutdown" requested while the sidecar was
+         already down — the real status stays Stopped, only the notice shows. -->
+    {#if status === "stopped" && lastError}
+      <div class="notice-box">{lastError}</div>
+    {/if}
+
     {#if status === "running" && url}
       <div class="url-box">{url}</div>
     {/if}

@@ -92,7 +92,8 @@ mod imp {
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::System::Console::{
-        AllocConsole, GenerateConsoleCtrlEvent, GetConsoleWindow, CTRL_C_EVENT,
+        AllocConsole, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleWindow,
+        SetConsoleCtrlHandler, CTRL_C_EVENT,
     };
     use windows_sys::Win32::System::Environment::{
         FreeEnvironmentStringsW, GetEnvironmentStringsW,
@@ -113,18 +114,37 @@ mod imp {
     const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
     const STILL_ACTIVE: u32 = 259;
 
-    /// Give the sidecar a hidden console so a child spawned WITHOUT
+    /// Give the sidecar a PRIVATE hidden console so a child spawned WITHOUT
     /// CREATE_NO_WINDOW inherits it — which is what makes
-    /// GenerateConsoleCtrlEvent(CTRL_C_EVENT) reachable at all.
-    /// CTRL_C → node SIGINT → dsh's graceful interrupt path (exit 130).
+    /// GenerateConsoleCtrlEvent(CTRL_C_EVENT) reachable at all. CTRL_C →
+    /// node SIGINT → dsh's graceful interrupt path (exit 130).
+    ///
+    /// Two hardening properties:
+    /// - `GenerateConsoleCtrlEvent` with CTRL_C ignores its process-group
+    ///   argument and broadcasts to EVERY process sharing the console. A
+    ///   private console therefore contains the broadcast: in dev mode it can
+    ///   never leak into the `cargo run` terminal (we FreeConsole first, which
+    ///   only detaches us — the user's console window is untouched).
+    /// - The sidecar registers a ctrl handler that swallows the broadcast, so
+    ///   it never terminates itself (the CRT default handler would, in
+    ///   console-subsystem/dev builds).
     pub fn ensure_hidden_console() {
         unsafe {
-            // AllocConsole fails if we already own a console (dev mode: the
-            // terminal running `cargo run`) — never hide the user's console.
+            // Release builds have no console (FreeConsole fails harmlessly);
+            // dev builds inherit the dev terminal's console — detach from it.
+            FreeConsole();
             if AllocConsole() != 0 {
+                // Swallow CTRL_C/CTRL_BREAK: only the child should react.
+                SetConsoleCtrlHandler(Some(ignore_console_ctrl), 1);
                 ShowWindow(GetConsoleWindow(), SW_HIDE);
             }
         }
+    }
+
+    /// Return TRUE (handled) so the default handler — which terminates the
+    /// process — never runs for console ctrl events.
+    unsafe extern "system" fn ignore_console_ctrl(_ctrl_type: u32) -> i32 {
+        1
     }
 
     struct JobGuard(HANDLE);
@@ -226,13 +246,16 @@ mod imp {
     }
 
     /// Build the child environment block from the inherited environment plus
-    /// overrides (case-insensitive key match, like Windows itself).
+    /// overrides (case-insensitive key match, like Windows itself). Operates
+    /// on raw UTF-16 units: entries we do NOT touch are forwarded verbatim
+    /// (no lossy UTF-8 round-trip), so an unrelated entry containing
+    /// unpaired surrogates survives intact.
     fn build_env_block(overrides: &[(String, String)]) -> io::Result<Vec<u16>> {
         let raw = unsafe { GetEnvironmentStringsW() };
         if raw.is_null() {
             return Err(win_err("GetEnvironmentStringsW"));
         }
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines: Vec<Vec<u16>> = Vec::new();
         let mut current: Vec<u16> = Vec::new();
         let mut i = 0usize;
         loop {
@@ -242,8 +265,7 @@ mod imp {
                 if current.is_empty() {
                     break; // double null terminator
                 }
-                lines.push(String::from_utf16_lossy(&current));
-                current.clear();
+                lines.push(std::mem::take(&mut current));
             } else {
                 current.push(w);
             }
@@ -251,12 +273,23 @@ mod imp {
         unsafe { FreeEnvironmentStringsW(raw) };
 
         for (key, value) in overrides {
-            let entry = format!("{key}={value}");
-            let prefix = format!("{key}=").to_lowercase();
-            let existing = lines
-                .iter_mut()
-                .find(|l| l.to_lowercase().starts_with(&prefix));
-            match existing {
+            let mut entry: Vec<u16> = key.encode_utf16().collect();
+            entry.push(b'=' as u16);
+            entry.extend(value.encode_utf16());
+            // ASCII-folded `KEY=` prefix, compared at the UTF-16 level.
+            let prefix: Vec<u16> = key
+                .encode_utf16()
+                .map(fold_ascii)
+                .chain(std::iter::once(b'=' as u16))
+                .collect();
+            let matches = |l: &[u16]| {
+                l.len() >= prefix.len()
+                    && l[..prefix.len()]
+                        .iter()
+                        .map(|&w| fold_ascii(w))
+                        .eq(prefix.iter().copied())
+            };
+            match lines.iter_mut().find(|l| matches(l)) {
                 Some(line) => *line = entry,
                 None => lines.push(entry),
             }
@@ -264,11 +297,20 @@ mod imp {
 
         let mut block: Vec<u16> = Vec::new();
         for line in lines {
-            block.extend(line.encode_utf16());
+            block.extend(line);
             block.push(0);
         }
         block.push(0); // double null terminator
         Ok(block)
+    }
+
+    /// ASCII case fold for one UTF-16 code unit (non-ASCII units unchanged).
+    fn fold_ascii(w: u16) -> u16 {
+        if (b'A' as u16..=b'Z' as u16).contains(&w) {
+            w + (b'a' - b'A') as u16
+        } else {
+            w
+        }
     }
 
     impl PlatformChild {
@@ -394,9 +436,12 @@ mod imp {
             })
         }
 
-        /// Polite shutdown: CTRL_C to the child's console process group.
-        /// Node maps CTRL_C to SIGINT, which dsh handles with a real graceful
-        /// teardown (interrupt → dispose), unlike CTRL_BREAK/SIGBREAK.
+        /// Polite shutdown: CTRL_C to the child's console. Windows ignores the
+        /// process-group argument for CTRL_C and broadcasts to every process
+        /// on the console — the sidecar's own handler swallows it, leaving
+        /// only the child to react. Node maps CTRL_C to SIGINT, which dsh
+        /// handles with a real graceful teardown (interrupt → dispose),
+        /// unlike CTRL_BREAK/SIGBREAK.
         pub fn graceful(&self) -> bool {
             self.kill.pid != 0
                 && unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, self.kill.pid) != 0 }
