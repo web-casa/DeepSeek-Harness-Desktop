@@ -28,10 +28,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-      - name: Install cargo tools (nextest, llvm-cov, deny)
+      - name: Install cargo tools (nextest, llvm-cov, deny, vet)
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-llvm-cov,cargo-deny
+          tool: cargo-nextest,cargo-llvm-cov,cargo-deny,cargo-vet
 
       - name: Install llvm-tools for coverage
         run: rustup component add llvm-tools-preview
@@ -69,6 +69,9 @@ jobs:
         run: |
           cargo deny --manifest-path crates/dsh-sidecar/Cargo.toml check
           cargo deny --manifest-path src-tauri/Cargo.toml check
+
+      - name: Supply-chain audit (cargo-vet)
+        run: cargo vet --locked
 
       - name: Frontend install & build
         run: pnpm install --frozen-lockfile && pnpm build
