@@ -824,21 +824,21 @@ pub fn request_restart(app: &AppHandle) -> Result<(), String> {
 /// button). Resets the crash counter and re-sends the start command.
 pub fn respawn_sidecar(app: &AppHandle) -> Result<(), String> {
     let runtime = app.state::<Runtime>();
-    if child_alive(&runtime) {
-        return Ok(());
-    }
-    // Defense in depth: request_restart guards this first, and the crash
-    // auto-restart scheduler checks the same flag before firing. A respawn
-    // racing app exit would spawn a sidecar that shutdown_blocking kills
-    // immediately via stdin EOF — never do that.
+    // shutting_down is a one-way latch set by shutdown_blocking before it
+    // drops the stdin pipe. A respawn racing app exit would spawn a sidecar
+    // that shutdown_blocking kills immediately via stdin EOF — never do
+    // that. Check FIRST: respawn must not reset the latch either (a
+    // store(false) here would re-open the race it is closing).
     if runtime.shutting_down.load(Ordering::SeqCst) {
         return Err("应用正在退出，无法重启".to_string());
+    }
+    if child_alive(&runtime) {
+        return Ok(());
     }
     let paths = runtime
         .paths
         .clone()
         .ok_or_else(|| "运行时路径不可用".to_string())?;
-    runtime.shutting_down.store(false, Ordering::SeqCst);
     runtime.restart_attempts.store(0, Ordering::SeqCst);
     runtime
         .stdin

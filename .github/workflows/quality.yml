@@ -44,11 +44,17 @@ jobs:
       - name: Sidecar coverage (llvm-cov, process lifecycle paths)
         run: cargo llvm-cov nextest --manifest-path crates/dsh-sidecar/Cargo.toml --fail-under-lines 50
 
-      - name: Sidecar cross-target checks (Windows + macOS)
+      - name: Sidecar cross-target clippy (Windows + macOS)
+        # The sidecar carries hand-rolled platform code behind #[cfg(windows)];
+        # the Linux clippy run below never compiles it. Clippy --target checks
+        # (no linking) enforce the same -D warnings lint set on both targets.
+        # (src-tauri windows-only code is built by the smoke/release jobs but
+        # not clippy'd anywhere: its build.rs needs llvm-rc, which Linux CI
+        # lacks — left as a documented gap, no violations today.)
         run: |
           rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
-          cargo check --target x86_64-pc-windows-msvc --manifest-path crates/dsh-sidecar/Cargo.toml
-          cargo check --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml
+          cargo clippy --target x86_64-pc-windows-msvc --manifest-path crates/dsh-sidecar/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml --all-targets -- -D warnings
 
       - name: "Tauri shell tests (nextest: state machine + proptests)"
         run: |

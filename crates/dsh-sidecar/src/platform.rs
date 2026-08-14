@@ -87,13 +87,14 @@ mod imp {
     use std::os::windows::io::FromRawHandle;
     use std::os::windows::process::ExitStatusExt;
     use std::process::ExitStatus;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use windows_sys::Win32::Foundation::{
         CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::System::Console::{
         AllocConsole, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleWindow,
-        SetConsoleCtrlHandler, CTRL_C_EVENT,
+        SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT,
     };
     use windows_sys::Win32::System::Environment::{
         FreeEnvironmentStringsW, GetEnvironmentStringsW,
@@ -109,6 +110,12 @@ mod imp {
         STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    /// True once `SetConsoleCtrlHandler` succeeded. `graceful()` refuses
+    /// CTRL_C when false: without our handler the broadcast would hit the
+    /// CRT default handler and terminate the sidecar mid-teardown (dev
+    /// builds), so the force path is the only safe one.
+    static CTRL_HANDLER_OK: AtomicBool = AtomicBool::new(false);
 
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
@@ -128,6 +135,11 @@ mod imp {
     /// - The sidecar registers a ctrl handler that swallows the broadcast, so
     ///   it never terminates itself (the CRT default handler would, in
     ///   console-subsystem/dev builds).
+    ///
+    /// Direct-run caveat: FreeConsole detaches this process from whatever
+    /// console it started on, so a manually launched sidecar's console
+    /// output disappears (NDJSON on stdout is unaffected in production —
+    /// the Tauri shell always spawns us with piped stdio).
     pub fn ensure_hidden_console() {
         unsafe {
             // Release builds have no console (FreeConsole fails harmlessly);
@@ -135,16 +147,26 @@ mod imp {
             FreeConsole();
             if AllocConsole() != 0 {
                 // Swallow CTRL_C/CTRL_BREAK: only the child should react.
-                SetConsoleCtrlHandler(Some(ignore_console_ctrl), 1);
+                // Failure is rare; graceful() then degrades to the force
+                // path instead of broadcasting an unguarded CTRL_C.
+                let registered = SetConsoleCtrlHandler(Some(ignore_console_ctrl), 1);
+                CTRL_HANDLER_OK.store(registered != 0, Ordering::Relaxed);
                 ShowWindow(GetConsoleWindow(), SW_HIDE);
             }
         }
     }
 
-    /// Return TRUE (handled) so the default handler — which terminates the
-    /// process — never runs for console ctrl events.
-    unsafe extern "system" fn ignore_console_ctrl(_ctrl_type: u32) -> i32 {
-        1
+    /// Swallow only the interrupt events we deliver ourselves (CTRL_C; BREAK
+    /// for symmetry). CLOSE/LOGOFF/SHUTDOWN fall through (return FALSE) to the
+    /// default handler, which terminates the process — termination closes the
+    /// Job handle, and KILL_ON_JOB_CLOSE then force-kills the child tree.
+    /// Returning TRUE for those would hang the supervisor during logoff.
+    unsafe extern "system" fn ignore_console_ctrl(ctrl_type: u32) -> i32 {
+        if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT {
+            1
+        } else {
+            0
+        }
     }
 
     struct JobGuard(HANDLE);
@@ -305,6 +327,10 @@ mod imp {
     }
 
     /// ASCII case fold for one UTF-16 code unit (non-ASCII units unchanged).
+    /// Windows env-key lookups are nominally case-insensitive per NLS, but
+    /// every key this project sets is ASCII, so ASCII folding is exact for
+    /// our overrides and at least as predictable as a full Unicode fold
+    /// (e.g. Rust's `to_lowercase` is not length-preserving for all inputs).
     fn fold_ascii(w: u16) -> u16 {
         if (b'A' as u16..=b'Z' as u16).contains(&w) {
             w + (b'a' - b'A') as u16
@@ -443,7 +469,8 @@ mod imp {
         /// handles with a real graceful teardown (interrupt → dispose),
         /// unlike CTRL_BREAK/SIGBREAK.
         pub fn graceful(&self) -> bool {
-            self.kill.pid != 0
+            CTRL_HANDLER_OK.load(Ordering::Relaxed)
+                && self.kill.pid != 0
                 && unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, self.kill.pid) != 0 }
         }
 

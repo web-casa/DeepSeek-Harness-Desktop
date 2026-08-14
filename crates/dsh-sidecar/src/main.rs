@@ -861,11 +861,26 @@ mod tests {
             }
 
             #[test]
+            // Byte-semantics bounds: the kept prefix must be a source prefix
+            // cut at the LARGEST char boundary ≤ MAX_LINE, with the marker
+            // appended. (An earlier char-count-based assertion passed only
+            // because `any::<String>()` rarely exceeds the byte cap.)
             fn truncate_line_bounds(s in any::<String>()) {
+                const MARKER: &str = "… [line truncated]";
                 let out = truncate_line(s.clone());
-                prop_assert!(out.len() <= MAX_LINE + "… [line truncated]".len() + 8);
-                let keep = s.chars().count().min(MAX_LINE);
-                prop_assert!(out.starts_with(&s.chars().take(keep).collect::<String>()));
+                if s.len() <= MAX_LINE {
+                    prop_assert_eq!(out, s);
+                } else {
+                    let kept = out.strip_suffix(MARKER).expect("marker required past the cap");
+                    prop_assert!(kept.len() <= MAX_LINE);
+                    prop_assert!(kept.is_char_boundary(kept.len()));
+                    prop_assert!(s.starts_with(kept));
+                    let next_char = s[kept.len()..].chars().next().expect("truncation cut content");
+                    prop_assert!(
+                        kept.len() + next_char.len_utf8() > MAX_LINE,
+                        "cut must be the largest char boundary at or below MAX_LINE"
+                    );
+                }
             }
 
             // Long lines made only of multi-byte chars: byte 8192 lands
