@@ -4,9 +4,25 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+    # Abu-style split: patch/minor batches land as grouped PRs; MAJOR bumps
+    # match no group and open individual PRs for human review (the TS7 PR
+    # that broke CI is the canonical example).
     groups:
-      frontend:
+      frontend-patch:
         patterns: ["*"]
+        update-types: ["patch"]
+      frontend-minor:
+        patterns: ["*"]
+        update-types: ["minor"]
+    # typescript majors are blocked: TS 7 (tsgo) is outside svelte-check's
+    # supported matrix (peer range ^5 || ^6). Upgrade 5 -> 6 deliberately
+    # (vite-env.d.ts already provides the vite/client types TS >= 6 needs).
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /runtime
@@ -17,6 +33,14 @@ updates:
         patterns: ["*"]
     # The bundled runtime is pinned via runtime-manifest.json — pull requests
     # here still require the manifest + CI smoke update before merging.
+    #
+    # Harness upgrades MUST go through the AGENTS.md startup-contract
+    # checklist, so ALL @deepseek-ai/dsh version updates are ignored (not
+    # just majors: 0.1.0-rc -> 0.2.0-rc is a *minor* per SemVer and would
+    # bypass a semver-major ignore). Bump manually: pin + lock + manifest +
+    # full smoke.
+    ignore:
+      - dependency-name: "@deepseek-ai/dsh"
 
   - package-ecosystem: cargo
     directory: /src-tauri
