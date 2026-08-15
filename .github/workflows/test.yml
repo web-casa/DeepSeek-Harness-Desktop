@@ -31,7 +31,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4 (SHA-pinned)
         with:
           node-version-file: .nvmrc
-          cache: pnpm
+          # The smoke job never runs pnpm — caching its store dir would fail
+          # the post step. It DOES npm-ci the runtime, so cache that instead.
+          cache: npm
+          cache-dependency-path: runtime/package-lock.json
 
       # The exact P0 acceptance chain, on every platform:
       # sidecar → bundled node → dsh web --port 0 → readiness → HTTP 200
