@@ -54,11 +54,17 @@ jobs:
             bundle: nsis
             artifact: deepseek-harness-desktop-windows-x64
             glob: target/release/bundle/nsis/*-setup.exe
+            # createUpdaterArtifacts signs the NSIS installer the updater
+            # downloads (basicUi install mode); the .sig rides along.
+            updaterGlob: target/release/bundle/nsis/*.sig
           - target: macos-arm64
             os: macos-14
             bundle: dmg
             artifact: deepseek-harness-desktop-macos-arm64
             glob: target/release/bundle/dmg/*.dmg
+            # macOS updater stays OFF while unsigned (Gatekeeper rejects
+            # un-notarized updates); the sig glob stays empty on purpose.
+            updaterGlob: target/release/bundle/macos/*.app.tar.gz.sig
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
@@ -133,6 +139,7 @@ jobs:
           path: |
             ${{ matrix.glob }}
             ${{ matrix.glob }}.sha256
+            ${{ matrix.updaterGlob }}
           if-no-files-found: error
 
   release:
@@ -171,3 +178,9 @@ jobs:
           draft: true
           tag_name: ${{ github.ref_name }}
           files: artifacts/**/*
+
+      # The updater manifest needs the ABSOLUTE asset URLs that only exist
+      # after the release is created; fail-closed if a platform has no
+      # artifact+sig pair. macOS is intentionally absent while unsigned.
+      - name: Publish updater manifest (latest.json)
+        run: node scripts/updater-manifest.ts --tag ${{ github.ref_name }} --platforms windows-x86_64

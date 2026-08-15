@@ -69,7 +69,21 @@ git push origin v0.2.1
 - workflow_dispatch（不发布）可用于在**不打 tag** 的情况下全流程演练构建
   与验证（`tag` 输入为空时构建默认分支）。
 
-## 7. 心跳 soak 门禁（重要版本发布前）
+## 7. 更新器（updater）运行语义
+
+- 更新包真实性由内嵌 minisign 公钥校验（`tauri.conf.json` 的
+  `plugins.updater.pubkey`），与代码签名无关；私钥存于
+  `TAURI_SIGNING_PRIVATE_KEY` secret，**丢失即全部更新失效**——轮换需
+  重新生成密钥对、更新 pubkey、发布一次强制全量安装的新版本。
+- `latest.json` 由 publish job 的 `scripts/updater-manifest.ts` 在发布后
+  自动生成并上传（绝对资产 URL + .sig 内容），fail-closed：缺配对即失败。
+- **macOS updater 未启用**（未签名时 Gatekeeper 拒绝未公证更新，见
+  C2 评审结论）；签名+公证落地后在 manifest 参数中追加
+  `darwin-aarch64` 并启用对应 sig 上传。
+- 旧版本（无 pubkey 的 v0.2.x）没有自动更新迁移路径，用户需手动安装一次
+  首个含 updater 的版本（v0.2.2+）。
+
+## 8. 心跳 soak 门禁（重要版本发布前）
 
 存活性心跳默认约 40 秒无响应即重启。发布包含心跳变更、或 harness 大版本
 升级时，手动执行一次长跑 soak（真实 agent 任务 ≥ 30 分钟），确认无误杀，

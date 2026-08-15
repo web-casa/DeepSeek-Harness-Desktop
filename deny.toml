@@ -42,6 +42,9 @@ allow = [
   "MPL-2.0",
   "OpenSSL",
   "CC0-1.0",
+  # Data license for bundled TLS root-certificate data (rustls ecosystem,
+  # pulled in by tauri-plugin-updater's HTTP client); permissive, data-only.
+  "CDLA-Permissive-2.0",
 ]
 # Root-owned workspace crates are MIT.
 exceptions = [

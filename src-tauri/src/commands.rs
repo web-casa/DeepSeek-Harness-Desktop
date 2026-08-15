@@ -111,3 +111,59 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
     open_harness_window(&app, &url);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Updater (Windows for now; macOS activates once signed + notarized).
+// The update package's authenticity is enforced by the minisign pubkey
+// embedded at build time (independent of app code signing).
+// ---------------------------------------------------------------------------
+
+/// Result of a silent update check, surfaced to the bootstrap UI.
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> Result<Value, String> {
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = app;
+        Ok(serde_json::json!({ "available": false, "unsupported": true }))
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+        let updater = app.updater().map_err(|e| e.to_string())?;
+        match updater.check().await {
+            Ok(Some(update)) => Ok(serde_json::json!({
+                "available": true,
+                "version": update.version,
+                "notes": update.body.clone().unwrap_or_default(),
+            })),
+            Ok(None) => Ok(serde_json::json!({ "available": false })),
+            Err(e) => Err(format!("update check failed: {e}")),
+        }
+    }
+}
+
+/// Download and install the latest update, then restart the app.
+#[tauri::command]
+pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = app;
+        Err("updates are not supported on this platform".to_string())
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+        let updater = app.updater().map_err(|e| e.to_string())?;
+        let update = updater
+            .check()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no update available".to_string())?;
+        update
+            .download_and_install(|_chunk, _total| {}, || {})
+            .await
+            .map_err(|e| format!("update install failed: {e}"))?;
+        app.restart();
+        Ok(())
+    }
+}

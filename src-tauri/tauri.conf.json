@@ -41,6 +41,15 @@
     ],
     "resources": {
       "resources/runtime": "runtime"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJCRDlCQTgxQTMyRjBGMEYKUldRUER5K2pnYnJadS9JVll3RVI1c2JTY0ZGK2NNZjlqOXhKcS96QjJYODdraFdmVmdBNjM0NEIK",
+      "endpoints": [
+        "https://github.com/web-casa/DeepSeek-Harness-Desktop/releases/latest/download/latest.json"
+      ]
     }
   }
 }

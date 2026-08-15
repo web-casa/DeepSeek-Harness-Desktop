@@ -72,6 +72,7 @@ fn main() {
             harness::init(&app.handle().clone());
             Ok(())
         })
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_logs,
@@ -79,7 +80,9 @@ fn main() {
             commands::get_diagnostics,
             commands::restart,
             commands::shutdown,
-            commands::open_harness
+            commands::open_harness,
+            commands::check_update,
+            commands::install_update_and_restart
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {
