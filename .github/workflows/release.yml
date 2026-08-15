@@ -217,3 +217,7 @@ jobs:
       # artifact+sig pair. macOS is intentionally absent while unsigned.
       - name: Publish updater manifest (latest.json)
         run: node scripts/updater-manifest.ts --tag ${{ github.ref_name }} --platforms windows-x86_64
+        env:
+          # gh CLI does NOT auto-authenticate from the ambient GITHUB_TOKEN;
+          # it needs GH_TOKEN explicitly (the job's contents: write applies).
+          GH_TOKEN: ${{ github.token }}
