@@ -6,3 +6,9 @@ who = "DeepSeek Harness Desktop"
 criteria = "safe-to-deploy"
 delta = "0.1.19 -> 0.1.20"
 notes = "Reviewed full source diff of 0.1.19 -> 0.1.20: the only change is a new TtyCall enum plus its exhaustive try_from_raw mapping (pure data, no unsafe, no behavior change elsewhere)."
+
+[[audits.uuid]]
+who = "DeepSeek Harness Desktop"
+criteria = "safe-to-deploy"
+delta = "1.24.0 -> 1.24.1"
+notes = "Reviewed full source diff: error.rs refactors the char validation to is_ascii_hexdigit() with direct '-' handling (behavior-equivalent, exhaustive), lib.rs changes are doc version strings only. No unsafe, no logic change elsewhere."
