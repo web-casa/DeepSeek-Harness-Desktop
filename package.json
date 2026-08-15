@@ -16,7 +16,8 @@
     "runtime:all": "node scripts/download-node.ts && node scripts/prepare-harness.ts && node scripts/build-sidecar.ts",
     "runtime:verify": "node scripts/verify-runtime.ts",
     "release:preflight": "node scripts/release-preflight.ts",
-    "icons": "node scripts/gen-icon.ts && tauri icon src-tauri/icons/icon-source.png --output src-tauri/icons"
+    "icons": "node scripts/gen-icon.ts && tauri icon src-tauri/icons/icon-source.png --output src-tauri/icons",
+    "test:scripts": "node --test \"scripts/lib/*.test.ts\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

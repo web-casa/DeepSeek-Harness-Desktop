@@ -95,6 +95,9 @@ jobs:
       - name: Scripts type check (Node-native TS)
         run: pnpm check:scripts
 
+      - name: Scripts unit tests (node:test, zero-dep)
+        run: pnpm test:scripts
+
       - name: Bundle verifier self-test
         run: node scripts/verify-bundle.ts --self-test
 
@@ -120,6 +123,17 @@ jobs:
       - name: Prepare stub runtime dir (tauri-build asserts the path exists)
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path src-tauri/resources/runtime | Out-Null
+
+      - name: Install cargo tools (nextest, pinned like the Linux job)
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1  # v2 (SHA-pinned)
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: Rust tests on Windows host (nextest)
+        # Platform-independent unit/property/golden tests really execute on
+        # the Windows host (the #[cfg(unix)] process-level suites are skipped
+        # by design — their semantics are covered by the 3-platform smoke).
+        run: cargo nextest run --workspace
 
       - name: Rust formatting & clippy (workspace, Windows host)
         run: |

@@ -34,6 +34,7 @@ import {
   assertNpmInAuditedRange,
 } from "./lib/common.ts";
 import { materialize } from "./lib/materialize.ts";
+import { isPackageRoot } from "./lib/licenses.ts";
 
 // Collect every package's license file into licenses/<rel-path> so the
 // installer carries third-party attribution for the whole dependency tree.
@@ -48,18 +49,6 @@ import { materialize } from "./lib/materialize.ts";
 function collectLicenses(nodeModules: string, outDir: string): void {
   let collected = 0;
   const candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING"];
-
-  const isPackageRoot = (segs: string[]): boolean => {
-    const n = segs.length;
-    if (n === 0) return false;
-    if (n === 1) return true; // <top>/pkg
-    if (n === 2 && segs[0].startsWith("@")) return true; // <top>/@scope/pkg
-    if (segs[n - 2] === "node_modules") return true; // …/node_modules/pkg
-    if (n >= 3 && segs[n - 3] === "node_modules" && segs[n - 2].startsWith("@")) {
-      return true; // …/node_modules/@scope/pkg
-    }
-    return false;
-  };
 
   const walk = (dir: string, segs: string[]): void => {
     let entries: Dirent[];

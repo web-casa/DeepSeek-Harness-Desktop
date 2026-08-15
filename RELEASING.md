@@ -85,6 +85,14 @@ git push origin v0.2.1
 
 ## 8. 心跳 soak 门禁（重要版本发布前）
 
-存活性心跳默认约 40 秒无响应即重启。发布包含心跳变更、或 harness 大版本
-升级时，手动执行一次长跑 soak（真实 agent 任务 ≥ 30 分钟），确认无误杀，
-再 Publish。
+存活性心跳默认约 40 秒无响应即重启。发布流水线内置 5 分钟负载 soak
+（`scripts/load-soak.ts`：真实 harness + CPU 燃烧进程 + 探针延迟记录，
+生产默认旋钮）。重要版本（心跳变更 / harness 大版本升级）在 Publish 前
+额外手动执行：
+
+```bash
+node scripts/load-soak.ts --duration-min 30 --cpu-burn 4
+```
+
+确认全程无误杀（`bad=0`）再 Publish。局限见脚本头注释：CPU 争抢覆盖探针
+超时路径，事件循环阻塞由 verify-heartbeat 的 hang case 覆盖。

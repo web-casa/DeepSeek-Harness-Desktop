@@ -42,6 +42,28 @@ jobs:
             exit 1
           }
 
+  # Load soak under CPU contention (production-default heartbeat knobs).
+  # Release-only: PRs must not pay the staging + soak minutes (review I7).
+  soak:
+    name: Heartbeat load soak (Linux, 5min)
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+
+      - name: Stage runtime (Node + Harness + sidecar)
+        run: |
+          node scripts/download-node.ts
+          node scripts/prepare-harness.ts
+          node scripts/build-sidecar.ts
+
+      - name: Load soak (5 minutes, 2 CPU burners)
+        run: node scripts/load-soak.ts --duration-min 5 --cpu-burn 2
+
   build:
     name: Build ${{ matrix.target }}
     needs: [quality, tag-gate]

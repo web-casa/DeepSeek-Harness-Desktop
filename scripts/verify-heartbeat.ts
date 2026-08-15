@@ -25,6 +25,7 @@ import {
   ok,
   info,
 } from "./lib/common.ts";
+import { HANG_SCRIPT, HEALTHY_SCRIPT, isParseableReadyLine } from "./lib/heartbeat-sim.ts";
 
 interface Event {
   type: string;
@@ -47,28 +48,6 @@ const nodePath = process.argv.includes("--self-test")
   ? process.execPath
   : join(runtimeDir, `node${exeSuffix}`);
 
-const HANG_SCRIPT = `
-const net = require("node:net");
-// A server that never handles connections: the kernel completes the TCP
-// handshake (backlog) but no response bytes are ever written — exactly the
-// "alive but event loop blocked" shape the heartbeat must catch.
-const srv = net.createServer(() => {});
-srv.listen(0, "127.0.0.1", () => {
-  console.log("dsh web: http://127.0.0.1:" + srv.address().port);
-});
-setInterval(() => {}, 1000);
-`;
-
-const HEALTHY_SCRIPT = `
-const http = require("node:http");
-const srv = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/html" });
-  res.end("<!doctype html><html><body>ok</body></html>");
-});
-srv.listen(0, "127.0.0.1", () => {
-  console.log("dsh web: http://127.0.0.1:" + srv.address().port);
-});
-`;
 
 // ---------------------------------------------------------------------------
 // Simulator sanity: the fake harness must print a parseable readiness line.
@@ -86,7 +65,7 @@ async function checkSimulator(script: string, label: string): Promise<void> {
     setTimeout(() => reject(new Error(`${label} printed nothing in 10s`)), 10_000);
   });
   child.kill();
-  if (!/^dsh web: http:\/\/127\.0\.0\.1:\d+$/.test(firstLine)) {
+  if (!isParseableReadyLine(firstLine)) {
     fail(`${label} readiness line not parseable: ${firstLine}`);
   }
   ok(`self-test: ${label} prints a parseable readiness line`);

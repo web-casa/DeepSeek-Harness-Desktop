@@ -21,6 +21,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { repoRoot, tmpDir, readManifest, fail, ok, info } from "./lib/common.ts";
+import { quarantinePresent, parseSltListing } from "./lib/bundle-checks.ts";
 
 const bundleArg = process.argv.indexOf("--bundle");
 const bundleType = bundleArg >= 0 ? process.argv[bundleArg + 1] : undefined;
@@ -71,24 +72,6 @@ function find7z(): string {
     if (existsSync(path)) return path;
   }
   fail("7z not found on PATH or in default Windows locations");
-}
-
-function parseSltListing(text: string): string[] {
-  const entries: string[] = [];
-  // The -slt output opens with an archive-level block (Path = <archive path>)
-  // that must NOT be treated as a content entry. Only collect paths after the
-  // long dash separator that precedes the first real entry.
-  let inEntries = false;
-  for (const line of text.split(/\r?\n/)) {
-    if (!inEntries) {
-      if (/^-{10,}$/.test(line)) inEntries = true;
-      continue;
-    }
-    if (line.startsWith("Path = ")) {
-      entries.push(line.slice("Path = ".length).replace(/\\/g, "/"));
-    }
-  }
-  return entries;
 }
 
 function listNsisEntries(artifact: string): string[] {
@@ -270,17 +253,6 @@ function assertExecutable(path: string, label: string): void {
     throw new Error(`${label} is not executable (mode ${(mode & 0o777).toString(8)})`);
   }
   ok(`${label} is executable`);
-}
-
-/// Pure discriminator for the xattr probe: `null` means "could not determine"
-/// (tool missing/errored) and callers must fail closed — a missing xattr must
-/// never be mistaken for "no quarantine attribute".
-export function quarantinePresent(
-  status: number | null,
-  error?: Error,
-): boolean | null {
-  if (status === null || error) return null;
-  return status === 0;
 }
 
 /// Build hygiene, NOT a signing claim: Gatekeeper stamps com.apple.quarantine
