@@ -60,7 +60,10 @@ git push origin v0.2.1
    （`*.exe`/`*.dmg` + 各自 `.sha256`）与体积量级。
 2. 抽查 checksum：`shasum -a 256 <下载文件>` 对照 `.sha256` 内容。
 3. 手动下载安装验证（未签名构建：确认 SmartScreen/Gatekeeper 放行路径可走通）。
-4. 点 **Publish release**。完成后更新 README「当前状态」行。
+4. 点 **Publish release**。
+5. 记录下载基线：`node scripts/release-stats.ts`（公开下载计数是本项目
+   唯一的“遥测”，维护者本地 gh 凭据即可）。
+6. 更新 README「当前状态」行。
 
 ## 6. 回滚/重发
 

@@ -49,8 +49,12 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
   自动重启；极端长同步任务阻塞事件循环可能触发。旋钮：
   `DSH_HEARTBEAT_INTERVAL_MS`（0=禁用）/`DSH_HEARTBEAT_FAIL_LIMIT`/
   `DSH_HEARTBEAT_READ_TIMEOUT_MS`。
-- **无自动更新**：暂未接入更新器；未来接入时更新源与产物校验必须经 SHA-256
-  + 签名验证，且社区重打包版本不得指向任何官方渠道（见 FORKING.md）。
+- **更新与网络边界**：Windows 已接入自动更新器，更新检查会访问 GitHub
+  Releases 端点（`releases/latest/download/latest.json`）——这是一次对
+  github.com 的网络请求（GitHub 可见请求 IP），**不是使用遥测**；除 GitHub
+ 公开下载计数外，本项目不采集、不上报任何使用数据，DSH 上游会话遥测默认
+ 关闭。更新包真实性由内嵌 minisign 公钥校验，与代码签名无关；macOS
+ 更新器在签名+公证落地前保持关闭。
 
 ## 报告漏洞
 

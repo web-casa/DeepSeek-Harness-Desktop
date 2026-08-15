@@ -163,8 +163,16 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
             .download_and_install(|_chunk, _total| {}, || {})
             .await
             .map_err(|e| format!("update install failed: {e}"))?;
+        // `restart` DIVERGES on Windows (the process is restarted in place),
+        // so a shared success tail would be unreachable there and trip
+        // clippy's unreachable_code under -D warnings. cfg the tail instead.
+        #[cfg(target_os = "windows")]
         app.restart();
-        Ok(())
+        #[cfg(not(target_os = "windows"))]
+        {
+            app.restart();
+            Ok(())
+        }
     }
 }
 

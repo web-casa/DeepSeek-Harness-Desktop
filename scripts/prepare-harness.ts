@@ -101,11 +101,10 @@ if (pinned !== manifest.harnessVersion) {
 }
 
 info(`installing @deepseek-ai/dsh@${pinned} (production, npm flat) into runtime/`);
-const env: NodeJS.ProcessEnv = {
-  ...process.env,
-  XDG_CACHE_HOME: join(repoRoot, ".tmp", "xdg-cache"),
-  npm_config_cache: join(repoRoot, ".tmp", "npm-cache"),
-};
+// Deliberately NO npm_config_cache/XDG redirect: setup-node's `cache: npm`
+// (keyed on runtime/package-lock.json) warms ~/.npm on CI runners — a
+// redirected cache would never hit and every `npm ci` would stay cold.
+const env: NodeJS.ProcessEnv = { ...process.env };
 
 // The runtime/.npmrc allowlist (allow-scripts/strict-allow-scripts) requires
 // npm 11.17+ and has been audited only up to npm 11. Both bounds are shared
@@ -116,8 +115,6 @@ ok(`npm ${npmVersion} supports strict-allow-scripts`);
 
 // npm ci: clean, reproducible install from the committed package-lock.json.
 // On Windows the npm shim is a .cmd file; spawnSync resolves it via a shell.
-// The cache path travels via npm_config_cache — no --cache CLI flag needed
-// (and no argument quoting issues with spaces in the repo path).
 const res = spawnSync("npm", ["ci", "--omit=dev"], {
   cwd: join(repoRoot, "runtime"),
   env,
