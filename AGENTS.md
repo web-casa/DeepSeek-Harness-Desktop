@@ -51,6 +51,22 @@ DSH CLI 的启动契约随版本演进，社区同类项目已实证踩坑（如
    Tauri `start_harness` args、`verify-runtime.ts` 冒烟断言；
 4. 全量冒烟（`verify-runtime` + `verify-heartbeat`）+ golden 测试复核。
 
+Dependabot 对 harness 的 ignore 不作用于 security updates：若收到
+`@deepseek-ai/dsh` 的 security PR（只改 pin+lock、不动 manifest），必须按本
+清单补全（manifest + lock + 全量冒烟）后再合并——CI 的 version-drift 断言会
+自动挡住不完整合入。
+
+## 前端依赖升级门槛（typescript 等）
+
+- **typescript 只允许人工跨 major**：TS 7（tsgo）超出 svelte-check 支持矩阵
+  （peer `^5 || ^6`）；Dependabot 已按 `semver-major` ignore，升级前先核
+  svelte-check 的 peer 声明。security update 不受 ignore 约束，收到 TS
+  的 security PR 按本门槛人工评估。
+- **TS ≥ 6 依赖 `src/vite-env.d.ts`**（`/// <reference types="vite/client" />`）：
+  `noUncheckedSideEffectImports` 自 TS 6.0 默认开启，缺失会让 CSS 副作用导入
+  报 TS2882（PR #1 事件根因）。
+- 升级后必跑：`pnpm check && pnpm check:scripts && pnpm build`。
+
 ## 禁区清单
 
 - **不改 Harness Web UI / 上游代码**；只 pin npm 包。

@@ -20,6 +20,8 @@ updates:
     # typescript majors are blocked: TS 7 (tsgo) is outside svelte-check's
     # supported matrix (peer range ^5 || ^6). Upgrade 5 -> 6 deliberately
     # (vite-env.d.ts already provides the vite/client types TS >= 6 needs).
+    # NOTE: ignore rules do NOT apply to security updates — review any
+    # security PR against the AGENTS.md frontend upgrade gate.
     ignore:
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
@@ -39,6 +41,10 @@ updates:
     # just majors: 0.1.0-rc -> 0.2.0-rc is a *minor* per SemVer and would
     # bypass a semver-major ignore). Bump manually: pin + lock + manifest +
     # full smoke.
+    # NOTE: ignore rules do NOT apply to security updates. A security PR
+    # would change pin + lock but NOT runtime-manifest.json — CI's
+    # version-drift assertion will fail it until the full checklist is done
+    # manually; never merge such a PR incomplete.
     ignore:
       - dependency-name: "@deepseek-ai/dsh"
 
@@ -48,9 +54,13 @@ updates:
       interval: weekly
     # tauri major bumps (2 -> 3) are a real migration (API, bundler,
     # capability schema), not a routine update — gate them like typescript
-    # majors and upgrade deliberately.
+    # majors and upgrade deliberately. tauri* covers the lockstep siblings
+    # (tauri-build, tauri-plugin-single-instance, tauri-plugin-window-state)
+    # which migrate together with the core crate.
+    # NOTE: ignore rules do NOT apply to security updates — a security PR
+    # may still cross majors; treat it like a deliberate migration.
     ignore:
-      - dependency-name: "tauri"
+      - dependency-name: "tauri*"
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: cargo
