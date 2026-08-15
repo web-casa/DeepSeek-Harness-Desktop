@@ -382,7 +382,20 @@ fn apply_state_event(
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown sidecar error");
-            set_error(state, msg.to_string());
+            // Transient diagnostics (unresponsive/readiness-timeout) arrive
+            // BEFORE the kill sequence they announce. Flipping to Crashed
+            // here would make the UI flash Crashed→Stopping→Starting while
+            // the tree is still tearing down. Record the message, but only
+            // take the fatal state when we are not mid-transition.
+            let mut s = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            s.last_error = Some(msg.to_string());
+            if s.status != Status::Stopping && s.status != Status::Starting {
+                s.status = Status::Crashed;
+                s.url = None;
+                s.pid = None;
+            }
         }
         "status" => {
             if let Some(pid) = ev.get("pid").and_then(|v| v.as_u64()) {
@@ -1076,9 +1089,54 @@ mod tests {
             text.contains("killed after health checks failed (unresponsive)"),
             "message must be surfaced: {text}"
         );
+        assert!(
+            !text.contains("(code"),
+            "message must REPLACE the exit-code wording, not append to it: {text}"
+        );
         assert!(text.contains("自动重启"), "restart wording kept: {text}");
         drop(s);
         assert_eq!(effects, vec![SideEffect::ScheduleAutoRestart(1)]);
+    }
+
+    #[test]
+    fn error_event_during_stopping_does_not_flip_status() {
+        // The sidecar emits error/unresponsive BEFORE the kill sequence it
+        // announces. While stopping, the error must be recorded but must not
+        // flash Crashed (the UI would bounce Crashed→Stopping→Starting).
+        let (state, shutting_down, attempts) = fresh();
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status = Status::Stopping;
+        let effects = apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"error","code":"unresponsive","message":"dsh web did not answer health probes; killing the tree"}),
+        );
+        assert!(effects.is_empty());
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(s.status, Status::Stopping, "status must not flip");
+        assert!(s.last_error.as_deref().unwrap().contains("health probes"));
+    }
+
+    #[test]
+    fn error_event_from_idle_still_takes_crashed() {
+        // The fatal-state behavior is preserved for errors that are NOT part
+        // of a stop sequence (spawn failures etc.).
+        let (state, shutting_down, attempts) = fresh();
+        apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"error","code":"spawn-failed","message":"boom"}),
+        );
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(s.status, Status::Crashed);
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub fn status_label(status: &str) -> String {
         "running" => "运行中",
         "stopping" => "停止中…",
         "stopped" => "已停止",
-        "crashed" => "启动失败",
+        "crashed" => "进程异常退出",
         _ => status,
     };
     format!("Harness：{label}")
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn maps_status_to_tray_labels() {
         assert_eq!(status_label("running"), "Harness：运行中");
-        assert_eq!(status_label("crashed"), "Harness：启动失败");
+        assert_eq!(status_label("crashed"), "Harness：进程异常退出");
         assert_eq!(status_label("stopped"), "Harness：已停止");
         assert_eq!(status_label("starting"), "Harness：启动中…");
         assert_eq!(status_label("idle"), "Harness：等待启动");

@@ -17,7 +17,6 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  repoRoot,
   runtimeDir,
   harnessDir,
   tmpDir,
@@ -40,6 +39,10 @@ interface Event {
 }
 
 const sidecarPath = join(runtimeDir, `sidecar${exeSuffix}`);
+
+// Everything this script creates, removed on ANY exit path (fail() throws
+// / exits, so the catch below is the only reliable cleanup point).
+const tempPaths: string[] = [];
 const nodePath = process.argv.includes("--self-test")
   ? process.execPath
   : join(runtimeDir, `node${exeSuffix}`);
@@ -106,6 +109,7 @@ function driveSidecar(
   // package.json is type:module — .cjs keeps require() available).
   const scriptFile = join(tmpDir, `hb-fake-${Date.now()}.cjs`);
   writeFileSync(scriptFile, script);
+  tempPaths.push(scriptFile);
   const sidecar = spawn(sidecarPath, [], {
     cwd: runtimeDir,
     stdio: ["pipe", "pipe", "inherit"],
@@ -173,6 +177,7 @@ async function waitFor(
 async function hangCase(): Promise<void> {
   const dshHome = join(tmpDir, `hb-hang-${Date.now()}`);
   mkdirSync(dshHome, { recursive: true });
+  tempPaths.push(dshHome);
   const { events, send, finish } = driveSidecar(
     {
       // Aggressive knobs: two 300ms probes must hang the fake child fast.
@@ -210,14 +215,17 @@ async function hangCase(): Promise<void> {
   }
   ok("hang case: supervisor did not auto-respawn");
 
-  // The shell's restart (manual command) must bring it back.
+  // The shell's restart (manual command) must bring it back. Detected by
+  // event COUNT, not URL inequality (the OS may legitimately reuse the port).
+  const readyCountBefore = events.filter((e) => e.type === "ready").length;
   send({ id: 2, command: "restart" });
-  const ready2 = await waitFor(
+  await waitFor(
     events,
-    (e) => e.type === "ready" && e.url !== ready.url,
+    () => events.filter((e) => e.type === "ready").length > readyCountBefore,
     "ready after restart",
     30_000,
   );
+  const ready2 = events.filter((e) => e.type === "ready")[readyCountBefore];
   ok(`hang case: restart recovered — ready at ${ready2.url}`);
 
   // The same hang script runs again, so the watcher must re-arm for the NEW
@@ -230,6 +238,9 @@ async function hangCase(): Promise<void> {
     30_000,
   );
   const crashed2 = events.filter((e) => e.type === "crashed")[1];
+  if (crashed2.message !== "killed after health checks failed (unresponsive)") {
+    fail(`second crashed message mismatch: ${crashed2.message}`);
+  }
   ok(`hang case: heartbeat re-armed and caught the restarted hang (${crashed2.message})`);
 
   const exitCode = await finish();
@@ -241,6 +252,7 @@ async function hangCase(): Promise<void> {
 async function healthyCase(): Promise<void> {
   const dshHome = join(tmpDir, `hb-healthy-${Date.now()}`);
   mkdirSync(dshHome, { recursive: true });
+  tempPaths.push(dshHome);
   const { events, send, finish } = driveSidecar(
     {
       DSH_HEARTBEAT_INTERVAL_MS: "300",
@@ -289,6 +301,13 @@ async function main(): Promise<void> {
 }
 
 main().catch((e: Error) => {
+  for (const p of tempPaths) {
+    try {
+      rmSync(p, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
   console.error(`\n✗ ${e.message}`);
   process.exit(1);
 });

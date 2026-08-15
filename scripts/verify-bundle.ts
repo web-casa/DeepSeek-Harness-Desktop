@@ -178,6 +178,15 @@ Size = 2001
   rmSync(exeFixture, { force: true });
   rmSync(noExeFixture, { force: true });
   ok("self-test: assertExecutable enforces the exec bit");
+
+  // quarantinePresent: the null case (tool missing) must NOT read as clean.
+  if (quarantinePresent(0) !== true) fail("self-test: xattr exit 0 = quarantine present");
+  if (quarantinePresent(1) !== false) fail("self-test: xattr non-zero = no quarantine");
+  if (quarantinePresent(null) !== null) fail("self-test: null status must be indeterminate");
+  if (quarantinePresent(null, new Error("ENOENT")) !== null) {
+    fail("self-test: errored spawn must be indeterminate");
+  }
+  ok("self-test: quarantinePresent discriminates clean/absent/indeterminate");
 }
 
 function extractNsisFile(artifact: string, innerPath: string, outDir: string): string {
@@ -263,6 +272,17 @@ function assertExecutable(path: string, label: string): void {
   ok(`${label} is executable`);
 }
 
+/// Pure discriminator for the xattr probe: `null` means "could not determine"
+/// (tool missing/errored) and callers must fail closed — a missing xattr must
+/// never be mistaken for "no quarantine attribute".
+export function quarantinePresent(
+  status: number | null,
+  error?: Error,
+): boolean | null {
+  if (status === null || error) return null;
+  return status === 0;
+}
+
 /// Build hygiene, NOT a signing claim: Gatekeeper stamps com.apple.quarantine
 /// on downloads; a locally built DMG must never carry it. (Signed or
 /// unsigned is decided elsewhere — see verify-signing.ts.)
@@ -270,7 +290,11 @@ function assertNoQuarantine(path: string, label: string): void {
   const res = spawnSync("xattr", ["-p", "com.apple.quarantine", path], {
     encoding: "utf8",
   });
-  if (res.status === 0) {
+  const present = quarantinePresent(res.status, res.error);
+  if (present === null) {
+    throw new Error(`${label}: xattr unavailable — cannot verify quarantine state`);
+  }
+  if (present) {
     throw new Error(`${label} carries com.apple.quarantine (${(res.stdout ?? "").trim()})`);
   }
   ok(`${label} has no quarantine attribute`);

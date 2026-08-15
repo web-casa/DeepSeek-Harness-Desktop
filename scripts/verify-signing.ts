@@ -75,6 +75,22 @@ function run(cmd: string, args: string[], mustSucceed: boolean, what: string): v
   }
 }
 
+/// spawnSync reports a missing/unspawnable tool as status null + error — a
+/// shape that must never be mistaken for a verification RESULT (that would
+/// make the unsigned branch fail open).
+export function toolRan(res: { status: number | null; error?: Error }): boolean {
+  return res.status !== null && !res.error;
+}
+
+function assertToolRan(res: { status: number | null; error?: Error }, what: string): void {
+  if (!toolRan(res)) {
+    fail(
+      `${what} did not run (${res.error?.message ?? "unknown error"}) — ` +
+        "cannot verify signing state; refusing to guess",
+    );
+  }
+}
+
 function verifyDmg(app: string, expectSigned: boolean): void {
   if (expectSigned) {
     run("codesign", ["--verify", "--deep", "--strict", app], true, "codesign verify");
@@ -86,6 +102,7 @@ function verifyDmg(app: string, expectSigned: boolean): void {
     // the .app; that is not a distribution signature and must not be
     // mistaken for one — stapler is the discriminator.)
     const res = spawnSync("stapler", ["validate", app], { encoding: "utf8" });
+    assertToolRan(res, "stapler validate");
     if (res.status === 0) {
       fail("unsigned build is notarized — signing state is inconsistent");
     }
@@ -99,10 +116,15 @@ function verifyDmg(app: string, expectSigned: boolean): void {
 }
 
 function verifyNsis(artifact: string, expectSigned: boolean): void {
-  const cmd = `(Get-AuthenticodeSignature -LiteralPath '${artifact}').Status`;
+  // The artifact path travels via the environment, never through command
+  // string interpolation — a path containing a single quote (fork product
+  // names, checkout paths) must not break or inject into the -Command.
+  const cmd = "(Get-AuthenticodeSignature -LiteralPath $env:DSH_VERIFY_ARTIFACT).Status";
   const res = spawnSync("powershell", ["-NoProfile", "-Command", cmd], {
     encoding: "utf8",
+    env: { ...process.env, DSH_VERIFY_ARTIFACT: artifact },
   });
+  assertToolRan(res, "Authenticode check");
   const status = parseAuthenticode(res.stdout ?? "");
   if (expectSigned) {
     if (status !== "Valid") {
@@ -142,7 +164,17 @@ function runSelfTest(): void {
   if (parseAuthenticode("  NotSigned\r\n") !== "NotSigned") fail("self-test: NotSigned parse wrong");
   if (parseAuthenticode("HashMismatch\n") !== "HashMismatch") fail("self-test: HashMismatch parse wrong");
   if (parseAuthenticode("\r\n") !== null) fail("self-test: empty output must parse to null");
-  ok("self-test: signing decision matrix + Authenticode parser");
+
+  // Tool-availability discriminator: null status (tool missing) must never
+  // count as a verification result — the unsigned branch is fail-open
+  // otherwise.
+  if (toolRan({ status: 0 }) !== true) fail("self-test: status 0 must count as ran");
+  if (toolRan({ status: 1 }) !== true) fail("self-test: non-zero status still ran");
+  if (toolRan({ status: null }) !== false) fail("self-test: null status must count as NOT ran");
+  if (toolRan({ status: null, error: new Error("ENOENT") }) !== false) {
+    fail("self-test: errored spawn must count as NOT ran");
+  }
+  ok("self-test: signing decision matrix + Authenticode parser + tool-ran discriminator");
 }
 
 if (process.argv.includes("--self-test")) {

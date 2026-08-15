@@ -285,10 +285,19 @@ fn env_key_forbidden(key: &str) -> bool {
     FORBIDDEN_ENV_KEYS.contains(&folded.as_str()) || folded.starts_with(FORBIDDEN_ENV_PREFIX)
 }
 
-/// Filter an inherited environment snapshot (String form — the unix path).
-pub fn sanitize_inherited_env(vars: Vec<(String, String)>) -> Vec<(String, String)> {
+/// Filter an inherited environment snapshot (the unix path).
+///
+/// OsString end-to-end: `std::env::vars()` PANICS on any non-UTF-8 key/value
+/// (a library-level panic clippy cannot see, and production code must not
+/// panic), while `Command`'s native inheritance passes raw bytes through.
+/// Values therefore stay OsString (non-UTF-8 values forwarded verbatim); only
+/// the KEY is UTF-8-checked, and a non-UTF-8 key simply cannot match any
+/// ASCII forbidden name.
+pub fn sanitize_inherited_env(
+    vars: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     vars.into_iter()
-        .filter(|(k, _)| !env_key_forbidden(k))
+        .filter(|(k, _)| !k.to_str().is_some_and(env_key_forbidden))
         .collect()
 }
 
@@ -342,6 +351,19 @@ fn env_count(name: &str, default: u32) -> u32 {
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(default)
+}
+
+/// Heartbeat durations: 0 keeps its documented "disabled" meaning; any other
+/// value below the floor is raised, so a misconfigured knob (e.g. 1ms
+/// interval + connection-refused probes) cannot turn the watcher into a
+/// busy loop.
+const MIN_HB_STEP: Duration = Duration::from_millis(100);
+fn clamp_heartbeat(d: Duration) -> Duration {
+    if d.is_zero() || d >= MIN_HB_STEP {
+        d
+    } else {
+        MIN_HB_STEP
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -426,8 +448,11 @@ struct Running {
 impl Running {
     fn spawn(spec: &SpawnSpec, tx: &Sender<LineEvent>) -> Result<Self, String> {
         let gen = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-        let mut child =
-            PlatformChild::spawn(spec).map_err(|e| format!("failed to spawn node: {e}"))?;
+        // OsString snapshot: `std::env::vars()` would panic on non-UTF-8 env.
+        // RAW on purpose — the sanitizer lives inside PlatformChild::spawn.
+        let inherited = std::env::vars_os().collect::<Vec<_>>();
+        let mut child = PlatformChild::spawn(spec, &inherited)
+            .map_err(|e| format!("failed to spawn node: {e}"))?;
         let pid = child.child.id();
         for (stream, pipe) in [
             (
@@ -479,11 +504,13 @@ fn main() {
     platform::ensure_hidden_console();
     let ready_timeout = env_ms("DSH_READY_TIMEOUT_MS", 120_000);
     let shutdown_grace = env_ms("DSH_SHUTDOWN_GRACE_MS", 10_000);
-    // Heartbeat knobs: interval 0 disables the watcher entirely. Defaults are
+    // Heartbeat knobs: interval 0 disables the watcher entirely; FAIL_LIMIT
+    // must be >= 1 (0/illegal coerces to the default). Defaults are
     // deliberately conservative (4 unanswered probes × 10s ≈ 40s of silence)
-    // so long synchronous work cannot be mistaken for a hang.
-    let hb_interval = env_ms("DSH_HEARTBEAT_INTERVAL_MS", 10_000);
-    let hb_read_timeout = env_ms("DSH_HEARTBEAT_READ_TIMEOUT_MS", 3_000);
+    // so long synchronous work cannot be mistaken for a hang. Non-zero
+    // durations below 100ms are clamped up (busy-loop guard).
+    let hb_interval = clamp_heartbeat(env_ms("DSH_HEARTBEAT_INTERVAL_MS", 10_000));
+    let hb_read_timeout = clamp_heartbeat(env_ms("DSH_HEARTBEAT_READ_TIMEOUT_MS", 3_000));
     let hb_fail_limit = env_count("DSH_HEARTBEAT_FAIL_LIMIT", 4);
 
     emit(json!({"type":"sidecar","version":env!("CARGO_PKG_VERSION")}));
@@ -1160,7 +1187,7 @@ mod tests {
 
         #[test]
         fn spawn_and_reap_normal_exit() {
-            let mut child = PlatformChild::spawn(&spec("exit 7")).unwrap();
+            let mut child = PlatformChild::spawn(&spec("exit 7"), &proc_env()).unwrap();
             let status =
                 wait_exit(&mut child, Duration::from_secs(10)).expect("child did not exit");
             assert_eq!(status.code(), Some(7));
@@ -1170,7 +1197,8 @@ mod tests {
         fn graceful_then_force_kills_a_trapping_child() {
             // Trap TERM: the graceful signal is delivered but ignored, so the
             // force path (SIGKILL to the group) must finish the job.
-            let mut child = PlatformChild::spawn(&spec("trap '' TERM; sleep 30")).unwrap();
+            let mut child =
+                PlatformChild::spawn(&spec("trap '' TERM; sleep 30"), &proc_env()).unwrap();
             // Give the shell time to install the trap before signalling.
             std::thread::sleep(Duration::from_millis(500));
             assert!(child.graceful(), "graceful signal must be deliverable");
@@ -1187,7 +1215,7 @@ mod tests {
 
         #[test]
         fn graceful_stops_a_normal_child() {
-            let mut child = PlatformChild::spawn(&spec("sleep 30")).unwrap();
+            let mut child = PlatformChild::spawn(&spec("sleep 30"), &proc_env()).unwrap();
             assert!(child.graceful());
             let status = wait_exit(&mut child, Duration::from_secs(10)).expect("TERM did not stop");
             assert!(!status.success());
@@ -1197,25 +1225,39 @@ mod tests {
         fn env_overrides_reach_the_child() {
             let mut spec = spec("test \"$DSH_HOME\" = \"/tmp/qa-home\"");
             spec.env = vec![("DSH_HOME".to_string(), "/tmp/qa-home".to_string())];
-            let mut child = PlatformChild::spawn(&spec).unwrap();
+            let mut child = PlatformChild::spawn(&spec, &proc_env()).unwrap();
             let status =
                 wait_exit(&mut child, Duration::from_secs(10)).expect("child did not exit");
             assert_eq!(status.code(), Some(0));
         }
 
+        /// The real process env snapshot, for tests that only need a working
+        /// PATH (sleep/test are external binaries). The injection test below
+        /// uses a crafted snapshot instead — no process-global set_var.
+        fn proc_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+            std::env::vars_os().collect()
+        }
+
         #[test]
         fn inherited_node_env_is_sanitized_for_the_child() {
             // The injection chain this guards against: user shell env →
-            // sidecar → bundled Node. Set the poison in OUR process env before
-            // spawn; the child must not see it (its env snapshot is taken at
-            // spawn), while ordinary keys (PATH) still flow through.
-            std::env::set_var("NODE_OPTIONS", "--require=/evil.js");
-            std::env::set_var("npm_config_cache", "/tmp/evil-cache");
-            let child = PlatformChild::spawn(&spec(
-                "test -z \"${NODE_OPTIONS}\" && test -z \"${npm_config_cache}\" && test -n \"${PATH}\"",
-            ));
-            std::env::remove_var("NODE_OPTIONS");
-            std::env::remove_var("npm_config_cache");
+            // sidecar → bundled Node. Feed a crafted inherited snapshot (no
+            // process-global mutation) and assert the child sees the poison
+            // removed while ordinary keys (PATH) still flow through.
+            let inherited = vec![
+                ("NODE_OPTIONS".into(), "--require=/evil.js".into()),
+                ("npm_config_cache".into(), "/tmp/evil-cache".into()),
+                (
+                    "PATH".into(),
+                    std::env::var_os("PATH").expect("PATH set in test env"),
+                ),
+            ];
+            let child = PlatformChild::spawn(
+                &spec(
+                    "test -z \"${NODE_OPTIONS}\" && test -z \"${npm_config_cache}\" && test -n \"${PATH}\"",
+                ),
+                &inherited,
+            );
             let mut child = child.unwrap();
             let status =
                 wait_exit(&mut child, Duration::from_secs(10)).expect("child did not exit");
@@ -1225,18 +1267,44 @@ mod tests {
 
     #[test]
     fn sanitizes_inherited_env_strings() {
-        let vars = vec![
-            ("PATH".to_string(), "/usr/bin".to_string()),
-            ("NODE_OPTIONS".to_string(), "--require=/evil".to_string()),
-            ("node_path".to_string(), "/evil".to_string()),
-            ("npm_config_cache".to_string(), "/c".to_string()),
-            ("Npm_Config_Foo".to_string(), "1".to_string()),
-            ("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string()),
-            ("HOME".to_string(), "/home/u".to_string()),
+        use std::ffi::OsString;
+        let vars: Vec<(OsString, OsString)> = vec![
+            ("PATH".into(), "/usr/bin".into()),
+            ("NODE_OPTIONS".into(), "--require=/evil".into()),
+            ("node_path".into(), "/evil".into()),
+            ("npm_config_cache".into(), "/c".into()),
+            ("Npm_Config_Foo".into(), "1".into()),
+            ("ELECTRON_RUN_AS_NODE".into(), "1".into()),
+            ("HOME".into(), "/home/u".into()),
         ];
         let out = sanitize_inherited_env(vars);
-        let keys: Vec<&str> = out.iter().map(|(k, _)| k.as_str()).collect();
+        let keys: Vec<&str> = out
+            .iter()
+            .map(|(k, _)| k.to_str().expect("ASCII keys"))
+            .collect();
         assert_eq!(keys, vec!["PATH", "HOME"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sanitize_never_panics_on_non_utf8_env() {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        // A raw byte sequence in a VALUE (e.g. a filename) — std::env::vars()
+        // panics on exactly this; the OsString path must pass it through.
+        let weird_value = OsString::from_vec(vec![0xFF, 0xFE, b'x']);
+        let weird_key = OsStr::from_bytes(&[0xFF, b'=']);
+        let vars = vec![
+            ("PATH".into(), weird_value),
+            (weird_key.to_os_string(), "v".into()),
+            ("NODE_OPTIONS".into(), "--require=/evil".into()),
+        ];
+        let out = sanitize_inherited_env(vars);
+        assert_eq!(out.len(), 2);
+        // Non-UTF-8 value survives byte-for-byte; forbidden ASCII key dropped.
+        assert_eq!(out[0].0, OsStr::new("PATH"));
+        assert_eq!(out[0].1.as_encoded_bytes(), &[0xFF, 0xFE, b'x']);
+        assert_eq!(out[1].0, weird_key);
     }
 
     #[test]
@@ -1343,6 +1411,13 @@ mod tests {
             json!({"type":"crashed","code":null,"pid":42,"message":"killed after health checks failed (unresponsive)"})
                 .to_string(),
             r#"{"code":null,"message":"killed after health checks failed (unresponsive)","pid":42,"type":"crashed"}"#
+        );
+        // The readiness-timeout kill uses the same shape — both must be
+        // pinned so a refactor cannot silently change either side.
+        assert_eq!(
+            json!({"type":"crashed","code":143,"pid":7,"message":"killed after readiness timeout"})
+                .to_string(),
+            r#"{"code":143,"message":"killed after readiness timeout","pid":7,"type":"crashed"}"#
         );
     }
 

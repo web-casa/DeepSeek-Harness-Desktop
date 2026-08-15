@@ -42,7 +42,15 @@ mod imp {
     }
 
     impl PlatformChild {
-        pub fn spawn(spec: &SpawnSpec) -> io::Result<Self> {
+        /// `inherited` is the RAW snapshot of the parent env. The spawn path
+        /// itself applies the sanitizer (see `sanitize_inherited_env` in
+        /// main.rs — OsString end-to-end so non-UTF-8 values pass through
+        /// without a panicking UTF-8 round-trip): the filter must never be
+        /// left to the caller's diligence.
+        pub fn spawn(
+            spec: &SpawnSpec,
+            inherited: &[(std::ffi::OsString, std::ffi::OsString)],
+        ) -> io::Result<Self> {
             let mut cmd = Command::new(&spec.node);
             // Injection-safe environment: Command inherits the FULL parent
             // env by default and `.envs()` only overlays — so a key omitted
@@ -50,12 +58,11 @@ mod imp {
             // then re-add the sanitized snapshot (parent env minus node/npm
             // control keys), then the start command's own overrides (DSH_HOME
             // etc.) which are exempt from the filter by design.
-            let inherited = crate::sanitize_inherited_env(std::env::vars().collect());
             cmd.env_clear()
                 .arg(&spec.script)
                 .args(&spec.args)
                 .current_dir(&spec.cwd)
-                .envs(inherited)
+                .envs(crate::sanitize_inherited_env(inherited.to_vec()))
                 .envs(spec.env.iter().map(|(k, v)| (k, v)))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -341,7 +348,15 @@ mod imp {
     }
 
     impl PlatformChild {
-        pub fn spawn(spec: &SpawnSpec) -> io::Result<Self> {
+        /// `inherited` is ignored on Windows: the child env block is read
+        /// from the live process environment via GetEnvironmentStringsW and
+        /// filtered at the UTF-16 level inside build_env_block (the raw API
+        /// is the only lossless source there; the filter itself is
+        /// unit-tested via sanitize_env_lines).
+        pub fn spawn(
+            spec: &SpawnSpec,
+            _inherited: &[(std::ffi::OsString, std::ffi::OsString)],
+        ) -> io::Result<Self> {
             // Command line: node <script> <args…>, quoted per Windows rules.
             let mut cmdline = quote_arg(&spec.node);
             cmdline.push(' ');

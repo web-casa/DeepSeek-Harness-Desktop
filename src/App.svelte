@@ -39,7 +39,7 @@
     running: "Harness 运行中",
     stopping: "正在停止 Harness…",
     stopped: "Harness 已停止",
-    crashed: "Harness 启动失败",
+    crashed: "Harness 进程异常退出",
   };
 
   function apply(p: StatusPayload) {

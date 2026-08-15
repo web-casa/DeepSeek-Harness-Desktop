@@ -23,9 +23,11 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
 - **会话遥测默认关闭**：对子进程注入 `DSH_TELEMETRY_DISABLED=1`（上游 dsh
   语义：任意非空值即禁用 session-telemetry）。如需开启，修改
   `src-tauri/src/harness/mod.rs` 的 `start_harness` env 并重新构建。
-- **子进程环境消毒**：sidecar 在 spawn 前剥离继承环境中的 `NODE_OPTIONS`、
-  `NODE_PATH`、`ELECTRON_RUN_AS_NODE` 与 `npm_config_*`（unix 走
-  `env_clear` + 白名单快照；Windows 在 UTF-16 环境块层过滤，无编码往返）。
+- **子进程环境消毒**：sidecar 在 spawn 前**黑名单过滤**继承环境中的
+  `NODE_OPTIONS`、`NODE_PATH`、`ELECTRON_RUN_AS_NODE` 与 `npm_config_*`
+  前缀（其余键值全部透传——如需隔离更多变量请在升级时复核本清单）；unix
+  先 `env_clear` 再回填过滤快照，Windows 在 UTF-16 环境块层过滤；两端均
+  以 OsString/UTF-16 原样透传，非 UTF-8 值不会触发任何编码往返或 panic。
 - **进程树保证**：unix 进程组 + sigaction；Windows Job Object
   （KILL_ON_JOB_CLOSE）+ 私有隐藏控制台。sidecar 消失（任何原因）即整树
   消失；存活性心跳在进程挂死（活着但无响应）时杀树并交由壳按退避上限重启。
