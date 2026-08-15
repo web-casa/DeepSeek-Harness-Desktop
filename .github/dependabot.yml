@@ -46,6 +46,12 @@ updates:
     directory: /src-tauri
     schedule:
       interval: weekly
+    # tauri major bumps (2 -> 3) are a real migration (API, bundler,
+    # capability schema), not a routine update — gate them like typescript
+    # majors and upgrade deliberately.
+    ignore:
+      - dependency-name: "tauri"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: cargo
     directory: /crates/dsh-sidecar
