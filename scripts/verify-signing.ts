@@ -1,6 +1,6 @@
 // Conditional signing verification for release artifacts.
 //   --bundle nsis  →  Authenticode status of the Windows installer
-//   --bundle dmg   →  codesign/spctl/stapler on the macOS .app bundle
+//   --bundle dmg   →  codesign/spctl/stapler on the .dmg artifact
 //
 // Policy (fail-closed where it matters):
 //   * signing secrets present (APPLE_CERTIFICATE / WINDOWS_CERTIFICATE) →
@@ -44,16 +44,20 @@ function bundleArgValue(): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-function findAppBundle(): string {
-  const macosDir = join(repoRoot, "target", "release", "bundle", "macos");
-  if (!existsSync(macosDir)) {
-    fail("macos bundle dir missing — run the bundle build first");
+function findDmgArtifact(): string {
+  // Verify the DMG itself: with `--bundles dmg` the intermediate .app is
+  // staged in a temp dir and cleaned up, so bundle/macos/*.app is NOT a
+  // reliable path on the runner. spctl/stapler on the DMG is also exactly
+  // the check Gatekeeper runs on the user's machine.
+  const dmgDir = join(repoRoot, "target", "release", "bundle", "dmg");
+  if (!existsSync(dmgDir)) {
+    fail("dmg bundle dir missing — run the bundle build first");
   }
-  const candidates = readdirSync(macosDir).filter((f) => f.endsWith(".app"));
+  const candidates = readdirSync(dmgDir).filter((f) => f.endsWith(".dmg"));
   if (candidates.length !== 1) {
-    fail(`expected exactly one .app in ${macosDir}, found: ${candidates.join(", ") || "none"}`);
+    fail(`expected exactly one .dmg in ${dmgDir}, found: ${candidates.join(", ") || "none"}`);
   }
-  return join(macosDir, candidates[0]);
+  return join(dmgDir, candidates[0]);
 }
 
 function findNsisArtifact(): string {
@@ -91,23 +95,25 @@ function assertToolRan(res: { status: number | null; error?: Error }, what: stri
   }
 }
 
-function verifyDmg(app: string, expectSigned: boolean): void {
+function verifyDmg(dmg: string, expectSigned: boolean): void {
   if (expectSigned) {
-    run("codesign", ["--verify", "--deep", "--strict", app], true, "codesign verify");
-    run("spctl", ["--assess", "--type", "execute", "-vv", app], true, "spctl assess");
-    run("stapler", ["validate", app], true, "stapler validate");
-    ok("macOS bundle signature + notarization verified");
+    // Gatekeeper's own checks against the shipped artifact: spctl walks the
+    // dmg's inner signature chain, stapler confirms the notarization ticket.
+    run("codesign", ["--verify", "--strict", dmg], true, "codesign verify");
+    run("spctl", ["--assess", "--type", "open", "--context", "context:primary-signature", "-vv", dmg], true, "spctl assess");
+    run("stapler", ["validate", dmg], true, "stapler validate");
+    ok("macOS DMG signature + notarization verified");
   } else {
     // Unsigned build: notarization must be ABSENT. (The bundler ad-hoc signs
-    // the .app; that is not a distribution signature and must not be
+    // the inner .app; that is not a distribution signature and must not be
     // mistaken for one — stapler is the discriminator.)
-    const res = spawnSync("stapler", ["validate", app], { encoding: "utf8" });
+    const res = spawnSync("stapler", ["validate", dmg], { encoding: "utf8" });
     assertToolRan(res, "stapler validate");
     if (res.status === 0) {
       fail("unsigned build is notarized — signing state is inconsistent");
     }
     info("unsigned build: stapler confirms not notarized (expected)");
-    const ident = spawnSync("codesign", ["-dv", app], { encoding: "utf8" });
+    const ident = spawnSync("codesign", ["-dv", dmg], { encoding: "utf8" });
     const sigLine = (ident.stderr ?? "")
       .split(/\r?\n/)
       .find((l) => l.includes("Signature="));
@@ -189,7 +195,7 @@ if (bundleType !== "nsis" && bundleType !== "dmg") {
 
 const expect = expectedSigned(bundleType, process.env);
 if (bundleType === "dmg") {
-  verifyDmg(findAppBundle(), expect);
+  verifyDmg(findDmgArtifact(), expect);
 } else {
   verifyNsis(findNsisArtifact(), expect);
 }
