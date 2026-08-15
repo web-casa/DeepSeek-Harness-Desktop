@@ -42,3 +42,16 @@ export async function onEvent(
   });
   return unlisten;
 }
+
+export interface UpdateInfo {
+  available: boolean;
+  version?: string;
+  notes?: string;
+  unsupported?: boolean;
+}
+
+export const checkUpdate = (): Promise<UpdateInfo> => invoke("check_update");
+export const installUpdateAndRestart = (): Promise<void> =>
+  invoke("install_update_and_restart");
+export const exportDiagnostics = (): Promise<void> => invoke("export_diagnostics");
+export const quitApp = (): Promise<void> => invoke("quit_app");

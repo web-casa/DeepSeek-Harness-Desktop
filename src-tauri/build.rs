@@ -13,6 +13,8 @@ fn main() {
         "open_harness",
         "check_update",
         "install_update_and_restart",
+        "export_diagnostics",
+        "quit_app",
     ]);
     let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));
     if let Err(e) = result {

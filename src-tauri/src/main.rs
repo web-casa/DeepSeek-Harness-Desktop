@@ -73,6 +73,8 @@ fn main() {
             Ok(())
         })
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_logs,
@@ -82,7 +84,9 @@ fn main() {
             commands::shutdown,
             commands::open_harness,
             commands::check_update,
-            commands::install_update_and_restart
+            commands::install_update_and_restart,
+            commands::export_diagnostics,
+            commands::quit_app
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

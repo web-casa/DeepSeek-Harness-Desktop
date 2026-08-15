@@ -15,6 +15,10 @@
     "allow-shutdown",
     "allow-open-harness",
     "allow-check-update",
-    "allow-install-update-and-restart"
+    "allow-install-update-and-restart",
+    "allow-export-diagnostics",
+    "allow-quit-app",
+    "dialog:allow-save",
+    "opener:allow-open-url"
   ]
 }

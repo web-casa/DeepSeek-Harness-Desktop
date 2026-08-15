@@ -591,6 +591,16 @@ criteria = "safe-to-deploy"
 version = "2.12.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.is-docker]]
+version = "0.2.0"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
+
+[[exemptions.is-wsl]]
+version = "0.4.0"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
+
 [[exemptions.itoa]]
 version = "1.0.18"
 criteria = "safe-to-deploy"
@@ -811,6 +821,11 @@ criteria = "safe-to-deploy"
 version = "1.21.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.open]]
+version = "5.4.1"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
+
 [[exemptions.openssl-probe]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
@@ -976,6 +991,11 @@ criteria = "safe-to-deploy"
 [[exemptions.reqwest]]
 version = "0.13.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.rfd]]
+version = "0.16.0"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
 
 [[exemptions.ring]]
 version = "0.17.14"
@@ -1254,6 +1274,21 @@ criteria = "safe-to-deploy"
 [[exemptions.tauri-plugin]]
 version = "2.6.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.tauri-plugin-dialog]]
+version = "2.7.2"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
+
+[[exemptions.tauri-plugin-fs]]
+version = "2.5.1"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
+
+[[exemptions.tauri-plugin-opener]]
+version = "2.5.4"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
 
 [[exemptions.tauri-plugin-single-instance]]
 version = "2.4.3"
@@ -1830,6 +1865,11 @@ version = "0.11.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.zip]]
+version = "2.4.2"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
+
+[[exemptions.zip]]
 version = "4.6.1"
 criteria = "safe-to-deploy"
 notes = "Zip archive handling pulled in by tauri-plugin-updater (update package extraction); upstream of the updater plugin, verified via plugin pin."
@@ -1837,6 +1877,11 @@ notes = "Zip archive handling pulled in by tauri-plugin-updater (update package 
 [[exemptions.zmij]]
 version = "1.0.23"
 criteria = "safe-to-deploy"
+
+[[exemptions.zopfli]]
+version = "0.8.3"
+criteria = "safe-to-deploy"
+notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (pinned Tauri 2 plugins): native file dialog (rfd/open), diagnostics zip compression. Standard Tauri ecosystem crates."
 
 [[exemptions.zvariant]]
 version = "5.14.0"

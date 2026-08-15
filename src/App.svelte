@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     getStatus,
     getLogs,
@@ -8,9 +9,14 @@
     restart,
     shutdown,
     openHarness,
+    checkUpdate,
+    installUpdateAndRestart,
+    exportDiagnostics,
+    quitApp,
     onEvent,
     type Status,
     type StatusPayload,
+    type UpdateInfo,
     type Versions,
   } from "./lib/api";
 
@@ -32,6 +38,9 @@
   // Suppresses the brief "已停止" flash while a user-initiated restart
   // passes through the sidecar's stopping → stopped → starting sequence.
   let restartInFlight = $state(false);
+  let updateInfo = $state<UpdateInfo | null>(null);
+  let updateBusy = $state(false);
+  let updateError = $state<string | null>(null);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -98,6 +107,74 @@
     }
   }
 
+  async function doCheckUpdate() {
+    updateBusy = true;
+    updateError = null;
+    try {
+      const info = await checkUpdate();
+      updateInfo = info;
+      if (info.unsupported) {
+        showToast("当前平台不支持自动更新");
+      } else if (!info.available) {
+        showToast("已是最新版本");
+      }
+    } catch (e) {
+      updateError = `检查更新失败：${e}`;
+    }
+    updateBusy = false;
+  }
+
+  async function doInstallUpdate() {
+    updateBusy = true;
+    updateError = null;
+    try {
+      showToast("正在下载更新，完成后自动重启…");
+      await installUpdateAndRestart();
+    } catch (e) {
+      updateError = `更新失败：${e}`;
+      updateBusy = false;
+    }
+  }
+
+  async function doExportDiagnostics() {
+    try {
+      await exportDiagnostics();
+      showToast("诊断信息已导出");
+    } catch (e) {
+      showToast(`导出失败：${e}`);
+    }
+  }
+
+  async function doQuitApp() {
+    try {
+      await quitApp();
+    } catch (e) {
+      showToast(`退出失败：${e}`);
+    }
+  }
+
+  async function reportIssue() {
+    try {
+      const d = await getDiagnostics();
+      const platform = (d.platform as { os?: string; arch?: string }) ?? {};
+      const body = [
+        `版本：desktop ${versions.desktop} · harness ${versions.harness}`,
+        `平台：${platform.os ?? "?"}/${platform.arch ?? "?"}`,
+        "",
+        "请在此描述问题与复现步骤；",
+        "诊断信息请用「导出诊断」按钮生成 zip 后拖入此处（可能含敏感信息，请自行核对）。",
+      ].join("\n");
+      const url = new URL("https://github.com/web-casa/DeepSeek-Harness-Desktop/issues/new");
+      url.searchParams.set("template", "bug_report.md");
+      url.searchParams.set("labels", "bug");
+      url.searchParams.set("title", "[Bug] 来自桌面的问题报告");
+      url.searchParams.set("body", body);
+      await openUrl(url.toString());
+    } catch (e) {
+      showToast(`打开失败：${e}`);
+    }
+  }
+
   async function copyDiagnostics() {
     try {
       const payload = await getDiagnostics();
@@ -117,6 +194,13 @@
       logs = lg;
     } catch {
       inTauri = false;
+    }
+    // Silent boot-time update check: only inform, never prompt.
+    try {
+      const info = await checkUpdate();
+      if (info.available) updateInfo = info;
+    } catch {
+      /* offline / draft release: stay silent */
     }
   });
 
@@ -242,6 +326,8 @@
         </button>
         {#if status === "crashed"}
           <button class="ghost" onclick={copyDiagnostics}>复制诊断信息</button>
+          <button class="ghost" onclick={doExportDiagnostics}>导出诊断</button>
+          <button class="danger-ghost" onclick={doQuitApp}>退出应用</button>
         {/if}
       {:else}
         <button class="ghost" disabled>正在启动…</button>
@@ -265,6 +351,26 @@
       {/if}
     </div>
   {/if}
+
+  <div class="card update-card">
+    <div class="update-row">
+      <span class="update-title">软件更新</span>
+      {#if updateInfo?.available}
+        <span class="update-info">发现新版本 v{updateInfo.version}</span>
+        <button class="primary" onclick={doInstallUpdate} disabled={updateBusy}>
+          {updateBusy ? "更新中…" : "安装更新并重启"}
+        </button>
+      {:else}
+        <button class="ghost" onclick={doCheckUpdate} disabled={updateBusy}>
+          {updateBusy ? "检查中…" : "检查更新"}
+        </button>
+      {/if}
+      <button class="ghost" onclick={reportIssue}>报告问题</button>
+    </div>
+    {#if updateError}
+      <div class="notice-box">{updateError}</div>
+    {/if}
+  </div>
 
   <footer>
     <div class="versions">

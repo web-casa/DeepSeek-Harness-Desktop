@@ -6,6 +6,7 @@
 
 仓库：https://github.com/web-casa/DeepSeek-Harness-Desktop · 下载：https://github.com/web-casa/DeepSeek-Harness-Desktop/releases
 文档：[SECURITY.md](SECURITY.md) · [FORKING.md](FORKING.md) · [RELEASING.md](RELEASING.md) · [AGENTS.md](AGENTS.md)
+English: [README.en.md](README.en.md)
 （v0.2.1：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
 
 ```
@@ -150,7 +151,8 @@ Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
 - ✅ 单实例锁、窗口状态记忆、崩溃自动恢复、diagnostics、macOS 关闭=隐藏
 - ✅ 隐私默认值：会话遥测默认关闭（`DSH_TELEMETRY_DISABLED=1`，详见 SECURITY.md）；
   子进程环境消毒（`NODE_OPTIONS`/`NODE_PATH`/`npm_config_*` 不会进入 Harness）
-- ⏳ 未接入：代码签名 / 公证 / 自动更新 / 插件安装（bundled pnpm）
+- ✅ Windows 自动更新（更新包由内嵌 minisign 公钥校验；macOS 更新器待签名+公证后启用）
+- ⏳ 未接入：代码签名 / 公证 / 插件安装（bundled pnpm）
 - 未签名构建：Windows SmartScreen、macOS Gatekeeper 需要用户手动放行
 - Linux 仅为开发环境，不作为发行目标；node-pty 在 Linux dev 下无 prebuild
   （Web UI 启动不受影响；Windows/macOS 发行包自带对应 prebuild）
