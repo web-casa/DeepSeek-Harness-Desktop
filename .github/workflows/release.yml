@@ -112,7 +112,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4 (SHA-pinned)
         with:
           node-version-file: .nvmrc
-          cache: pnpm
 
       - name: Release preflight (versions, checksums, npm policy)
         run: node scripts/release-preflight.ts
