@@ -124,7 +124,13 @@ if (!tag || platforms.length === 0) {
   fail("usage: node scripts/updater-manifest.ts --tag vX.Y.Z --platforms windows-x86_64[,darwin-aarch64] [--self-test]");
 }
 
-const release = ghJson<ReleaseInfo>(`repos/${repo}/releases/tags/${tag}`);
+// `releases/tags/<tag>` 404s for DRAFT releases (API quirk) — the list
+// endpoint is the only reliable lookup right after softprops creates one.
+const releases = ghJson<ReleaseInfo[]>(`repos/${repo}/releases?per_page=100`);
+const release = releases.find((r) => r.tag_name === tag);
+if (!release) {
+  fail(`release ${tag} not found (${releases.length} releases listed)`);
+}
 const version = tag.replace(/^v/, "");
 const entries: Record<string, { signature: string; url: string }> = {};
 for (const platform of platforms) {
