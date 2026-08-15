@@ -7,7 +7,7 @@
 仓库：https://github.com/web-casa/DeepSeek-Harness-Desktop · 下载：https://github.com/web-casa/DeepSeek-Harness-Desktop/releases
 文档：[SECURITY.md](SECURITY.md) · [FORKING.md](FORKING.md) · [RELEASING.md](RELEASING.md) · [AGENTS.md](AGENTS.md)
 English: [README.en.md](README.en.md)
-（v0.2.1：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
+（v0.2.2：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
 
 ```
 ┌────────────────────────────────────────────────┐
@@ -143,7 +143,7 @@ Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
   → tag v* 发版（新 Node/新 Harness 随 Desktop 一起更新）
 ```
 
-## 当前状态与已知边界（v0.2.1）
+## 当前状态与已知边界（v0.2.2）
 
 - ✅ CI 四平台全绿（ubuntu / windows-latest / macos-14 + Linux 单测），Windows
   冒烟含 boot → readiness → HTTP 200 → restart → shutdown → 无孤儿 + 重定位冒烟
