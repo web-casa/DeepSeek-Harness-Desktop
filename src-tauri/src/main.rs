@@ -61,7 +61,10 @@ fn main() {
             // top). A deep-link second launch must finish with bootstrap
             // focused: the confirmation dialog lives there, and process_urls
             // reveals it BEFORE this callback runs.
-            let deep_link = argv.iter().any(|arg| arg.starts_with("dsharness://"));
+            let deep_link = argv.iter().any(|arg| {
+                arg.get(.."dsharness://".len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("dsharness://"))
+            });
             let order: &[&str] = if deep_link {
                 &["harness", "bootstrap"]
             } else {

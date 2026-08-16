@@ -532,6 +532,7 @@ footer {
 /* ---- toast ---- */
 .toast {
   position: fixed;
+  z-index: 30;
   bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
