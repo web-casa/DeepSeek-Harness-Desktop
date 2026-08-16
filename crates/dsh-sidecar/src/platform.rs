@@ -205,6 +205,14 @@ mod imp {
         }
     }
 
+    // Kernel handles are opaque pointer-shaped values; each guard owns its
+    // handle exclusively and every use is a by-value Windows API call, so
+    // moving the guards across threads (managed Tauri state, the cancel /
+    // exit kill threads) is sound. Without these impls PlatformChild is
+    // !Send on Windows, which tauri::State<T: Send + Sync> rejects.
+    unsafe impl Send for JobGuard {}
+    unsafe impl Send for ProcessGuard {}
+
     struct Kill {
         job: JobGuard,
         pid: u32,

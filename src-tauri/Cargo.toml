@@ -18,7 +18,9 @@ tauri-plugin-opener = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # The sidecar's library surface: PlatformChild gives the plugin installer the
 # SAME process-tree guarantees (unix process group / Windows Job Object).
-dsh-sidecar = { path = "../crates/dsh-sidecar" }
+# The version must stay in lockstep with crates/dsh-sidecar/Cargo.toml —
+# cargo-deny treats a version-less path dep as a wildcard, so it is pinned.
+dsh-sidecar = { path = "../crates/dsh-sidecar", version = "0.2.3" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
