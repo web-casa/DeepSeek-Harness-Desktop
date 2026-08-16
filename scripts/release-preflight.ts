@@ -35,6 +35,18 @@ function cargoVersion(path: string): string {
   return m[1];
 }
 
+/// Parse the version pin of a `dep = { path = "...", version = "..." }`
+/// dependency declaration (used for the workspace dsh-sidecar pin).
+function cargoDepVersion(path: string, dep: string): string {
+  const text = readFileSync(join(repoRoot, path), "utf8");
+  const m = new RegExp(
+    `^${dep} = \\{ path = "[^"]+", version = "([^"]+)" \\}`,
+    "m",
+  ).exec(text);
+  if (!m) fail(`could not parse ${dep} version pin from ${path}`);
+  return m[1];
+}
+
 const manifest = readManifest();
 
 // --- deny: version alignment ---------------------------------------------
@@ -64,6 +76,15 @@ if (sidecarCargo !== manifest.sidecarVersion) {
   fail(`sidecar version drift: Cargo.toml ${sidecarCargo} != manifest ${manifest.sidecarVersion}`);
 }
 ok(`sidecar version aligned: ${sidecarCargo}`);
+
+// The workspace pin in src-tauri/Cargo.toml must track the sidecar crate:
+// cargo accepts a caret range (^0.2.4 would silently build against 0.2.5),
+// so only an explicit assertion catches the drift.
+const sidecarPin = cargoDepVersion("src-tauri/Cargo.toml", "dsh-sidecar");
+if (sidecarPin !== sidecarCargo) {
+  fail(`dsh-sidecar pin drift: src-tauri/Cargo.toml pins ${sidecarPin}, crate is ${sidecarCargo}`);
+}
+ok(`dsh-sidecar pin aligned: ${sidecarPin}`);
 
 const harnessPin = runtimePkg.dependencies?.["@deepseek-ai/dsh"];
 if (harnessPin !== manifest.harnessVersion) {

@@ -716,6 +716,16 @@ fn run_plugin_op(
             return;
         }
     };
+    // Close the spawn/store race against RunEvent::Exit: shutdown() can only
+    // kill what is already stored, so if the exit latch flipped while the
+    // tree was being created, kill the fresh tree HERE (on unix its process
+    // group would otherwise outlive the shell).
+    if plugins.exiting.load(Ordering::SeqCst) {
+        let _ = child.graceful();
+        child.force();
+        plugins.busy.store(false, Ordering::SeqCst);
+        return;
+    }
 
     let mut tail: Vec<String> = Vec::new();
     let mut pending: Vec<(String, String)> = Vec::new();
@@ -770,6 +780,22 @@ fn run_plugin_op(
     // stuck, plugin-done never emitted).
     drop(tx);
     *plugins.child.lock().unwrap_or_else(|p| p.into_inner()) = Some(child);
+    // Second half of the exit race: shutdown() may have flipped the latch
+    // between the post-spawn check above and this store — it would have
+    // taken None, so reclaim and kill the tree ourselves.
+    if plugins.exiting.load(Ordering::SeqCst) {
+        if let Some(child) = plugins
+            .child
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let _ = child.graceful();
+            child.force();
+        }
+        plugins.busy.store(false, Ordering::SeqCst);
+        return;
+    }
     fn handle_line(
         tail: &mut Vec<String>,
         pending: &mut Vec<(String, String)>,

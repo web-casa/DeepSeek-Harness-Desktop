@@ -7,7 +7,7 @@
 
 use dsh_sidecar::platform::PlatformChild;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// npm package-name validation, applied SERVER-side before anything spawns:
@@ -55,6 +55,19 @@ pub fn pnpm_shim_cmd(node: &str, pnpm_cjs: &str) -> String {
 /// inert), while the `.cmd` variant also covers git-bash on Windows.
 pub fn ensure_pnpm_shim(dsh_home: &Path, node: &Path, pnpm_cjs: &Path) -> Result<PathBuf, String> {
     let dir = dsh_home.join(".desktop-tools");
+    // Same write-path stance as DSH_HOME / the preset root: never write
+    // shims (or chmod) through a symlink someone planted at the tools dir.
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(
+                "tools dir is a symbolic link — refusing to write pnpm shims; remove the link"
+                    .to_string(),
+            );
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("cannot inspect tools dir: {e}")),
+    }
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create tools dir: {e}"))?;
     let node_s = node.display().to_string();
     let cjs_s = pnpm_cjs.display().to_string();
@@ -75,10 +88,11 @@ pub fn ensure_pnpm_shim(dsh_home: &Path, node: &Path, pnpm_cjs: &Path) -> Result
     Ok(dir)
 }
 
-/// The runner state managed by the shell: single-flight flag + the live
-/// child handle (for cancel and for app-exit cleanup).
+/// The runner state managed by the shell: single-flight flag, app-exit
+/// latch, and the live child handle (for cancel and for app-exit cleanup).
 pub struct PluginRunner {
     pub busy: AtomicBool,
+    pub exiting: AtomicBool,
     pub child: Mutex<Option<PlatformChild>>,
 }
 
@@ -86,6 +100,7 @@ impl PluginRunner {
     pub fn new() -> Self {
         PluginRunner {
             busy: AtomicBool::new(false),
+            exiting: AtomicBool::new(false),
             child: Mutex::new(None),
         }
     }
@@ -96,7 +111,13 @@ impl PluginRunner {
     /// otherwise be orphaned once the shell exits. Taking the handle also
     /// keeps the done-path from racing the kill. Polite signal first, then
     /// hard kill: the app is going away, there is no grace period to wait.
+    ///
+    /// The `exiting` latch closes the spawn/store race: run_plugin_op
+    /// spawns the tree BEFORE storing the handle here, so an exit inside
+    /// that window would find `child == None` — the latch makes the spawn
+    /// path kill the fresh tree itself.
     pub fn shutdown(&self) {
+        self.exiting.store(true, Ordering::SeqCst);
         if let Some(child) = self
             .child
             .lock()
