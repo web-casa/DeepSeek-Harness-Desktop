@@ -41,7 +41,7 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
 - **Deep link 边界**：`dsharness://plugin/install` 是外部输入。Rust 侧对
   scheme/host/path/协议版本/包名/来源页逐项重校验后才生成「待确认安装
   请求」；未确认前不会 spawn 任何进程，非法链接直接丢弃且不会弹窗。
-- **CSP 与桌面 IPC**：`withGlobalTauri: false`；17 个桌面命令经 AppManifest
+- **CSP 与桌面 IPC**：`withGlobalTauri: false`；22 个桌面命令经 AppManifest
   ACL 仅授权 bootstrap 窗口。
 
 ## 已知边界（请如实预期）
@@ -82,5 +82,5 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
 
 ## 支持版本
 
-仅支持最新发布版（当前 v0.2.5）。旧版本不提供安全修复；发现漏洞请先
+仅支持最新发布版（当前 v0.2.6）。旧版本不提供安全修复；发现漏洞请先
 升级到最新版再验证是否仍可复现。

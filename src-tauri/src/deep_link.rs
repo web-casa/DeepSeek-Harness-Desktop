@@ -168,6 +168,21 @@ pub fn parse_install_url(raw: &str) -> Result<PluginInstallRequest, String> {
     })
 }
 
+/// Bring the bootstrap window back when a VALID deep link arrives. macOS
+/// does not go through the single-instance callback (RunEvent::Opened is
+/// delivered straight to the deep-link plugin), so a warm link would
+/// otherwise render the confirmation dialog inside a hidden window.
+///
+/// Invalid links never reach this function: a hostile page must not be able
+/// to steal focus with a malformed dsharness:// URL.
+fn reveal_bootstrap<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(win) = app.get_webview_window("bootstrap") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
 /// Process URLs delivered by the deep-link plugin (warm launches on macOS,
 /// and Windows/Linux launches funneled through single-instance). The first
 /// valid install URL wins; invalid URLs are logged and ignored — a malformed
@@ -177,6 +192,7 @@ pub fn process_urls<R: Runtime>(app: &AppHandle<R>, urls: Vec<Url>) {
         let raw = url.to_string();
         match parse_install_url(&raw) {
             Ok(request) => {
+                reveal_bootstrap(app);
                 if let Some(pending) = app.try_state::<PendingPluginInstall>() {
                     pending.replace(request.clone());
                 }
@@ -241,6 +257,17 @@ mod tests {
              source=https%3A%2F%2FCORDIS.RUN%2Fen%2Fplugins%2Fis-odd",
         );
         assert_eq!(request.source, "https://cordis.run/en/plugins/is-odd");
+    }
+
+    #[test]
+    fn accepts_unencoded_at_in_query_value() {
+        // `?name=@scope/pkg` is valid URL syntax: `@` and `/` inside the
+        // query component do not change the URL structure. The parser must
+        // accept it exactly like the percent-encoded market link.
+        let request = parse(
+            "dsharness://plugin/install?v=1&name=@scope/pkg&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fscope-pkg",
+        );
+        assert_eq!(request.name, "@scope/pkg");
     }
 
     #[test]

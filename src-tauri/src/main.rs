@@ -56,8 +56,18 @@ fn main() {
     let builder = builder
         // Second launch focuses the existing windows instead of booting a
         // second Harness tree.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            for label in ["bootstrap", "harness"] {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // Normal second launch keeps the current behavior (Harness on
+            // top). A deep-link second launch must finish with bootstrap
+            // focused: the confirmation dialog lives there, and process_urls
+            // reveals it BEFORE this callback runs.
+            let deep_link = argv.iter().any(|arg| arg.starts_with("dsharness://"));
+            let order: &[&str] = if deep_link {
+                &["harness", "bootstrap"]
+            } else {
+                &["bootstrap", "harness"]
+            };
+            for label in order {
                 if let Some(win) = app.get_webview_window(label) {
                     let _ = win.show();
                     let _ = win.unminimize();

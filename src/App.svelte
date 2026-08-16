@@ -114,6 +114,22 @@
     }, 2600);
   }
 
+  function presentPluginInstallRequest(request: PluginInstallRequest) {
+    // The confirmation dialog is the security control: never let a second
+    // deep link replace the package the user is currently reading. Same
+    // request is idempotent; a different one is ignored with a visible note.
+    if (pluginInstallRequest) {
+      if (
+        pluginInstallRequest.name !== request.name ||
+        pluginInstallRequest.source !== request.source
+      ) {
+        showToast("已有待确认的安装请求，新请求已忽略");
+      }
+      return;
+    }
+    pluginInstallRequest = request;
+  }
+
   async function doRestart() {
     busy = true;
     restartInFlight = true;
@@ -462,9 +478,7 @@
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
     void (async () => {
-      const fn = await onPluginInstallRequest((request) => {
-        pluginInstallRequest = request;
-      });
+      const fn = await onPluginInstallRequest(presentPluginInstallRequest);
       if (cancelled) {
         fn();
         return;
@@ -475,7 +489,7 @@
       // here instead of being lost.
       try {
         const pending = await getPendingPluginInstall();
-        if (!cancelled && pending) pluginInstallRequest = pending;
+        if (!cancelled && pending) presentPluginInstallRequest(pending);
       } catch {
         /* non-fatal */
       }
