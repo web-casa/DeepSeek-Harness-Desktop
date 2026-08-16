@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness-desktop"
-version = "0.2.3"
+version = "0.2.4"
 description = "DeepSeek Harness Desktop — community desktop packaging of DeepSeek Harness"
 edition = "2021"
 license = "MIT"
@@ -20,7 +20,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # SAME process-tree guarantees (unix process group / Windows Job Object).
 # The version must stay in lockstep with crates/dsh-sidecar/Cargo.toml —
 # cargo-deny treats a version-less path dep as a wildcard, so it is pinned.
-dsh-sidecar = { path = "../crates/dsh-sidecar", version = "0.2.3" }
+dsh-sidecar = { path = "../crates/dsh-sidecar", version = "0.2.4" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

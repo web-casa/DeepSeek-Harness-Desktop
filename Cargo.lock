@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "deepseek-harness-desktop"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "dsh-sidecar",
  "proptest",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-sidecar"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "libc",
  "proptest",
