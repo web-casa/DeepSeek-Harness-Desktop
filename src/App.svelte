@@ -618,7 +618,7 @@
       {#each userPresets as row (row.id)}
         <div class="preset-row">
           <span class="preset-id">
-            {row.id}
+            <span class="preset-name">{row.id}</span>
             {#each row.issues as issue (issue.kind)}
               <span class="preset-badge {issue.kind}">{ISSUE_LABEL[issue.kind]}</span>
             {/each}
@@ -631,6 +631,12 @@
             <button class="ghost" onclick={() => (confirmDelete = row.id)} disabled={presetBusy}>删除</button>
           {/if}
         </div>
+        {#if confirmDelete === row.id}
+          <div class="preset-issues">
+            · 桌面层直接移除预设目录，不清理 Harness 的默认预设设置——若该预设是当前默认，
+            请在 Harness 设置页改选默认，否则下次会话可能无法启动 Agent。
+          </div>
+        {/if}
         {#if row.issues.length > 0}
           <div class="preset-issues">
             {#each row.issues as issue (issue.kind)}

@@ -776,6 +776,16 @@ pub fn init(app: &AppHandle) {
     // from a missing directory. Best-effort and silent — any real problem
     // surfaces through the import/validation commands instead.
     let _ = std::fs::create_dir_all(crate::preset::user_preset_root(&paths.dsh_home));
+    // Compositions can hold secrets: match DSH_HOME's 0700 for the root
+    // itself (best-effort, same silence as the mkdir above).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            crate::preset::user_preset_root(&paths.dsh_home),
+            std::fs::Permissions::from_mode(0o700),
+        );
+    }
 
     let versions = read_versions(&paths);
     let state = Arc::new(Mutex::new(SharedState {

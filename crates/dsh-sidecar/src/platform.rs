@@ -210,6 +210,9 @@ mod imp {
     // moving the guards across threads (managed Tauri state, the cancel /
     // exit kill threads) is sound. Without these impls PlatformChild is
     // !Send on Windows, which tauri::State<T: Send + Sync> rejects.
+    // Sync is INTENTIONALLY not implemented: concurrent CloseHandle vs. use
+    // of the same handle would be UB; sharing goes through Mutex<Option<…>>,
+    // which only needs the value to be Send.
     unsafe impl Send for JobGuard {}
     unsafe impl Send for ProcessGuard {}
 
@@ -243,6 +246,18 @@ mod imp {
                 return Ok(None);
             }
             Ok(Some(ExitStatus::from_raw(code)))
+        }
+
+        /// Block until the process exits — std::process::Child::wait parity
+        /// (the plugin runner uses it on the stdio-EOF path to recover the
+        /// real exit code instead of reporting a null).
+        pub fn wait(&mut self) -> io::Result<ExitStatus> {
+            loop {
+                if let Some(status) = self.try_wait()? {
+                    return Ok(status);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
 
         pub fn kill(&mut self) -> io::Result<()> {

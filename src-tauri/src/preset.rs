@@ -31,10 +31,34 @@ pub fn user_preset_root(dsh_home: &Path) -> PathBuf {
     dsh_home.join(".agent-presets")
 }
 
+/// Root for WRITE/DELETE paths (import/export/delete). Same stance as the
+/// DSH_HOME symlink refusal: a symlinked preset root would redirect every
+/// removal/install through the link — a user mistake (the dir is inside
+/// 0700 DSH_HOME, so only the user can create it) must not turn "delete
+/// preset demo" into wiping files in some linked directory. Read-only
+/// listing keeps following the link, matching what upstream scanRoot sees.
+fn user_preset_root_checked(dsh_home: &Path) -> Result<PathBuf, String> {
+    let root = user_preset_root(dsh_home);
+    match fs::symlink_metadata(&root) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(
+            "preset root is a symbolic link — refusing to touch it; resolve the link first"
+                .to_string(),
+        ),
+        Ok(_) => Ok(root),
+        // Missing is fine: import creates it on demand.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(root),
+        Err(e) => Err(format!("cannot inspect preset root: {e}")),
+    }
+}
+
 /// Health kind of a user preset row, aligned with upstream scanRoot
 /// semantics (verified against @deepseek-ai/dsh-agent-presets):
 /// - `Broken` — upstream lists the row with a `broken` marker and refuses to
-///   mount it (composition file missing/unreadable);
+///   mount it. The shell probe deliberately detects only composition
+///   missing/unreadable/empty (a 1-byte readability check, never a full
+///   load); a readable-but-malformed YAML is STILL caught by upstream's own
+///   compositionProblem on the roster — the shell does not reimplement the
+///   YAML parser;
 /// - `Unsafe` — upstream SKIPS the entry entirely (not a real directory),
 ///   yet the name stays occupied on disk and no surface shows anything to
 ///   delete — the shell must surface it;
@@ -143,7 +167,8 @@ pub fn delete_preset(id: &str, dsh_home: &Path) -> Result<(), String> {
     if !is_valid_preset_id(id) {
         return Err(format!("invalid preset id {id:?}"));
     }
-    let target = user_preset_root(dsh_home).join(id);
+    let root = user_preset_root_checked(dsh_home)?;
+    let target = root.join(id);
     match fs::symlink_metadata(&target) {
         Ok(meta) if meta.file_type().is_symlink() => Err(format!(
             "preset {id} is a symbolic link — refusing to delete; remove it manually"
@@ -425,8 +450,16 @@ fn derive_preset_id(files: &[(String, u64)]) -> Result<String, String> {
 /// Conflicts never overwrite.
 pub fn install_archive(path: &Path, dsh_home: &Path) -> Result<String, String> {
     let preview = inspect_archive(path)?;
-    let root = user_preset_root(dsh_home);
+    let root = user_preset_root_checked(dsh_home)?;
     fs::create_dir_all(&root).map_err(|e| format!("cannot create preset root: {e}"))?;
+    // Compositions can hold secrets: the root holds them all, so keep it
+    // 0700 like DSH_HOME itself (the per-preset dirs are tightened below).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot tighten preset root permissions: {e}"))?;
+    }
     // Sweep stale staging dirs from crashed/killed runs: names start with
     // ".tmp-" and match neither the preset id regex nor upstream's scan.
     if let Ok(entries) = fs::read_dir(&root) {
@@ -595,7 +628,7 @@ pub fn export_preset(id: &str, dsh_home: &Path, dest: &Path) -> Result<(), Strin
     if !is_valid_preset_id(id) {
         return Err(format!("invalid preset id {id:?}"));
     }
-    let dir = user_preset_root(dsh_home).join(id);
+    let dir = user_preset_root_checked(dsh_home)?.join(id);
     // Same stance as the import side: never follow a symlink that happens
     // to wear a valid preset id (list_user_presets flags those as unsafe).
     match fs::symlink_metadata(&dir) {
@@ -1011,6 +1044,20 @@ mod tests {
         fs::remove_dir_all(&target).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn validate_skips_non_utf8_entry_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let dsh_home = temp_dir("nonutf8");
+        let root = user_preset_root(&dsh_home);
+        fs::create_dir_all(&root).unwrap();
+        let weird = std::ffi::OsStr::from_bytes(b"bad\xff\xfe");
+        fs::create_dir_all(root.join(weird)).unwrap();
+        let rows = validate_user_presets(&dsh_home);
+        assert!(rows.is_empty(), "non-UTF-8 names must be skipped: {rows:?}");
+        fs::remove_dir_all(&dsh_home).unwrap();
+    }
+
     #[test]
     fn delete_preset_table() {
         let dsh_home = temp_dir("delete");
@@ -1050,5 +1097,28 @@ mod tests {
         assert!(target.join("keep.txt").exists());
         fs::remove_dir_all(&dsh_home).unwrap();
         fs::remove_dir_all(&target).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_paths_refuse_a_symlinked_root() {
+        use std::os::unix::fs::symlink;
+        let dsh_home = temp_dir("root-link");
+        let target = temp_dir("root-link-target");
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, user_preset_root(&dsh_home)).unwrap();
+        let err = delete_preset("demo", &dsh_home).unwrap_err();
+        assert!(err.contains("preset root is a symbolic link"), "{err}");
+        let err = export_preset("demo", &dsh_home, &dsh_home.join("out.zip")).unwrap_err();
+        assert!(err.contains("preset root is a symbolic link"), "{err}");
+        // install_archive refuses too — but inspect runs first; feed a valid
+        // archive to reach the root check.
+        let archive = write_archive(&benign());
+        let err = install_archive(&archive, &dsh_home).unwrap_err();
+        assert!(err.contains("preset root is a symbolic link"), "{err}");
+        assert!(fs::read_dir(&target).unwrap().next().is_none());
+        fs::remove_dir_all(&dsh_home).unwrap();
+        fs::remove_dir_all(&target).unwrap();
+        fs::remove_file(&archive).unwrap();
     }
 }

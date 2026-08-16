@@ -62,9 +62,13 @@ configuration. The settings page offers safe import/export/delete —
 path/symlink/quota/secret validation → two-phase confirmation → atomic
 install into `<dshHome>/.agent-presets/`, visible in the Harness settings
 immediately. The settings page also re-validates preset-root health on every
-look: broken (missing/unreadable `agent.cordis.yml` — upstream refuses to
-mount), unsafe (symlinks and other id-occupying entries upstream skips), and
-missing metadata (`preset.yml`) rows are surfaced and deletable.
+look: broken (missing/unreadable/empty `agent.cordis.yml` — upstream refuses
+to mount), unsafe (symlinks and other id-occupying entries upstream skips),
+and missing metadata (`preset.yml`) rows are surfaced and deletable. Before
+deleting: the desktop layer removes the directory directly and does not
+touch the Harness's default-preset setting — if you delete the current
+default, pick another default in the Harness settings or the next session
+may fail to start.
 
 > ⚠️ **Trust model**: plugins and presets run inside the Harness process
 > with **the same privileges as the Agent**. The desktop validation blocks

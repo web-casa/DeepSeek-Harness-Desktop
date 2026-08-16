@@ -326,7 +326,12 @@ button.danger-ghost:hover:not(:disabled) {
   align-items: center;
   gap: 8px;
   overflow: hidden;
+}
+
+.preset-name {
+  overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .preset-badge {

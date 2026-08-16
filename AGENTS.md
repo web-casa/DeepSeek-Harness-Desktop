@@ -28,7 +28,7 @@ Tauri 管窗口/托盘，sidecar 管 Harness 进程树，Harness Web UI 原样�
 |---|---|
 | `runtime/runtime-manifest.json` | desktop/harness/node/sidecar 版本 + nodeSha256（5 平台） |
 | `package.json`（根） | desktop 版本 |
-| `src-tauri/Cargo.toml` / `tauri.conf.json` | desktop 版本 |
+| `src-tauri/Cargo.toml` / `tauri.conf.json` | desktop 版本 + `dsh-sidecar` 依赖的 version pin（与 crates/dsh-sidecar 同步；cargo-deny wildcards=deny 要求非空版本） |
 | `crates/dsh-sidecar/Cargo.toml` | sidecar 版本 |
 | `runtime/package.json` + `package-lock.json` | harness pin（`npm install` 刷新锁） |
 | `.nvmrc` | CI 脚本 Node（== manifest.nodeVersion） |
@@ -63,6 +63,11 @@ DSH CLI 的启动契约随版本演进，社区同类项目已实证踩坑（如
   根语义），必须复核壳层预设边界（`src-tauri/src/preset.rs`）——当前
   rc.6 无归档入口，壳层导入/导出是预设根的唯一写入路径，壳层健康复核
   （validate_user_presets）覆盖该根的全部来源。
+  已知语义差异（有意为之，随上游演进复核）：壳层 Broken 只探测
+  agent.cordis.yml 缺失/不可读/为空（不重实现 YAML 解析，可读但畸形仍由
+  上游 roster 标 broken）；壳层删除预设是直接移除目录，不清理上游
+  `settings.default`/standing mount——UI 已提示改选默认预设；删除/导出/
+  导入拒绝对 `.agent-presets` 根为符号链接的路径操作。
 
 Dependabot 对 harness 的 ignore 不作用于 security updates：若收到
 `@deepseek-ai/dsh` 的 security PR（只改 pin+lock、不动 manifest），必须按本

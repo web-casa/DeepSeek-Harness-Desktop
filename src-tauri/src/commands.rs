@@ -456,14 +456,12 @@ pub struct PendingPreset(
 
 #[tauri::command]
 pub fn list_user_presets(runtime: State<'_, Runtime>) -> Value {
-    let dsh_home = runtime
-        .state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .dsh_home
-        .clone()
-        .unwrap_or_default();
-    let rows = crate::preset::validate_user_presets(std::path::Path::new(&dsh_home));
+    // Resolved paths only: Path::new("") would make read_dir resolve the
+    // relative ".agent-presets" against the process CWD (review S4).
+    let Some(paths) = runtime.paths() else {
+        return serde_json::json!([]);
+    };
+    let rows = crate::preset::validate_user_presets(&paths.dsh_home);
     serde_json::json!(rows
         .into_iter()
         .map(|row| serde_json::json!({
