@@ -77,3 +77,48 @@ export async function onUpdateProgress(
   );
   return unlisten;
 }
+
+export interface PluginEntry {
+  name: string;
+  version: string;
+}
+
+export interface PluginList {
+  plugins: PluginEntry[];
+  busy: boolean;
+}
+
+export interface PluginLogLine {
+  stream: string;
+  line: string;
+}
+
+export interface PluginDone {
+  exit: number | null;
+  tail: string;
+}
+
+export const listPlugins = (): Promise<PluginList> => invoke("list_plugins");
+export const installPlugin = (name: string): Promise<void> =>
+  invoke("install_plugin", { name });
+export const uninstallPlugin = (name: string): Promise<void> =>
+  invoke("uninstall_plugin", { name });
+export const cancelPluginOp = (): Promise<void> => invoke("cancel_plugin_op");
+
+export async function onPluginLog(
+  handler: (lines: PluginLogLine[]) => void,
+): Promise<() => void> {
+  const unlisten = await listen<PluginLogLine[]>("plugin-log", (event) => {
+    handler(event.payload);
+  });
+  return unlisten;
+}
+
+export async function onPluginDone(
+  handler: (payload: PluginDone) => void,
+): Promise<() => void> {
+  const unlisten = await listen<PluginDone>("plugin-done", (event) => {
+    handler(event.payload);
+  });
+  return unlisten;
+}

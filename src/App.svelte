@@ -17,13 +17,20 @@
     previewPreset,
     importPreset,
     exportPreset,
+    listPlugins,
+    installPlugin,
+    uninstallPlugin,
+    cancelPluginOp,
     onEvent,
     onUpdateProgress,
+    onPluginLog,
+    onPluginDone,
     type Status,
     type StatusPayload,
     type PresetPreview,
     type UpdateInfo,
     type Versions,
+    type PluginEntry,
   } from "./lib/api";
 
   let status = $state<Status>("idle");
@@ -52,6 +59,12 @@
   let presetPreview = $state<PresetPreview | null>(null);
   let presetError = $state<string | null>(null);
   let presetBusy = $state(false);
+  let plugins = $state<PluginEntry[]>([]);
+  let pluginName = $state("");
+  let pluginBusy = $state(false);
+  let pluginLogs = $state<string[]>([]);
+  let pluginLogsOpen = $state(false);
+  let pluginError = $state<string | null>(null);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -251,6 +264,47 @@
     }
   }
 
+  async function refreshPlugins() {
+    try {
+      const res = await listPlugins();
+      plugins = res.plugins;
+      // Backend busy is the truth across webview reloads: an op may still be
+      // running after the UI restarted, and the single-flight flag is
+      // app-wide — resync instead of showing a stale idle state.
+      pluginBusy = res.busy;
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  function startPluginOp(name: string, op: "install" | "uninstall") {
+    if (pluginBusy || !name.trim()) return;
+    pluginBusy = true;
+    pluginError = null;
+    pluginLogs = [];
+    pluginLogsOpen = true;
+    const label = op === "install" ? `正在安装 ${name.trim()}…` : `正在卸载 ${name.trim()}…`;
+    const call = op === "install" ? installPlugin(name.trim()) : uninstallPlugin(name.trim());
+    void call.catch((e) => {
+      pluginBusy = false;
+      pluginError = `${op === "install" ? "安装" : "卸载"}失败：${e}`;
+      pluginLogsOpen = true;
+      // Resync busy: "an operation is already running" means another
+      // surface (or a pre-reload op) owns the backend flag.
+      void refreshPlugins();
+    });
+    showToast(label);
+  }
+
+  async function doCancelPluginOp() {
+    try {
+      await cancelPluginOp();
+      showToast("已请求取消");
+    } catch (e) {
+      showToast(`取消失败：${e}`);
+    }
+  }
+
   // Initial data load (async onMount is fine here — no cleanup needed).
   onMount(async () => {
     try {
@@ -262,6 +316,7 @@
       inTauri = false;
     }
     refreshPresets();
+    refreshPlugins();
     // Silent boot-time update check: only inform, never prompt.
     try {
       const info = await checkUpdate();
@@ -296,6 +351,53 @@
       if (p.total && p.total > 0) {
         updatePercent = Math.min(100, Math.round((p.downloaded / p.total) * 100));
       }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenFn = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
+  });
+
+  // Plugin op log stream: batch events arrive as arrays; cap the UI ring at
+  // the same 300 lines the backend keeps in its tail.
+  $effect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    onPluginLog((lines) => {
+      for (const l of lines) {
+        pluginLogs.push(`[${l.stream}] ${l.line}`);
+      }
+      if (pluginLogs.length > 300) {
+        pluginLogs.splice(0, pluginLogs.length - 300);
+      }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenFn = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
+  });
+
+  $effect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    onPluginDone((p) => {
+      pluginBusy = false;
+      if (p.exit === 0) {
+        pluginName = "";
+        showToast("插件操作完成");
+      } else {
+        pluginError = `插件操作失败（exit ${p.exit ?? "被终止"}），详情见安装日志`;
+        pluginLogsOpen = true;
+      }
+      void refreshPlugins();
     }).then((fn) => {
       if (cancelled) fn();
       else unlistenFn = fn;
@@ -497,6 +599,66 @@
       {/each}
     {:else}
       <div class="preset-row"><span class="l-empty">（暂无用户预设）</span></div>
+    {/if}
+  </div>
+
+  <div class="card plugin-card">
+    <div class="update-row">
+      <span class="update-title">插件（用户安装）</span>
+    </div>
+    <div class="plugin-row">
+      <input
+        class="plugin-input"
+        type="text"
+        placeholder="npm 包名，如 @cordisjs/plugin-example"
+        bind:value={pluginName}
+        disabled={pluginBusy}
+        spellcheck="false"
+        onkeydown={(e) => {
+          if (e.key === "Enter") startPluginOp(pluginName, "install");
+        }}
+      />
+      {#if pluginBusy}
+        <span class="plugin-busy"><span class="spinner"></span> 操作中…</span>
+        <button class="danger-ghost" onclick={doCancelPluginOp}>取消</button>
+      {:else}
+        <button class="primary" onclick={() => startPluginOp(pluginName, "install")} disabled={!pluginName.trim()}>
+          安装
+        </button>
+      {/if}
+    </div>
+    <div class="trust-note">
+      插件与 Agent 同权限运行工具和命令——仅安装可信来源；可在
+      <button class="inline-link" onclick={() => openSite("https://cordis.run")}>cordis.run 插件市场</button>
+      查找包名。
+    </div>
+    {#if pluginError}
+      <div class="notice-box">{pluginError}</div>
+    {/if}
+    {#if plugins.length > 0}
+      {#each plugins as p (p.name)}
+        <div class="preset-row">
+          <span>{p.name} <span class="badge">v{p.version}</span></span>
+          <button class="ghost" onclick={() => startPluginOp(p.name, "uninstall")} disabled={pluginBusy}>卸载</button>
+        </div>
+      {/each}
+    {:else}
+      <div class="preset-row"><span class="l-empty">（暂无用户安装的插件）</span></div>
+    {/if}
+    <button class="logs-toggle" onclick={() => (pluginLogsOpen = !pluginLogsOpen)}>
+      <span>{pluginLogsOpen ? "▾" : "▸"}</span>
+      安装日志 {pluginLogsOpen ? "" : `(${pluginLogs.length})`}
+    </button>
+    {#if pluginLogsOpen}
+      <div class="console">
+        {#if pluginLogs.length === 0}
+          <span class="l-empty">（暂无日志）</span>
+        {:else}
+          {#each pluginLogs as line, i (i)}
+            <div class="l-line">{line}</div>
+          {/each}
+        {/if}
+      </div>
     {/if}
   </div>
 

@@ -64,5 +64,10 @@ jobs:
       - name: Preset discovery smoke
         run: node scripts/verify-preset.ts
 
+      # Drives the REAL `dsh plugin` chain (bundled pnpm shim + PATH +
+      # initProfile + reconcilePlugins) against an isolated DSH_HOME.
+      - name: Plugin install smoke
+        run: node scripts/verify-plugins.ts
+
       - name: Relocation smoke
         run: node scripts/relocate-runtime.ts && node scripts/verify-runtime.ts --runtime-dir .tmp/relocated-runtime

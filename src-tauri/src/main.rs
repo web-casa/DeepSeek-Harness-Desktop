@@ -7,10 +7,18 @@ use tauri::Manager;
 mod commands;
 mod harness;
 mod paths;
+mod plugins;
 mod preset;
 mod tray;
 
 fn main() {
+    // Windows: give the shell a private hidden console before any plugin
+    // child exists. Plugin children are spawned WITHOUT CREATE_NO_WINDOW so
+    // they inherit it — that inheritance is what makes PlatformChild's
+    // graceful() able to deliver CTRL_C to the whole tree (the sidecar does
+    // the same for the Harness tree). No-op on unix.
+    dsh_sidecar::platform::ensure_hidden_console();
+
     let builder = tauri::Builder::default();
 
     // Close-to-tray: when the tray is available, closing any window hides it
@@ -75,6 +83,7 @@ fn main() {
             // preview_preset and import_preset. MUST be managed: extracting
             // an unmanaged State panics at the first command invocation.
             app.manage(commands::PendingPreset(std::sync::Mutex::new(None)));
+            app.manage(std::sync::Arc::new(plugins::PluginRunner::new()));
             Ok(())
         })
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -95,7 +104,11 @@ fn main() {
             commands::list_user_presets,
             commands::preview_preset,
             commands::import_preset,
-            commands::export_preset
+            commands::export_preset,
+            commands::list_plugins,
+            commands::install_plugin,
+            commands::uninstall_plugin,
+            commands::cancel_plugin_op
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {
@@ -121,6 +134,11 @@ fn main() {
             }
         }
         tauri::RunEvent::Exit => {
+            // Kill a running `dsh plugin` tree first: it is a separate
+            // process group / Job Object from the sidecar's Harness tree,
+            // and on unix it would be orphaned once the shell exits.
+            app.state::<std::sync::Arc<plugins::PluginRunner>>()
+                .shutdown();
             // The sidecar kills the whole Node/Harness tree on stdin EOF,
             // and the Windows Job Object guarantees cleanup even if we
             // crash. This is the polite path.

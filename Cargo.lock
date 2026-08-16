@@ -674,6 +674,7 @@ dependencies = [
 name = "deepseek-harness-desktop"
 version = "0.2.3"
 dependencies = [
+ "dsh-sidecar",
  "proptest",
  "serde",
  "serde_json",

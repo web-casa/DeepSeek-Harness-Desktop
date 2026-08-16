@@ -23,6 +23,10 @@
     "allow-list-user-presets",
     "allow-preview-preset",
     "allow-import-preset",
-    "allow-export-preset"
+    "allow-export-preset",
+    "allow-list-plugins",
+    "allow-install-plugin",
+    "allow-uninstall-plugin",
+    "allow-cancel-plugin-op"
   ]
 }

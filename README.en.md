@@ -24,7 +24,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 
 | | |
 |---|---|
-| 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; one-click marketplace; safe preset import/export |
+| 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app install/uninstall; safe preset import/export |
 | 🔄 **Auto-updater** (Windows) | Update packages verified by an embedded minisign pubkey; macOS activates once signed + notarized |
 | 💓 **Hung-process self-healing** | Heartbeat detects an unresponsive Harness and restarts it (backoff + cap) |
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |
@@ -40,8 +40,12 @@ The Harness's skills, tools, model routes, MCP integrations and presets are
 **Discover**: the settings page links straight to the plugin marketplace,
 [cordis.run](https://cordis.run).
 
-**Install** (the official mechanism, using the pinned CLI from the bundle;
-system pnpm required):
+**Install**: the settings page's "Plugins (user-installed)" section takes an
+npm package name and installs/uninstalls it — the desktop layer drives the
+official `dsh plugin --profile web add/remove`, with both the pinned CLI and
+pnpm bundled (**no system pnpm needed**), live install logs, and cancel
+(cleaning the whole node → dsh → pnpm process tree). Command-line equivalent
+(for power users):
 
 ```bash
 # macOS
@@ -67,7 +71,7 @@ quota/secret validation → two-phase confirmation → atomic install into
 
 ```
 Tauri 2 shell
- ├─ bootstrap window: local Svelte UI · limited desktop IPC (15 commands, ACL-gated)
+ ├─ bootstrap window: local Svelte UI · limited desktop IPC (19 commands, ACL-gated)
  └─ harness window: http://127.0.0.1:<random port> · original Harness Web UI · zero IPC
         │ NDJSON (stdin/stdout)
 dsh-sidecar (Rust, no heavy dependencies)
@@ -127,7 +131,7 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
 - Status: v0.2.3 draft ready (Windows updater + preset import/export +
-  website/marketplace entry points).
+  plugin install/uninstall + website/marketplace entry points).
 - Known limits: unsigned (manual SmartScreen/Gatekeeper approval); macOS
   updater pending signing; Linux is dev-only.
 - License: MIT; the bundled Harness and every dependency license ship in

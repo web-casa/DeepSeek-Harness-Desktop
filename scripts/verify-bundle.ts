@@ -281,6 +281,11 @@ const HARNESS_CORE = [
   "runtime/harness/runtime-manifest.json",
   "runtime/harness/node_modules/@deepseek-ai/dsh/package.json",
   "runtime/harness/node_modules/@deepseek-ai/dsh/lib/bin.js",
+  // The in-app plugin installer execs the bundled pnpm through this file
+  // (node <…>/pnpm/bin/pnpm.cjs); a missing entry would make every plugin
+  // install fail at runtime with nothing else in the bundle checks catching
+  // it (AGENTS.md checklist 6).
+  "runtime/harness/node_modules/pnpm/bin/pnpm.cjs",
   // Scoped-package attribution representative: collectLicenses must walk
   // @scope/<name> packages. A regression to the old top-level-only scan
   // drops this file (and ~130 more scoped/nested licenses) while every other

@@ -8,8 +8,11 @@ use crate::harness::{
     child_alive, open_harness_window, publish_snapshot, request_restart, send_raw,
     snapshot_payload, Runtime, CMD_ID_SHUTDOWN,
 };
+use dsh_sidecar::platform::{PlatformChild, SpawnSpec};
 use serde_json::Value;
-use tauri::{AppHandle, State};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
 pub fn get_status(runtime: State<'_, Runtime>) -> Value {
@@ -326,8 +329,17 @@ pub fn quit_app(app: AppHandle) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::redact;
+    use super::{read_installed_plugins, redact};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("dsd-plugin-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn masks_sk_tokens_16_plus_alnum() {
@@ -388,6 +400,47 @@ mod tests {
         // so a second pass must not change anything.
         let once = redact("sk-abcdefghijklmnop Bearer abcdefgh 中文", "");
         assert_eq!(redact(&once, ""), once);
+    }
+
+    #[test]
+    fn plugin_list_reads_deps_and_versions_sorted() {
+        let dir = temp_dir("list");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":{"zz-top":"1.0.0","is-odd":"^3.0.1"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("node_modules").join("is-odd")).unwrap();
+        std::fs::write(
+            dir.join("node_modules").join("is-odd").join("package.json"),
+            r#"{"name":"is-odd","version":"3.0.1"}"#,
+        )
+        .unwrap();
+        let entries = read_installed_plugins(&dir);
+        assert_eq!(
+            entries,
+            vec![
+                ("is-odd".to_string(), "3.0.1".to_string()),
+                // zz-top is a dependency but its tree entry is missing:
+                // still listed, with an unresolved version marker.
+                ("zz-top".to_string(), "—".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_list_tolerates_missing_or_malformed_profile() {
+        let dir = temp_dir("empty");
+        assert_eq!(read_installed_plugins(&dir), Vec::<(String, String)>::new());
+        std::fs::write(dir.join("package.json"), "not json").unwrap();
+        assert_eq!(read_installed_plugins(&dir), Vec::<(String, String)>::new());
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":"not-an-object"}"#,
+        )
+        .unwrap();
+        // Malformed dependency payloads are skipped safely.
+        assert_eq!(read_installed_plugins(&dir), Vec::<(String, String)>::new());
     }
 }
 
@@ -524,4 +577,323 @@ pub async fn export_preset(
         .clone()
         .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
     crate::preset::export_preset(&id, std::path::Path::new(&dsh_home), &dest)
+}
+
+// ---------------------------------------------------------------------------
+// Plugin installation (bundled pnpm + official `dsh plugin` CLI). The whole
+// node → dsh → pnpm → node-gyp tree runs under dsh-sidecar's PlatformChild
+// (process group / Job Object), so cancel and app exit clean it fully.
+// ---------------------------------------------------------------------------
+
+/// Pure profile-dir parse (unit-tested): user-installed plugin names from
+/// package.json dependencies, with resolved versions read from
+/// node_modules/<pkg>/package.json ("—" when the tree entry is missing).
+/// In-box bundles are not dependencies here, so they never appear — the UI
+/// can therefore offer uninstall on every listed row (plan §P1.4).
+fn read_installed_plugins(profile_dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(profile_dir.join("package.json")) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(deps) = json.get("dependencies").and_then(|d| d.as_object()) {
+                for (name, _spec) in deps {
+                    let version = std::fs::read_to_string(
+                        profile_dir
+                            .join("node_modules")
+                            .join(name)
+                            .join("package.json"),
+                    )
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .and_then(|p| {
+                        p.get("version")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "—".to_string());
+                    out.push((name.clone(), version));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[tauri::command]
+pub fn list_plugins(
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+) -> Value {
+    let entries = runtime
+        .paths()
+        .map(|p| read_installed_plugins(&p.dsh_home.join("profiles").join("web")))
+        .unwrap_or_default();
+    serde_json::json!({
+        "plugins": entries
+            .into_iter()
+            .map(|(name, version)| serde_json::json!({ "name": name, "version": version }))
+            .collect::<Vec<_>>(),
+        // The backend busy flag survives webview reloads; the UI must be
+        // able to resync instead of showing a stale idle state while an op
+        // is still running (single-flight is app-wide).
+        "busy": plugins.busy.load(Ordering::SeqCst),
+    })
+}
+
+fn run_plugin_op(
+    app: AppHandle,
+    paths: crate::paths::RuntimePaths,
+    plugins: Arc<crate::plugins::PluginRunner>,
+    name: String,
+    op: &'static str,
+) {
+    use std::io::{BufRead, BufReader};
+
+    let pnpm_cjs = paths
+        .harness_dir
+        .join("node_modules")
+        .join("pnpm")
+        .join("bin")
+        .join("pnpm.cjs");
+    let shim_dir = match crate::plugins::ensure_pnpm_shim(&paths.dsh_home, &paths.node, &pnpm_cjs) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = app.emit("plugin-done", serde_json::json!({ "exit": 1, "tail": e }));
+            plugins.busy.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    let mut path_env = shim_dir.to_string_lossy().to_string();
+    if let Some(old) = std::env::var_os("PATH") {
+        path_env.push(std::path::MAIN_SEPARATOR);
+        path_env.push_str(&old.to_string_lossy());
+    }
+    let spec = SpawnSpec {
+        node: paths.node.to_string_lossy().to_string(),
+        script: paths
+            .harness_dir
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib")
+            .join("bin.js")
+            .to_string_lossy()
+            .to_string(),
+        args: vec![
+            "plugin".to_string(),
+            "--profile".to_string(),
+            "web".to_string(),
+            op.to_string(),
+            name,
+        ],
+        cwd: paths.harness_dir.to_string_lossy().to_string(),
+        env: vec![
+            (
+                "DSH_HOME".to_string(),
+                paths.dsh_home.to_string_lossy().to_string(),
+            ),
+            ("PATH".to_string(), path_env),
+        ],
+    };
+    let inherited = std::env::vars_os().collect::<Vec<_>>();
+    let child = match PlatformChild::spawn(&spec, &inherited) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = app.emit(
+                "plugin-done",
+                serde_json::json!({ "exit": 1, "tail": format!("spawn failed: {e}") }),
+            );
+            plugins.busy.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+
+    let mut tail: Vec<String> = Vec::new();
+    let mut pending: Vec<(String, String)> = Vec::new();
+    let app_c = app.clone();
+    let mut flush = move |lines: &mut Vec<(String, String)>| {
+        if lines.is_empty() {
+            return;
+        }
+        let payload: Vec<serde_json::Value> = lines
+            .drain(..)
+            .map(|(stream, line)| serde_json::json!({ "stream": stream, "line": line }))
+            .collect();
+        let _ = app_c.emit("plugin-log", serde_json::json!(payload));
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
+    let child = {
+        let mut child = child;
+        for (stream, pipe) in [
+            (
+                "stdout",
+                child
+                    .child
+                    .stdout
+                    .take()
+                    .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            ),
+            (
+                "stderr",
+                child
+                    .child
+                    .stderr
+                    .take()
+                    .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            ),
+        ] {
+            if let Some(pipe) = pipe {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                        if tx.send((stream.to_string(), line)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+        child
+    };
+    // The readers hold clones; the ORIGINAL sender must go before the loop
+    // or `Disconnected` never fires (cancel takes the child out of the
+    // runner, and without Disconnected the loop would spin forever — busy
+    // stuck, plugin-done never emitted).
+    drop(tx);
+    *plugins.child.lock().unwrap_or_else(|p| p.into_inner()) = Some(child);
+    fn handle_line(
+        tail: &mut Vec<String>,
+        pending: &mut Vec<(String, String)>,
+        flush: &mut impl FnMut(&mut Vec<(String, String)>),
+        stream: String,
+        line: String,
+    ) {
+        tail.push(format!("[{stream}] {line}"));
+        if tail.len() > 300 {
+            tail.remove(0);
+        }
+        pending.push((stream, line));
+        if pending.len() >= 64 {
+            flush(pending);
+        }
+    }
+    let exit = loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => flush(&mut pending),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                flush(&mut pending);
+                // Pipes closed: normally the tree has exited and wait()
+                // recovers the REAL exit code (reporting null would make
+                // the UI show "terminated" for successful installs). Take
+                // the handle FIRST so the wait() does not hold the runner
+                // mutex — cancel/app-exit must stay able to kill a hung
+                // tree. If cancel took it already, a canceled op keeps its
+                // null code.
+                let handle = plugins
+                    .child
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take();
+                break handle
+                    .and_then(|mut c| c.child.wait().ok())
+                    .and_then(|s| s.code());
+            }
+        }
+        if let Some(child) = plugins
+            .child
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_mut()
+        {
+            if let Some(status) = child.child.try_wait().ok().flatten() {
+                // Fast-exit path: drain what the reader threads already
+                // queued (exit closes the pipes, so they wind down within
+                // a tick) so the last log lines reach the UI/tail, then
+                // report the code try_wait() reaped.
+                while let Ok((stream, line)) = rx.recv_timeout(std::time::Duration::from_millis(50))
+                {
+                    handle_line(&mut tail, &mut pending, &mut flush, stream, line);
+                }
+                flush(&mut pending);
+                break status.code();
+            }
+        }
+    };
+    *plugins.child.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    plugins.busy.store(false, Ordering::SeqCst);
+    let _ = app.emit(
+        "plugin-done",
+        serde_json::json!({ "exit": exit, "tail": tail.join("\n") }),
+    );
+}
+
+fn plugin_op(
+    app: AppHandle,
+    runtime: &Runtime,
+    plugins: Arc<crate::plugins::PluginRunner>,
+    name: String,
+    op: &'static str,
+) -> Result<(), String> {
+    if !crate::plugins::is_valid_package_name(&name) {
+        return Err(format!("invalid package name: {name:?}"));
+    }
+    if plugins.busy.swap(true, Ordering::SeqCst) {
+        return Err("an operation is already running".to_string());
+    }
+    let Some(paths) = runtime.paths() else {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err("runtime paths are not resolved yet".to_string());
+    };
+    std::thread::spawn(move || {
+        run_plugin_op(app, paths, plugins, name, op);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn install_plugin(
+    app: AppHandle,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    name: String,
+) -> Result<(), String> {
+    plugin_op(app, &runtime, plugins.inner().clone(), name, "add")
+}
+
+#[tauri::command]
+pub fn uninstall_plugin(
+    app: AppHandle,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    name: String,
+) -> Result<(), String> {
+    plugin_op(app, &runtime, plugins.inner().clone(), name, "remove")
+}
+
+#[tauri::command]
+pub fn cancel_plugin_op(plugins: State<'_, Arc<crate::plugins::PluginRunner>>) {
+    let child = plugins
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(mut child) = child {
+        // Polite signal first. On Windows graceful() only works when the
+        // shell initialized a hidden console (see main) — when it reports
+        // false there is nothing to wait for, so escalate immediately.
+        let polite = child.graceful();
+        // Give the tree a moment, then finish the job — the same escalation
+        // as the sidecar's shutdown path. Taking the handle also prevents
+        // the done-path from racing the kill.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(if polite { 2 } else { 0 }));
+            // If the tree already exited and the run thread reaped it, skip
+            // the kill: the pgid may already have been recycled.
+            if child.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            child.force();
+        });
+    }
 }

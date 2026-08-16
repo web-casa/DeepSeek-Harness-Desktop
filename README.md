@@ -21,7 +21,7 @@
 
 | | |
 |---|---|
-| 🔌 **插件生态** | Cordis 插件体系随包携带；插件市场一键直达；预设安全导入导出 |
+| 🔌 **插件生态** | Cordis 插件体系随包携带；设置页一键安装/卸载插件；预设安全导入导出 |
 | 🔄 **自动更新**（Windows） | 更新包由内嵌 minisign 公钥校验；macOS 待签名+公证后启用 |
 | 💓 **挂死自愈** | 心跳检测 Harness「活着但无响应」并自动重启（退避+上限） |
 | 🛡️ **安全边界** | Harness 窗口零 IPC 权限；桌面命令仅授权本地窗口；环境消毒 |
@@ -35,7 +35,7 @@ Harness 的技能、工具、模型路由、MCP、预设——**全部是 Cordis
 
 **发现**：设置页「资源」一键打开插件市场 [cordis.run](https://cordis.run)。
 
-**安装**（官方机制，用随包的 pinned CLI，需系统 pnpm）：
+**安装**：设置页「插件（用户安装）」输入 npm 包名即装即卸——桌面层调用官方 `dsh plugin --profile web add/remove`，pinned CLI 与 pnpm 均随包携带（**无需系统 pnpm**），带实时安装日志与取消（整棵 node → dsh → pnpm 进程树一并清理）。命令行等价路径（高级用法）：
 
 ```bash
 # macOS
@@ -54,7 +54,7 @@ $env:DSH_HOME="<诊断页 dshHome>"; node "<安装目录>\runtime\harness\node_m
 
 ```
 Tauri 2 壳
- ├─ bootstrap 窗口：本地 Svelte UI · 有限桌面 IPC（15 命令，ACL 授权）
+ ├─ bootstrap 窗口：本地 Svelte UI · 有限桌面 IPC（19 命令，ACL 授权）
  └─ harness 窗口：http://127.0.0.1:<随机端口> · 原版 Harness Web UI · 零 IPC
         │ NDJSON (stdin/stdout)
 dsh-sidecar（Rust，无重依赖）
@@ -107,6 +107,6 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 
 - CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发完整发布（质量门 → soak → 打包 → 内容/签名断言 → draft release + `latest.json`）。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
-- 当前状态：v0.2.3 draft 就绪（Windows updater + 预设导入导出 + 官网/插件市场入口）。
+- 当前状态：v0.2.3 draft 就绪（Windows updater + 预设导入导出 + 插件安装/卸载 + 官网/插件市场入口）。
 - 已知边界：未签名（SmartScreen/Gatekeeper 手动放行）；macOS 更新器待签名；Linux 仅开发用。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。

@@ -19,6 +19,10 @@ fn main() {
         "preview_preset",
         "import_preset",
         "export_preset",
+        "list_plugins",
+        "install_plugin",
+        "uninstall_plugin",
+        "cancel_plugin_op",
     ]);
     let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));
     if let Err(e) = result {

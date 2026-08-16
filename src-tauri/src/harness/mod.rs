@@ -46,6 +46,13 @@ pub struct SharedState {
     pub dsh_home: Option<String>,
 }
 
+impl Runtime {
+    /// The resolved runtime paths (available after `init()`).
+    pub fn paths(&self) -> Option<crate::paths::RuntimePaths> {
+        self.paths.clone()
+    }
+}
+
 pub struct Runtime {
     pub state: Arc<Mutex<SharedState>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,

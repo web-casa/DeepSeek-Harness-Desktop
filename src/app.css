@@ -303,9 +303,72 @@ button.danger-ghost:hover:not(:disabled) {
 .console .l-sidecar {
   color: var(--muted);
 }
+.console .l-line {
+  color: var(--text);
+}
 .console .l-empty {
   color: var(--muted);
   font-style: italic;
+}
+
+/* ---- plugins ---- */
+.plugin-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plugin-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color 0.12s ease;
+}
+.plugin-input::placeholder {
+  color: var(--muted);
+}
+.plugin-input:focus {
+  border-color: var(--accent);
+}
+.plugin-input:disabled {
+  opacity: 0.55;
+}
+
+.plugin-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.trust-note {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  user-select: text;
+}
+
+button.inline-link {
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+button.inline-link:hover {
+  text-decoration: underline;
 }
 
 /* ---- footer ---- */
