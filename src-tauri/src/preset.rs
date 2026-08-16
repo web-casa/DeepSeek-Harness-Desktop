@@ -62,6 +62,38 @@ pub fn is_valid_preset_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// Platform-independent "Windows-invalid name" predicate: reserved chars,
+/// trailing dot/space, and reserved device names. Applied on EVERY platform
+/// at import/export time so a preset accepted on macOS can never fail with
+/// an obscure OS error on a Windows machine later.
+pub fn windows_invalid_name_reason(name: &str) -> Option<&'static str> {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    if base
+        .chars()
+        .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
+        return Some("invalid characters on Windows");
+    }
+    if base.ends_with('.') || base.ends_with(' ') {
+        return Some("trailing dot/space reserved on Windows");
+    }
+    let stem = base.split('.').next().unwrap_or(base).to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4 && stem.starts_with("COM") && stem.as_bytes()[3].is_ascii_digit())
+        || (stem.len() == 4 && stem.starts_with("LPT") && stem.as_bytes()[3].is_ascii_digit())
+    {
+        return Some("Windows-reserved device name");
+    }
+    None
+}
+
+fn windows_friendly_check(name: &str) -> Result<(), String> {
+    match windows_invalid_name_reason(name) {
+        Some(reason) => Err(format!("preset file name is invalid ({reason}): {name}")),
+        None => Ok(()),
+    }
+}
+
 fn extension_of(name: &str) -> &str {
     name.rsplit('/')
         .next()
@@ -180,6 +212,7 @@ pub fn inspect_archive(path: &Path) -> Result<ArchivePreview, String> {
         if !is_safe_archive_path(&raw_name) {
             return Err(format!("preset contains an unsafe path: {raw_name}"));
         }
+        windows_friendly_check(&raw_name)?;
         if entry.size() > MAX_FILE {
             return Err(format!("preset file too large: {raw_name}"));
         }
@@ -296,22 +329,21 @@ pub fn install_archive(path: &Path, dsh_home: &Path) -> Result<String, String> {
         std::process::id()
     ));
 
-    let result = extract_bounded(path, &preview.id, &staging);
-    if result.is_ok() {
-        match fs::rename(&staging, &target) {
-            Ok(()) => {}
-            Err(e) => {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    format!("preset {} already exists — not overwriting", preview.id)
-                } else {
-                    format!("cannot move preset into place: {e}")
-                });
-            }
+    if let Err(e) = extract_bounded(path, &preview.id, &staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    match fs::rename(&staging, &target) {
+        Ok(()) => Ok(preview.id),
+        Err(e) => {
+            let _ = fs::remove_dir_all(&staging);
+            Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("preset {} already exists — not overwriting", preview.id)
+            } else {
+                format!("cannot move preset into place: {e}")
+            })
         }
     }
-    let _ = fs::remove_dir_all(&staging);
-    result.map(|()| preview.id)
 }
 
 /// Extract every entry (leading `id/` stripped) into `staging`, enforcing the
@@ -346,6 +378,7 @@ fn extract_bounded(path: &Path, id: &str, staging: &Path) -> Result<(), String> 
         if !is_safe_archive_path(&raw_name) {
             return Err(format!("preset contains an unsafe path: {raw_name}"));
         }
+        windows_friendly_check(&raw_name)?;
         let mut parts = raw_name.split('/');
         if parts.next() != Some(id) {
             return Err(format!(
@@ -600,6 +633,32 @@ mod tests {
         // Too-large and NUL payloads: skipped, never panics.
         assert!(scan_text_warnings(&vec![0u8; MAX_SCAN_BYTES + 1], ".md").is_empty());
         assert!(scan_text_warnings(b"a\0sk-abcdefghijklmnop123", ".md").is_empty());
+    }
+
+    #[test]
+    fn windows_name_table() {
+        assert_eq!(windows_invalid_name_reason("id/skills/a.md"), None);
+        assert_eq!(
+            windows_invalid_name_reason("id/a:b.md"),
+            Some("invalid characters on Windows")
+        );
+        assert_eq!(
+            windows_invalid_name_reason("id/bad."),
+            Some("trailing dot/space reserved on Windows")
+        );
+        assert_eq!(
+            windows_invalid_name_reason("id/bad "),
+            Some("trailing dot/space reserved on Windows")
+        );
+        assert_eq!(
+            windows_invalid_name_reason("id/NUL"),
+            Some("Windows-reserved device name")
+        );
+        assert_eq!(
+            windows_invalid_name_reason("id/COM1.txt"),
+            Some("Windows-reserved device name")
+        );
+        assert_eq!(windows_invalid_name_reason("id/console.md"), None);
     }
 
     #[test]

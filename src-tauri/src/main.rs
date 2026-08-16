@@ -71,6 +71,10 @@ fn main() {
             // must reach the tray status line.
             tray::init(&app.handle().clone());
             harness::init(&app.handle().clone());
+            // The two-phase preset import holds its preview here between
+            // preview_preset and import_preset. MUST be managed: extracting
+            // an unmanaged State panics at the first command invocation.
+            app.manage(commands::PendingPreset(std::sync::Mutex::new(None)));
             Ok(())
         })
         .plugin(tauri_plugin_updater::Builder::new().build())

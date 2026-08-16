@@ -283,23 +283,29 @@ pub async fn export_diagnostics(app: AppHandle, runtime: State<'_, Runtime>) -> 
         return Err("save dialog cancelled".to_string());
     };
 
-    let s = runtime
-        .state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dsh_home = s.dsh_home.clone().unwrap_or_default();
-    let tail_start = s.logs.len().saturating_sub(500);
-    let payload = serde_json::json!({
-        "generator": "deepseek-harness-desktop",
-        "status": s.status,
-        "pid": s.pid,
-        "versions": s.versions,
-        "platform": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
-        "lastError": s.last_error,
-        "logsTail": s.logs[tail_start..].iter().map(|(stream, line)| {
-            serde_json::json!({ "stream": stream, "line": redact(line, &dsh_home) })
-        }).collect::<Vec<_>>(),
-    });
+    // Build the payload under the lock, then DROP the guard before the slow
+    // zip write: holding it across disk I/O would stall the watcher's
+    // publish_snapshot (status/tray updates) on a slow disk.
+    let (payload, dsh_home) = {
+        let s = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dsh_home = s.dsh_home.clone().unwrap_or_default();
+        let tail_start = s.logs.len().saturating_sub(500);
+        let payload = serde_json::json!({
+            "generator": "deepseek-harness-desktop",
+            "status": s.status,
+            "pid": s.pid,
+            "versions": s.versions,
+            "platform": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
+            "lastError": s.last_error,
+            "logsTail": s.logs[tail_start..].iter().map(|(stream, line)| {
+                serde_json::json!({ "stream": stream, "line": redact(line, &dsh_home) })
+            }).collect::<Vec<_>>(),
+        });
+        (payload, dsh_home)
+    };
     let mut text = serde_json::to_string_pretty(&payload).unwrap_or_default();
     text = redact(&text, &dsh_home);
 
