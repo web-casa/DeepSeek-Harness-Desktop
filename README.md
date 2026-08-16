@@ -10,6 +10,13 @@
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
 | 版本 | v0.2.3 · Windows x64 NSIS / macOS arm64 DMG · 未签名预览版 · [English](README.en.md) |
 
+> ⚠️ **macOS 用户**：Apple 开发者证书仍在申请中，应用尚未签名。首次打开若被
+> Gatekeeper 拦截，请执行：
+> ```bash
+> xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness Desktop.app"
+> ```
+> （如提示权限不足，在命令前加 `sudo`。）预计下一版本完成签名+公证后不再需要此步骤。
+
 ## 特性一览
 
 | | |

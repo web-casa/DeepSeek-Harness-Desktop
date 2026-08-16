@@ -11,6 +11,15 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
 | Version | v0.2.3 · Windows x64 NSIS / macOS arm64 DMG · unsigned preview · [中文](README.md) |
 
+> ⚠️ **macOS users**: the Apple developer certificate is still being
+> applied for, so the app is unsigned. If Gatekeeper blocks the first
+> launch, run:
+> ```bash
+> xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness Desktop.app"
+> ```
+> (prefix with `sudo` if it reports a permission error.) This step should
+> disappear in the next release once signing + notarization land.
+
 ## Features
 
 | | |
