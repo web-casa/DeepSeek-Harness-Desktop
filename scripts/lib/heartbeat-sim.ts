@@ -26,8 +26,9 @@ srv.listen(0, "127.0.0.1", () => {
 });
 `;
 
-/// The sidecar accepts exactly this shape (see extract_local_url in
-/// crates/dsh-sidecar/src/main.rs): 127.0.0.1 with a port in 1..=65535.
+/// The strictest printable form — what the simulators print. The sidecar's
+/// extract_local_url additionally accepts prefixed lines and the
+/// " (LAN: …)" suffix; the simulators stay conservative on purpose.
 export function isParseableReadyLine(line: string): boolean {
   const m = /^dsh web: http:\/\/127\.0\.0\.1:(\d+)$/.exec(line);
   if (!m) return false;

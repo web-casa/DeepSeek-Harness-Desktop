@@ -114,6 +114,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4 (SHA-pinned)
         with:
           node-version-file: .nvmrc
+          # One cache per job: the runtime npm ci (prepare-harness) is the
+          # heavy install; the root pnpm install is small and stays cold.
+          cache: npm
+          cache-dependency-path: runtime/package-lock.json
 
       - name: Release preflight (versions, checksums, npm policy)
         run: node scripts/release-preflight.ts

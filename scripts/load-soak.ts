@@ -39,17 +39,19 @@ function argNum(name: string, fallback: number): number {
 
 async function main(): Promise<void> {
   if (process.argv.includes("--self-test")) {
-    await soak(0.35, 1);
-    ok("self-test: load-soak machinery (20s, 1 burner) PASS");
+    const pass = await soak(0.35, 1);
+    if (!pass) fail("self-test: load-soak machinery failed");
+    ok("self-test: load-soak machinery PASS");
     return;
   }
   const minutes = argNum("--duration-min", 30);
   const burners = Math.trunc(argNum("--cpu-burn", 4));
-  await soak(minutes, burners);
+  const pass = await soak(minutes, burners);
+  if (!pass) fail("load soak failed — see logs above");
   console.log("\n  PASS — load soak complete");
 }
 
-async function soak(minutes: number, burners: number): Promise<void> {
+async function soak(minutes: number, burners: number): Promise<boolean> {
   const durationMs = minutes * 60_000;
   const dshHome = join(tmpDir, `soak-home-${Date.now()}`);
   mkdirSync(dshHome, { recursive: true });
@@ -81,17 +83,42 @@ async function soak(minutes: number, burners: number): Promise<void> {
   // CPU burners: the bundled node busy-loops (no shell dependency).
   const burnerProcs: ReturnType<typeof spawn>[] = [];
   for (let i = 0; i < burners; i++) {
-    burnerProcs.push(
-      spawn(nodePath, ["-e", "for(;;){}"], { stdio: "ignore" }),
-    );
+    burnerProcs.push(spawn(nodePath, ["-e", "for(;;){}"], { stdio: "ignore" }));
   }
 
   let readyUrl: string | null = null;
   let lastProbeMs: number | null = null;
   const t0 = Date.now();
 
-  // Periodic probe with latency recording (the false-positive risk is the
-  // probe TIMING OUT under contention, so latency is the number to watch).
+  // The verdict resolves EXACTLY once — from the soak tick or from an early
+  // sidecar exit (failure). main() awaits it before printing PASS, so a
+  // premature "PASS" can never be printed while the soak is still running.
+  let resolveVerdict: ((pass: boolean) => void) | null = null;
+  const verdict = new Promise<boolean>((resolve) => {
+    resolveVerdict = resolve;
+  });
+  let finished = false;
+  const finish = (pass: boolean) => {
+    if (finished) return;
+    finished = true;
+    clearInterval(timer);
+    for (const p of burnerProcs) p.kill();
+    try {
+      sidecar.stdin.write(JSON.stringify({ id: 2, command: "shutdown" }) + "\n");
+    } catch {
+      /* sidecar already gone */
+    }
+    setTimeout(() => {
+      try {
+        sidecar.stdin.end();
+      } catch {
+        /* ignore */
+      }
+      rmSync(dshHome, { recursive: true, force: true });
+      resolveVerdict?.(pass);
+    }, 15_000);
+  };
+
   const probe = () =>
     new Promise<number>((resolve) => {
       if (!readyUrl) {
@@ -121,24 +148,14 @@ async function soak(minutes: number, burners: number): Promise<void> {
     ).length;
     info(`[soak ${mins}m] ready=${ready} bad=${bad} probe=${latency}ms`);
     if (Date.now() - t0 >= durationMs) {
-      clearInterval(timer);
       finish(bad === 0);
     }
-  }, 60_000);
+  }, 10_000);
 
-  const finish = (pass: boolean) => {
-    for (const p of burnerProcs) p.kill();
-    sidecar.stdin.write(JSON.stringify({ id: 2, command: "shutdown" }) + "\n");
-    setTimeout(() => {
-      sidecar.stdin.end();
-      rmSync(dshHome, { recursive: true, force: true });
-      if (pass) ok(`soak finished: ${minutes}min, ${burners} burners, no false kill`);
-      else fail(`soak FAILED: heartbeat fired under load (last probe ${lastProbeMs}ms)`);
-    }, 15_000);
-  };
-
-  sidecar.on("exit", (code) => {
-    if (code !== 0) fail(`sidecar exited early (${code})`);
+  sidecar.on("exit", () => {
+    // Exited before the verdict: the soak failed (finish()'s shutdown path
+    // is the only legitimate way out).
+    finish(false);
   });
 
   sidecar.stdin.write(
@@ -160,10 +177,15 @@ async function soak(minutes: number, burners: number): Promise<void> {
     if (ready?.url) {
       readyUrl = ready.url;
       ok(`ready at ${readyUrl} — soak clock started (${minutes}min, ${burners} burners)`);
-      return;
+      const pass = await verdict;
+      if (!pass) fail(`soak FAILED: heartbeat fired under load (last probe ${lastProbeMs}ms)`);
+      ok(`soak finished: ${minutes}min, ${burners} burners, no false kill`);
+      return pass;
     }
     await new Promise((r) => setTimeout(r, 100));
   }
+  finish(false);
+  await verdict;
   fail("harness did not become ready within 120s");
 }
 

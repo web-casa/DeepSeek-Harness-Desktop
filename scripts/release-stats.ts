@@ -25,10 +25,21 @@ function ghJson<T>(path: string): T {
   return JSON.parse(res.stdout ?? "") as T;
 }
 
+function daysArg(): number {
+  const i = process.argv.indexOf("--days");
+  const v = i >= 0 ? Number(process.argv[i + 1]) : NaN;
+  return Number.isFinite(v) && v > 0 ? v : 30;
+}
+
 function main(): void {
-  const releases = ghJson<Release[]>(`repos/${repo}/releases?per_page=30`);
+  const days = daysArg();
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const releases = ghJson<Release[]>(`repos/${repo}/releases?per_page=30`).filter(
+    (r) =>
+      r.published_at !== null && new Date(r.published_at).getTime() >= cutoff,
+  );
   if (releases.length === 0) {
-    info("no releases yet");
+    info(`no published releases in the last ${days} days`);
     return;
   }
   info(`release download stats (${repo})`);
@@ -42,7 +53,7 @@ function main(): void {
       .join("\n");
     ok(`${r.tag_name} (${r.published_at.slice(0, 10)}): ${per} downloads\n${assets}`);
   }
-  info(`total across ${releases.length} releases: ${total}`);
+  info(`total across ${releases.length} releases (last ${days} days): ${total}`);
 }
 
 if (process.argv.includes("--self-test")) {

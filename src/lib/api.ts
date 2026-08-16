@@ -67,3 +67,13 @@ export const previewPreset = (): Promise<PresetPreview> => invoke("preview_prese
 export const importPreset = (): Promise<string> => invoke("import_preset");
 export const exportPreset = (id: string): Promise<void> =>
   invoke("export_preset", { id });
+
+export async function onUpdateProgress(
+  handler: (p: { downloaded: number; total: number | null }) => void,
+): Promise<() => void> {
+  const unlisten = await listen<{ downloaded: number; total: number | null }>(
+    "update-progress",
+    (event) => handler(event.payload),
+  );
+  return unlisten;
+}

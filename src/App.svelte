@@ -18,6 +18,7 @@
     importPreset,
     exportPreset,
     onEvent,
+    onUpdateProgress,
     type Status,
     type StatusPayload,
     type PresetPreview,
@@ -46,6 +47,7 @@
   let updateInfo = $state<UpdateInfo | null>(null);
   let updateBusy = $state(false);
   let updateError = $state<string | null>(null);
+  let updatePercent = $state<number | null>(null);
   let userPresets = $state<string[]>([]);
   let presetPreview = $state<PresetPreview | null>(null);
   let presetError = $state<string | null>(null);
@@ -136,12 +138,14 @@
   async function doInstallUpdate() {
     updateBusy = true;
     updateError = null;
+    updatePercent = null;
     try {
       showToast("正在下载更新，完成后自动重启…");
       await installUpdateAndRestart();
     } catch (e) {
       updateError = `更新失败：${e}`;
       updateBusy = false;
+      updatePercent = null;
     }
   }
 
@@ -264,6 +268,24 @@
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
     onEvent((p) => apply(p)).then((fn) => {
+      if (cancelled) fn();
+      else unlistenFn = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
+  });
+
+  $effect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    onUpdateProgress((p) => {
+      if (p.total && p.total > 0) {
+        updatePercent = Math.min(100, Math.round((p.downloaded / p.total) * 100));
+      }
+    }).then((fn) => {
       if (cancelled) fn();
       else unlistenFn = fn;
     });
@@ -410,7 +432,11 @@
       {#if updateInfo?.available}
         <span class="update-info">发现新版本 v{updateInfo.version}</span>
         <button class="primary" onclick={doInstallUpdate} disabled={updateBusy}>
-          {updateBusy ? "更新中…" : "安装更新并重启"}
+          {updateBusy
+            ? updatePercent !== null
+              ? `更新中 ${updatePercent}%…`
+              : "更新中…"
+            : "安装更新并重启"}
         </button>
       {:else}
         <button class="ghost" onclick={doCheckUpdate} disabled={updateBusy}>

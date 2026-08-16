@@ -121,12 +121,15 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
 /// Result of a silent update check, surfaced to the bootstrap UI.
 #[tauri::command]
 pub async fn check_update(app: AppHandle) -> Result<Value, String> {
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    // macOS updater is deliberately OFF until signing + notarization land
+    // (Gatekeeper rejects un-notarized updates) — report it as unsupported,
+    // NOT as "already up to date".
+    #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
         Ok(serde_json::json!({ "available": false, "unsupported": true }))
     }
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         use tauri_plugin_updater::UpdaterExt;
         let updater = app.updater().map_err(|e| e.to_string())?;
@@ -145,12 +148,12 @@ pub async fn check_update(app: AppHandle) -> Result<Value, String> {
 /// Download and install the latest update, then restart the app.
 #[tauri::command]
 pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
         Err("updates are not supported on this platform".to_string())
     }
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         use tauri_plugin_updater::UpdaterExt;
         let updater = app.updater().map_err(|e| e.to_string())?;
@@ -160,19 +163,21 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "no update available".to_string())?;
         update
-            .download_and_install(|_chunk, _total| {}, || {})
+            .download_and_install(
+                |chunk, total| {
+                    use tauri::Emitter;
+                    let _ = app.emit(
+                        "update-progress",
+                        serde_json::json!({ "downloaded": chunk, "total": total }),
+                    );
+                },
+                || {},
+            )
             .await
             .map_err(|e| format!("update install failed: {e}"))?;
-        // `restart` DIVERGES on Windows (the process is restarted in place),
-        // so a shared success tail would be unreachable there and trip
-        // clippy's unreachable_code under -D warnings. cfg the tail instead.
-        #[cfg(target_os = "windows")]
+        // AppHandle::restart is `-> !` on EVERY platform (spawn + exit(0));
+        // there is no success tail — the process restarts in place.
         app.restart();
-        #[cfg(not(target_os = "windows"))]
-        {
-            app.restart();
-            Ok(())
-        }
     }
 }
 
@@ -398,7 +403,11 @@ pub fn list_user_presets(runtime: State<'_, Runtime>) -> Vec<String> {
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            if crate::preset::is_valid_preset_id(&name) && entry.path().is_dir() {
+            let is_dir = entry
+                .file_type()
+                .map(|t| t.is_dir() && !t.is_symlink())
+                .unwrap_or(false);
+            if crate::preset::is_valid_preset_id(&name) && is_dir {
                 ids.push(name);
             }
         }
@@ -444,11 +453,14 @@ pub fn import_preset(
     runtime: State<'_, Runtime>,
     pending: State<'_, PendingPreset>,
 ) -> Result<String, String> {
+    // Clone, not take(): a failed import must keep the preview so the user
+    // can see the error and retry without re-picking the file.
     let held = pending
         .0
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
+        .as_ref()
+        .cloned();
     let Some((path, _)) = held else {
         return Err("no previewed archive — run preview first".to_string());
     };
@@ -459,7 +471,16 @@ pub fn import_preset(
         .dsh_home
         .clone()
         .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
-    crate::preset::install_archive(&path, std::path::Path::new(&dsh_home))
+    match crate::preset::install_archive(&path, std::path::Path::new(&dsh_home)) {
+        Ok(id) => {
+            *pending
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            Ok(id)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Export one user-authored preset to a user-chosen location.

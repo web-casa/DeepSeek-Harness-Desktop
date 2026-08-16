@@ -36,7 +36,7 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
 - **供应链**：Node 下载 SHA-256 钉死（官方 SHASUMS256 核对）；npm 安装脚本
   白名单（strict-allow-scripts）；cargo-vet（社区审计集 + 本仓库审计）与
   cargo-deny 为发布闸门。
-- **CSP 与桌面 IPC**：`withGlobalTauri: false`；7 个桌面命令经 AppManifest
+- **CSP 与桌面 IPC**：`withGlobalTauri: false`；15 个桌面命令经 AppManifest
   ACL 仅授权 bootstrap 窗口。
 
 ## 已知边界（请如实预期）
@@ -74,5 +74,5 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
 
 ## 支持版本
 
-仅支持最新发布版（当前 v0.2.0）。旧版本不提供安全修复；发现漏洞请先
+仅支持最新发布版（当前 v0.2.2）。旧版本不提供安全修复；发现漏洞请先
 升级到最新版再验证是否仍可复现。

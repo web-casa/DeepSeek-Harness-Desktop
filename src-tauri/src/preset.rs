@@ -42,7 +42,14 @@ pub fn is_safe_archive_path(name: &str) -> bool {
     if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
         return false;
     }
-    name.split('/')
+    // A single TRAILING slash marks a directory entry (zip tools always emit
+    // these); validate the components before it. Interior empty components
+    // ("a//b") still fail.
+    let core = name.strip_suffix('/').unwrap_or(name);
+    if core.is_empty() {
+        return false;
+    }
+    core.split('/')
         .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
@@ -127,7 +134,7 @@ fn text_has_possible_secret(text: &str) -> bool {
     false
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArchivePreview {
     pub id: String,
     pub files: Vec<(String, u64)>,
@@ -219,7 +226,21 @@ fn derive_preset_id(files: &[(String, u64)]) -> Result<String, String> {
     for (name, _) in files {
         let (head, rest) = name.split_once('/').unwrap_or((name.as_str(), ""));
         if rest.is_empty() {
-            return Err(format!("entry outside the preset directory: {name}"));
+            // Only a bare "<id>/" directory entry is legal here; a bare
+            // top-level FILE would sit outside the preset directory.
+            if !name.ends_with('/') {
+                return Err(format!("entry outside the preset directory: {name}"));
+            }
+            match top {
+                None => top = Some(head),
+                Some(t) if t == head => {}
+                Some(t) => {
+                    return Err(format!(
+                        "archive must contain exactly one preset directory (found {t} and {head})"
+                    ));
+                }
+            }
+            continue;
         }
         match top {
             None => top = Some(head),
@@ -286,7 +307,7 @@ pub fn install_archive(path: &Path, dsh_home: &Path) -> Result<String, String> {
 /// Extract every entry (leading `id/` stripped) into `staging`, enforcing the
 /// real decompressed byte counts and the containment invariant at WRITE time
 /// (declared sizes in the central directory can lie).
-fn extract_bounded(path: &Path, _id: &str, staging: &Path) -> Result<(), String> {
+fn extract_bounded(path: &Path, id: &str, staging: &Path) -> Result<(), String> {
     let file = fs::File::open(path).map_err(|e| format!("cannot open archive: {e}"))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("not a zip archive: {e}"))?;
     let mut total = 0u64;
@@ -310,10 +331,13 @@ fn extract_bounded(path: &Path, _id: &str, staging: &Path) -> Result<(), String>
         if !is_safe_archive_path(&raw_name) {
             return Err(format!("preset contains an unsafe path: {raw_name}"));
         }
-        let rel: PathBuf = raw_name
-            .split('/')
-            .skip(1) // the top-level id/ component — staging IS that dir
-            .collect();
+        let mut parts = raw_name.split('/');
+        if parts.next() != Some(id) {
+            return Err(format!(
+                "preset entry outside the preset directory: {raw_name}"
+            ));
+        }
+        let rel: PathBuf = parts.collect(); // staging IS the id directory
         if rel.as_os_str().is_empty() {
             continue; // the directory entry itself
         }

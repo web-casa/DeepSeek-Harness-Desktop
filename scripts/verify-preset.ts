@@ -10,7 +10,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { harnessDir, tmpDir, fail, ok, info } from "./lib/common.ts";
+import { harnessDir, tmpDir, nodePath, fail, ok, info } from "./lib/common.ts";
 
 const dshHome = join(tmpDir, "preset-e2e-home");
 const id = "e2e-demo";
@@ -50,10 +50,13 @@ const rows = await discoverPresets([
 const hit = rows.find((r) => r.id === ${JSON.stringify(id)});
 console.log(JSON.stringify({ found: Boolean(hit), trust: hit?.trust ?? null, broken: hit?.broken ?? null, total: rows.length }));
 `;
-  const nodePath = join(harnessDir, "..", "node");
-  const child = spawn(nodePath, ["--input-type=module", "-e", script], {
+  const child = spawn(nodePath(), ["--input-type=module", "-e", script], {
     cwd: harnessDir,
     stdio: ["ignore", "pipe", "inherit"],
+  });
+  child.on("error", (e) => {
+    rmSync(dshHome, { recursive: true, force: true });
+    fail(`cannot spawn bundled node: ${e.message}`);
   });
   let out = "";
   child.stdout.on("data", (c: Buffer) => {
