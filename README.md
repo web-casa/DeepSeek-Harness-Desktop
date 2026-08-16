@@ -8,7 +8,7 @@
 文档：[SECURITY.md](SECURITY.md) · [FORKING.md](FORKING.md) · [RELEASING.md](RELEASING.md) · [AGENTS.md](AGENTS.md)
 官网：https://dsharness.app · 插件市场：https://cordis.run
 English: [README.en.md](README.en.md)
-（v0.2.2：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
+（v0.2.3：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
 
 ```
 ┌────────────────────────────────────────────────┐
@@ -155,11 +155,11 @@ Dependabot/Renovate 提议 @deepseek-ai/dsh rc.x → rc.y
   → tag v* 发版（新 Node/新 Harness 随 Desktop 一起更新）
 ```
 
-## 当前状态与已知边界（v0.2.2）
+## 当前状态与已知边界（v0.2.3）
 
 - ✅ CI 四平台全绿（ubuntu / windows-latest / macos-14 + Linux 单测），Windows
   冒烟含 boot → readiness → HTTP 200 → restart → shutdown → 无孤儿 + 重定位冒烟
-- ✅ v0.2.2 draft 就绪（Windows updater 首发，见 releases 页）；v0.2.1 已发布；v0.2.0 为旧构建
+- ✅ v0.2.3 构建中（Windows updater + 预设导入导出 + 官网/插件市场入口）；v0.2.1 已发布
 - ✅ 单实例锁、窗口状态记忆、崩溃自动恢复、diagnostics、macOS 关闭=隐藏
 - ✅ 隐私默认值：会话遥测默认关闭（`DSH_TELEMETRY_DISABLED=1`，详见 SECURITY.md）；
   子进程环境消毒（`NODE_OPTIONS`/`NODE_PATH`/`npm_config_*` 不会进入 Harness）
