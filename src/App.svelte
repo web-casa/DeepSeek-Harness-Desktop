@@ -222,12 +222,15 @@
   }
 
   async function doExportPreset(id: string) {
+    if (presetBusy) return;
+    presetBusy = true;
     try {
       await exportPreset(id);
       showToast(`预设 ${id} 已导出`);
     } catch (e) {
       if (String(e) !== "cancelled") showToast(`导出失败：${e}`);
     }
+    presetBusy = false;
   }
 
   async function copyDiagnostics() {
@@ -476,7 +479,7 @@
       {#each userPresets as id}
         <div class="preset-row">
           <span>{id}</span>
-          <button class="ghost" onclick={() => doExportPreset(id)}>导出</button>
+          <button class="ghost" onclick={() => doExportPreset(id)} disabled={presetBusy}>导出</button>
         </div>
       {/each}
     {:else}

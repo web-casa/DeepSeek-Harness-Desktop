@@ -269,6 +269,16 @@ pub fn install_archive(path: &Path, dsh_home: &Path) -> Result<String, String> {
     let preview = inspect_archive(path)?;
     let root = user_preset_root(dsh_home);
     fs::create_dir_all(&root).map_err(|e| format!("cannot create preset root: {e}"))?;
+    // Sweep stale staging dirs from crashed/killed runs: names start with
+    // ".tmp-" and match neither the preset id regex nor upstream's scan.
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".tmp-") {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
     let target = root.join(&preview.id);
     if target.exists() {
         return Err(format!(
@@ -305,8 +315,10 @@ pub fn install_archive(path: &Path, dsh_home: &Path) -> Result<String, String> {
 }
 
 /// Extract every entry (leading `id/` stripped) into `staging`, enforcing the
-/// real decompressed byte counts and the containment invariant at WRITE time
-/// (declared sizes in the central directory can lie).
+/// real decompressed byte counts and the containment invariant at WRITE time.
+/// The zip crate enforces its own per-entry limits from the headers it trusts
+/// (a "lying size" fixture cannot be constructed through its public API — the
+/// crate truncates internally); our counters are defense-in-depth on top.
 fn extract_bounded(path: &Path, id: &str, staging: &Path) -> Result<(), String> {
     let file = fs::File::open(path).map_err(|e| format!("cannot open archive: {e}"))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("not a zip archive: {e}"))?;
