@@ -323,6 +323,9 @@ fn extract_bounded(path: &Path, id: &str, staging: &Path) -> Result<(), String> 
     let file = fs::File::open(path).map_err(|e| format!("cannot open archive: {e}"))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("not a zip archive: {e}"))?;
     let mut total = 0u64;
+    if zip.len() > MAX_FILES {
+        return Err(format!("too many entries: {} (max {MAX_FILES})", zip.len()));
+    }
     fs::create_dir_all(staging).map_err(|e| format!("cannot create staging: {e}"))?;
 
     for i in 0..zip.len() {
@@ -435,6 +438,17 @@ pub fn export_preset(id: &str, dsh_home: &Path, dest: &Path) -> Result<(), Strin
         return Err(format!("invalid preset id {id:?}"));
     }
     let dir = user_preset_root(dsh_home).join(id);
+    // Same stance as the import side: never follow a symlink that happens
+    // to wear a valid preset id (list_user_presets already hides those).
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "preset {id} is a symbolic link — refusing to export"
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => return Err(format!("preset {id} not found")),
+    }
     if !dir.is_dir() {
         return Err(format!("preset {id} not found"));
     }

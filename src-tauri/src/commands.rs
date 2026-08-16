@@ -23,15 +23,23 @@ pub fn get_diagnostics(runtime: State<'_, Runtime>) -> Value {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tail_start = s.logs.len().saturating_sub(200);
+    let dsh_home = s.dsh_home.clone().unwrap_or_default();
+    // The clipboard path must get the same best-effort redaction as the zip
+    // export — a copy-paste of raw harness logs would leak exactly what
+    // export_diagnostics masks.
+    let logs_tail: Vec<(String, String)> = s.logs[tail_start..]
+        .iter()
+        .map(|(stream, line)| (stream.clone(), redact(line, &dsh_home)))
+        .collect();
     serde_json::json!({
         "status": s.status,
         "url": s.url,
         "pid": s.pid,
-        "lastError": s.last_error,
+        "lastError": s.last_error.as_deref().map(|e| redact(e, &dsh_home)),
         "versions": s.versions,
         "dshHome": s.dsh_home,
         "platform": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
-        "logsTail": &s.logs[tail_start..],
+        "logsTail": logs_tail,
     })
 }
 

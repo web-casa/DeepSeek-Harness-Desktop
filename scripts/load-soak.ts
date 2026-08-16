@@ -88,6 +88,7 @@ async function soak(minutes: number, burners: number): Promise<boolean> {
 
   let readyUrl: string | null = null;
   let lastProbeMs: number | null = null;
+  let consecutiveProbeFails = 0;
   const t0 = Date.now();
 
   // The verdict resolves EXACTLY once — from the soak tick or from an early
@@ -141,12 +142,20 @@ async function soak(minutes: number, burners: number): Promise<boolean> {
     const mins = ((Date.now() - t0) / 60_000).toFixed(1);
     const latency = await probe();
     lastProbeMs = latency;
+    consecutiveProbeFails = latency === -1 ? consecutiveProbeFails + 1 : 0;
     const ready = events.filter((e) => e.type === "ready").length;
     const bad = events.filter(
       (e) =>
         (e.type === "error" && e.code === "unresponsive") || e.type === "crashed",
     ).length;
-    info(`[soak ${mins}m] ready=${ready} bad=${bad} probe=${latency}ms`);
+    // A heartbeat misconfigured to "never judge" must not make the soak
+    // pass: six consecutive failed probes (60s of silence) also fail it.
+    const probeDead = consecutiveProbeFails >= 6;
+    info(`[soak ${mins}m] ready=${ready} bad=${bad} probe=${latency}ms${probeDead ? " (PROBE DEAD)" : ""}`);
+    if (probeDead) {
+      finish(false);
+      return;
+    }
     if (Date.now() - t0 >= durationMs) {
       finish(bad === 0);
     }

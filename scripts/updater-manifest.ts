@@ -45,8 +45,11 @@ function ghJson<T>(path: string): T {
 }
 
 /// Pair a platform with its updater artifact and the matching .sig asset.
-/// Prefers the NSIS setup exe (basicUi install mode downloads the installer);
-/// falls back to the updater zip bundles.
+/// We ship the BARE NSIS setup exe + its .sig: verified against the pinned
+/// tauri-plugin-updater 2.10.1 source that WindowsUpdaterType::extract
+/// sniffs the downloaded bytes and accepts BOTH a PE exe directly and a
+/// zip containing one — so basicUi installs the bare installer correctly.
+/// The zip variants stay as fallbacks should the bundler ever emit them.
 export function platformArtifactFor(
   assets: Asset[],
   platform: string,

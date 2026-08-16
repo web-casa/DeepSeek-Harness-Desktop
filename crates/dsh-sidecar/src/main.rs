@@ -277,7 +277,18 @@ fn env_ms(name: &str, default: u64) -> Duration {
 // turn a bundled Electron's node into a Harness host if one is ever reused.
 // ---------------------------------------------------------------------------
 
-const FORBIDDEN_ENV_KEYS: [&str; 3] = ["node_options", "node_path", "electron_run_as_node"];
+const FORBIDDEN_ENV_KEYS: [&str; 7] = [
+    "node_options",
+    "node_path",
+    "electron_run_as_node",
+    // Native dynamic-linker injection primitives — the same threat model
+    // as NODE_OPTIONS, but for the process loader (macOS ships unsigned, so
+    // library validation does not block DYLD_* there).
+    "dyld_insert_libraries",
+    "dyld_library_path",
+    "ld_preload",
+    "ld_library_path",
+];
 const FORBIDDEN_ENV_PREFIX: &str = "npm_config_";
 
 fn env_key_forbidden(key: &str) -> bool {
@@ -1320,6 +1331,8 @@ mod tests {
             u("NODE_OPTIONS=--require=x"),
             u("npm_config_foo=1"),
             u("Node_Path=/evil"),
+            u("DYLD_INSERT_LIBRARIES=/evil.dylib"),
+            u("LD_PRELOAD=/evil.so"),
             path_line,
             u("=C:=C:\\dir"),
             u("NO_EQUALS"),

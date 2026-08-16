@@ -96,8 +96,13 @@ jobs:
             bundle: dmg
             artifact: deepseek-harness-desktop-macos-arm64
             glob: target/release/bundle/dmg/*.dmg
-            # macOS updater stays OFF while unsigned (Gatekeeper rejects
-            # un-notarized updates); the sig glob stays empty on purpose.
+            # macOS updater stays OFF at the command layer while unsigned
+            # (Gatekeeper rejects un-notarized updates). createUpdaterArtifacts
+            # still PRODUCES a signed .app.tar.gz + .sig on macOS (the
+            # minisign key is present), and the glob uploads it — but
+            # latest.json never references darwin, so it is inert. Deliberate
+            # tripwire: if the signing key is ever removed, this glob fails
+            # the macOS build and forces a conscious decision.
             updaterGlob: target/release/bundle/macos/*.app.tar.gz.sig
     runs-on: ${{ matrix.os }}
     steps:
