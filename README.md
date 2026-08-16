@@ -6,6 +6,7 @@
 
 仓库：https://github.com/web-casa/DeepSeek-Harness-Desktop · 下载：https://github.com/web-casa/DeepSeek-Harness-Desktop/releases
 文档：[SECURITY.md](SECURITY.md) · [FORKING.md](FORKING.md) · [RELEASING.md](RELEASING.md) · [AGENTS.md](AGENTS.md)
+官网：https://dsharness.app · 插件市场：https://cordis.run
 English: [README.en.md](README.en.md)
 （v0.2.2：Windows x64 NSIS / macOS arm64 DMG，未签名预览版）
 

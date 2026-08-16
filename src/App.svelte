@@ -166,6 +166,14 @@
     }
   }
 
+  async function openSite(url: string) {
+    try {
+      await openUrl(url);
+    } catch (e) {
+      showToast(`打开失败：${e}`);
+    }
+  }
+
   async function reportIssue() {
     try {
       const d = await getDiagnostics();
@@ -446,6 +454,11 @@
           {updateBusy ? "检查中…" : "检查更新"}
         </button>
       {/if}
+    </div>
+    <div class="update-row">
+      <span class="update-title">资源</span>
+      <button class="ghost" onclick={() => openSite("https://dsharness.app")}>官网</button>
+      <button class="ghost" onclick={() => openSite("https://cordis.run")}>插件市场</button>
       <button class="ghost" onclick={reportIssue}>报告问题</button>
     </div>
     {#if updateError}

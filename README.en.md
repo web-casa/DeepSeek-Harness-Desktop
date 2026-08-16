@@ -8,6 +8,7 @@ the Harness process.
 
 Repo: https://github.com/web-casa/DeepSeek-Harness-Desktop · Downloads: https://github.com/web-casa/DeepSeek-Harness-Desktop/releases
 Docs: [SECURITY.md](SECURITY.md) · [FORKING.md](FORKING.md) · [RELEASING.md](RELEASING.md) · [AGENTS.md](AGENTS.md)
+Website: https://dsharness.app · Plugin marketplace: https://cordis.run
 (Current: v0.2.2 — Windows x64 NSIS / macOS arm64 DMG, unsigned preview builds)
 
 > 中文文档见 [README.md](README.md)。
