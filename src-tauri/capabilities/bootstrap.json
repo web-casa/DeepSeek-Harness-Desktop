@@ -19,6 +19,10 @@
     "allow-export-diagnostics",
     "allow-quit-app",
     "dialog:allow-save",
-    "opener:allow-open-url"
+    "opener:allow-open-url",
+    "allow-list-user-presets",
+    "allow-preview-preset",
+    "allow-import-preset",
+    "allow-export-preset"
   ]
 }

@@ -95,6 +95,17 @@ pnpm icons                         # 从 icon-source.png 重新生成平台图�
 | `verify-bundle.ts` | 安装包内容断言：NSIS 用 7z、DMG 用 hdiutil；校验主二进制类型、runtime 全树、平台 node-pty prebuild、零符号链接；`--self-test` 可在任意平台跑解析器测试 |
 | `lib/materialize.ts` | 物化器：递归展开符号链接/junction，文件硬链接零额外空间 |
 
+## 预设与插件
+
+- **预设（Agent Presets）**：`.dshpreset` 压缩包（`preset.yml` + `agent.cordis.yml`）。
+  Harness Web UI 自带预设管理；桌面设置页另提供**安全导入/导出**：导入前
+  做路径/符号链接/配额校验与密钥扫描，两阶段确认后原子安装到
+  `<dshHome>/.agent-presets/`（与上游发现机制一致）。**预设与 Agent 同权限
+  运行，仅导入可信来源。**
+- **插件（pnpm 线）**：`dsh plugin --profile web add <pkg>` 走系统 pnpm，
+  工作区在 `<dshHome>/profiles/web/`。桌面版需手动执行（用诊断页显示的
+  dshHome + 内置 CLI，见 SECURITY.md 信任模型）。
+
 ## dsh-sidecar 协议（NDJSON，stdin 命令 / stdout 事件）
 
 ```text

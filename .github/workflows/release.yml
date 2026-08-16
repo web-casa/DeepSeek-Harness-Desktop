@@ -44,6 +44,8 @@ jobs:
 
   # Load soak under CPU contention (production-default heartbeat knobs).
   # Release-only: PRs must not pay the staging + soak minutes (review I7).
+  # Failure gates the `release` job below (needs): it runs in parallel with
+  # the platform builds, so the gate costs no extra wall time.
   soak:
     name: Heartbeat load soak (Linux, 5min)
     needs: quality
@@ -179,7 +181,10 @@ jobs:
     # Only real tag pushes publish; workflow_dispatch is the build+verify-only
     # test channel.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: build
+    # soak is a publish gate: a heartbeat regression must surface before
+    # release, and the 5-minute soak overlaps the (much longer) platform
+    # builds, so waiting on it adds no wall time.
+    needs: [build, soak]
     runs-on: ubuntu-latest
     permissions:
       contents: write

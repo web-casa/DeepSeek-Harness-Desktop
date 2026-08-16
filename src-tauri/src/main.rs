@@ -7,6 +7,7 @@ use tauri::Manager;
 mod commands;
 mod harness;
 mod paths;
+mod preset;
 mod tray;
 
 fn main() {
@@ -86,7 +87,11 @@ fn main() {
             commands::check_update,
             commands::install_update_and_restart,
             commands::export_diagnostics,
-            commands::quit_app
+            commands::quit_app,
+            commands::list_user_presets,
+            commands::preview_preset,
+            commands::import_preset,
+            commands::export_preset
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

@@ -25,6 +25,10 @@ src-tauri/icons/ios/
 .pnpm-store/
 .tmp/
 
+# Local updater-manifest artifact (scripts/updater-manifest.ts); the live
+# one is published by CI and must never be committed from a local run.
+latest.json
+
 # OS
 .DS_Store
 Thumbs.db

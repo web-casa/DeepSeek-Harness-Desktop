@@ -59,5 +59,10 @@ jobs:
       - name: Liveness heartbeat smoke
         run: node scripts/verify-heartbeat.ts
 
+      # Proves the shell importer's on-disk layout is what UPSTREAM's
+      # discoverPresets finds (trust=user, not broken) — no UI needed.
+      - name: Preset discovery smoke
+        run: node scripts/verify-preset.ts
+
       - name: Relocation smoke
         run: node scripts/relocate-runtime.ts && node scripts/verify-runtime.ts --runtime-dir .tmp/relocated-runtime

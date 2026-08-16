@@ -15,6 +15,10 @@ fn main() {
         "install_update_and_restart",
         "export_diagnostics",
         "quit_app",
+        "list_user_presets",
+        "preview_preset",
+        "import_preset",
+        "export_preset",
     ]);
     let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));
     if let Err(e) = result {

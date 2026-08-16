@@ -13,9 +13,14 @@
     installUpdateAndRestart,
     exportDiagnostics,
     quitApp,
+    listUserPresets,
+    previewPreset,
+    importPreset,
+    exportPreset,
     onEvent,
     type Status,
     type StatusPayload,
+    type PresetPreview,
     type UpdateInfo,
     type Versions,
   } from "./lib/api";
@@ -41,6 +46,10 @@
   let updateInfo = $state<UpdateInfo | null>(null);
   let updateBusy = $state(false);
   let updateError = $state<string | null>(null);
+  let userPresets = $state<string[]>([]);
+  let presetPreview = $state<PresetPreview | null>(null);
+  let presetError = $state<string | null>(null);
+  let presetBusy = $state(false);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -175,6 +184,48 @@
     }
   }
 
+  async function refreshPresets() {
+    try {
+      userPresets = await listUserPresets();
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  async function doPreviewPreset() {
+    presetBusy = true;
+    presetError = null;
+    try {
+      presetPreview = await previewPreset();
+    } catch (e) {
+      if (String(e) !== "cancelled") presetError = `读取失败：${e}`;
+    }
+    presetBusy = false;
+  }
+
+  async function doImportPreset() {
+    presetBusy = true;
+    presetError = null;
+    try {
+      const id = await importPreset();
+      presetPreview = null;
+      showToast(`预设 ${id} 已导入（在 Harness 设置页可见）`);
+      await refreshPresets();
+    } catch (e) {
+      presetError = `导入失败：${e}`;
+    }
+    presetBusy = false;
+  }
+
+  async function doExportPreset(id: string) {
+    try {
+      await exportPreset(id);
+      showToast(`预设 ${id} 已导出`);
+    } catch (e) {
+      if (String(e) !== "cancelled") showToast(`导出失败：${e}`);
+    }
+  }
+
   async function copyDiagnostics() {
     try {
       const payload = await getDiagnostics();
@@ -195,6 +246,7 @@
     } catch {
       inTauri = false;
     }
+    refreshPresets();
     // Silent boot-time update check: only inform, never prompt.
     try {
       const info = await checkUpdate();
@@ -369,6 +421,40 @@
     </div>
     {#if updateError}
       <div class="notice-box">{updateError}</div>
+    {/if}
+  </div>
+
+  <div class="card preset-card">
+    <div class="update-row">
+      <span class="update-title">预设（Agent Presets）</span>
+      <button class="ghost" onclick={doPreviewPreset} disabled={presetBusy}>导入 .dshpreset…</button>
+    </div>
+    {#if presetPreview}
+      <div class="notice-box">
+        <b>预设 {presetPreview.id}</b> · {presetPreview.files.length} 个文件
+        {#if presetPreview.warnings.includes("possible-secrets")}
+          · <span class="warn">⚠ 检测到疑似密钥</span>
+        {/if}
+        {#if presetPreview.warnings.includes("absolute-paths")}
+          · <span class="warn">⚠ 含绝对路径</span>
+        {/if}
+        <div>预设与 Agent 同权限运行工具和命令——仅导入可信来源。</div>
+        <button class="primary" onclick={doImportPreset} disabled={presetBusy}>确认导入</button>
+        <button class="ghost" onclick={() => (presetPreview = null)}>取消</button>
+      </div>
+    {/if}
+    {#if presetError}
+      <div class="notice-box">{presetError}</div>
+    {/if}
+    {#if userPresets.length > 0}
+      {#each userPresets as id}
+        <div class="preset-row">
+          <span>{id}</span>
+          <button class="ghost" onclick={() => doExportPreset(id)}>导出</button>
+        </div>
+      {/each}
+    {:else}
+      <div class="preset-row"><span class="l-empty">（暂无用户预设）</span></div>
     {/if}
   </div>
 

@@ -55,3 +55,15 @@ export const installUpdateAndRestart = (): Promise<void> =>
   invoke("install_update_and_restart");
 export const exportDiagnostics = (): Promise<void> => invoke("export_diagnostics");
 export const quitApp = (): Promise<void> => invoke("quit_app");
+
+export interface PresetPreview {
+  id: string;
+  files: [string, number][];
+  warnings: string[];
+}
+
+export const listUserPresets = (): Promise<string[]> => invoke("list_user_presets");
+export const previewPreset = (): Promise<PresetPreview> => invoke("preview_preset");
+export const importPreset = (): Promise<string> => invoke("import_preset");
+export const exportPreset = (id: string): Promise<void> =>
+  invoke("export_preset", { id });

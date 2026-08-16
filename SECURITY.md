@@ -56,6 +56,15 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
  关闭。更新包真实性由内嵌 minisign 公钥校验，与代码签名无关；macOS
  更新器在签名+公证落地前保持关闭。
 
+## 预设与插件信任模型
+
+- **预设（.dshpreset）**：与 Agent 同权限运行（上游原话："carries the same
+  trust as shell access"）。桌面侧的安全导入在落盘前做路径/符号链接/配额
+  校验与密钥扫描，并强制确认；但**真正的安全边界是「仅导入可信来源」**——
+  校验器拦截的是恶意构造的压缩包，拦不住一个「内容本身有害」的可信包。
+- **插件（dsh plugin）**：运行在 Harness 进程内，等同任意代码执行。桌面版
+  不提供自动化插件安装入口；手动安装请先核对该插件的来源与内容。
+
 ## 报告漏洞
 
 - 首选：GitHub Security Advisory（本仓库 Security 标签页 → Report a

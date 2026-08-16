@@ -99,6 +99,18 @@ pnpm icons                         # regenerate platform icons
 | `relocate-runtime.ts` | Materialized copy for the relocation smoke |
 | `verify-bundle.ts` | Bundle content assertions (7z/hdiutil); binary types, full runtime tree, node-pty prebuild, zero symlinks; `--self-test` runs anywhere |
 
+## Presets & plugins
+
+- **Agent Presets**: `.dshpreset` archives (`preset.yml` + `agent.cordis.yml`).
+  The Harness Web UI manages presets natively; the desktop settings page adds
+  a **safe import/export**: path/symlink/quota validation plus a secret scan,
+  two-phase confirmation, and an atomic install into
+  `<dshHome>/.agent-presets/` (matching upstream's discovery). **Presets run
+  with the same privileges as the Agent — import trusted sources only.**
+- **Plugins (the pnpm line)**: `dsh plugin --profile web add <pkg>` uses the
+  system pnpm with a workspace under `<dshHome>/profiles/web/`. In the desktop
+  build this is manual (see the trust model in SECURITY.md).
+
 ## dsh-sidecar protocol (NDJSON, stdin commands / stdout events)
 
 ```text

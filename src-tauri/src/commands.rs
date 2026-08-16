@@ -182,58 +182,73 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
 
 /// Mask the most common secret shapes. Best effort only: harness logs can
 /// contain arbitrary tool output, so this must never be described as "safe".
+///
+/// Content is copied char-by-char; the byte view is used ONLY to recognize
+/// the ASCII secret prefixes, and it is only consulted at char boundaries,
+/// so multi-byte UTF-8 (e.g. Chinese log lines) passes through intact.
+/// The `[n..]` slices after a mask are safe because the counted token bytes
+/// are ASCII: the slice always lands on a char boundary.
 fn redact(text: &str, dsh_home: &str) -> String {
-    let mut out = text.replace(dsh_home, "<DSH_HOME>");
-    let mut i = 0usize;
-    let bytes = out.as_bytes();
+    // Guard the empty case: `str::replace("", …)` interleaves the mask
+    // between every character instead of matching nothing.
+    let out = if dsh_home.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(dsh_home, "<DSH_HOME>")
+    };
     let mut result = String::with_capacity(out.len());
-    while i < bytes.len() {
-        let rest = &bytes[i..];
+    let mut rest = out.as_str();
+    while !rest.is_empty() {
+        let bytes = rest.as_bytes();
         // sk- + 16+ alphanumerics
-        if rest.starts_with(b"sk-") {
-            let j = rest
+        if bytes.starts_with(b"sk-") {
+            let j = bytes
                 .iter()
                 .skip(3)
                 .take_while(|b| b.is_ascii_alphanumeric())
                 .count();
             if j >= 16 {
                 result.push_str("sk-***");
-                i += 3 + j;
+                rest = &rest[3 + j..];
                 continue;
             }
         }
         // Bearer <token>
-        if rest.starts_with(b"Bearer ") {
-            let j = rest
+        if bytes.starts_with(b"Bearer ") {
+            let j = bytes
                 .iter()
                 .skip(7)
                 .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
                 .count();
             if j >= 8 {
                 result.push_str("Bearer ***");
-                i += 7 + j;
+                rest = &rest[7 + j..];
                 continue;
             }
         }
-        // AKIA + 16 uppercase (AWS access key id)
-        if rest.starts_with(b"AKIA") {
-            let j = rest
+        // AKIA + 12+ uppercase/digits (AWS access key id)
+        if bytes.starts_with(b"AKIA") {
+            let j = bytes
                 .iter()
                 .skip(4)
                 .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
                 .count();
             if j >= 12 {
                 result.push_str("AKIA***");
-                i += 4 + j;
+                rest = &rest[4 + j..];
                 continue;
             }
         }
-        // Token-ish assignment: <name>=<20+ alnum> where name hints a secret
-        result.push(bytes[i] as char);
-        i += 1;
+        // Plain content: copy whole chars, never split UTF-8.
+        match rest.chars().next() {
+            Some(ch) => {
+                result.push(ch);
+                rest = &rest[ch.len_utf8()..];
+            }
+            None => break, // rest was just checked non-empty; unreachable
+        }
     }
-    out = result;
-    out
+    result
 }
 
 /// Write a diagnostics zip (status/versions/log tail) to a user-chosen path.
@@ -289,4 +304,189 @@ pub async fn export_diagnostics(app: AppHandle, runtime: State<'_, Runtime>) -> 
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+
+    #[test]
+    fn masks_sk_tokens_16_plus_alnum() {
+        assert_eq!(redact("sk-abcdefghijklmnop", ""), "sk-***");
+        assert_eq!(redact("sk-0123456789abcdef", ""), "sk-***");
+        // 15 chars: below threshold, left untouched.
+        assert_eq!(redact("sk-abcdefghijklmno", ""), "sk-abcdefghijklmno");
+    }
+
+    #[test]
+    fn masks_bearer_tokens() {
+        assert_eq!(redact("Bearer abcdefgh", ""), "Bearer ***");
+        assert_eq!(redact("Bearer ab-cd_ef", ""), "Bearer ***");
+        // 5 chars: below threshold, left untouched.
+        assert_eq!(redact("Bearer short", ""), "Bearer short");
+    }
+
+    #[test]
+    fn masks_aws_access_key_ids() {
+        assert_eq!(redact("AKIAABCDEFGHIJKLMN", ""), "AKIA***");
+        assert_eq!(redact("AKIAABCDEFGHIJK1", ""), "AKIA***");
+        // 11 chars after the prefix: below threshold, left untouched.
+        assert_eq!(redact("AKIAABCDEFGHIJK", ""), "AKIAABCDEFGHIJK");
+    }
+
+    #[test]
+    fn redacts_dsh_home_path() {
+        assert_eq!(redact("/home/u/.dsh/log", "/home/u/.dsh"), "<DSH_HOME>/log");
+    }
+
+    #[test]
+    fn empty_dsh_home_is_a_noop_not_a_mangler() {
+        // `str::replace("", …)` would interleave the mask between chars.
+        assert_eq!(redact("abc", ""), "abc");
+    }
+
+    #[test]
+    fn preserves_multibyte_utf8_and_masks_adjacent_secrets() {
+        // Regression for the byte-wise scan that pushed every UTF-8 byte as
+        // a lone `char`, doubling Chinese text into mojibake on every export.
+        let input = "日志：sk-abcdefghijklmnop 正常退出，Bearer 12345678，路径中文";
+        assert_eq!(
+            redact(input, ""),
+            "日志：sk-*** 正常退出，Bearer ***，路径中文"
+        );
+    }
+
+    #[test]
+    fn secret_directly_after_a_multibyte_char() {
+        // The ASCII prefix starts right after a 3-byte char; the match must
+        // still be found (and the char must survive intact).
+        assert_eq!(redact("中sk-abcdefghijklmnop", ""), "中sk-***");
+    }
+
+    #[test]
+    fn redaction_is_idempotent() {
+        // Masked forms ("sk-***" etc.) contain no alnum run after the prefix,
+        // so a second pass must not change anything.
+        let once = redact("sk-abcdefghijklmnop Bearer abcdefgh 中文", "");
+        assert_eq!(redact(&once, ""), once);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Preset (.dshpreset) transfer — the shell-side safe boundary. See
+// preset.rs for the security rationale; upstream is never patched.
+// ---------------------------------------------------------------------------
+
+/// The preview pending user confirmation: (archive path, inspection result).
+pub struct PendingPreset(
+    pub std::sync::Mutex<Option<(std::path::PathBuf, crate::preset::ArchivePreview)>>,
+);
+
+#[tauri::command]
+pub fn list_user_presets(runtime: State<'_, Runtime>) -> Vec<String> {
+    let dsh_home = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dsh_home
+        .clone()
+        .unwrap_or_default();
+    let root = crate::preset::user_preset_root(std::path::Path::new(&dsh_home));
+    let mut ids = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if crate::preset::is_valid_preset_id(&name) && entry.path().is_dir() {
+                ids.push(name);
+            }
+        }
+    }
+    ids.sort();
+    ids
+}
+
+/// Pick an archive, validate it, and hold the result for confirmation.
+#[tauri::command]
+pub async fn preview_preset(
+    app: AppHandle,
+    pending: State<'_, PendingPreset>,
+) -> Result<Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    app.dialog()
+        .file()
+        .add_filter("dshpreset", &["dshpreset"])
+        .pick_file(move |p| {
+            let _ = tx.send(p.map(|f| f.into_path().unwrap_or_default()));
+        });
+    let Some(path) = rx.recv().map_err(|e| e.to_string())? else {
+        return Err("cancelled".to_string());
+    };
+    let preview = crate::preset::inspect_archive(&path)?;
+    let json = serde_json::json!({
+        "id": preview.id,
+        "files": preview.files,
+        "warnings": preview.warnings,
+    });
+    *pending
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((path, preview));
+    Ok(json)
+}
+
+/// Install the previously previewed archive (two-phase: the confirmation
+/// dialog sits between preview_preset and this call).
+#[tauri::command]
+pub fn import_preset(
+    runtime: State<'_, Runtime>,
+    pending: State<'_, PendingPreset>,
+) -> Result<String, String> {
+    let held = pending
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    let Some((path, _)) = held else {
+        return Err("no previewed archive — run preview first".to_string());
+    };
+    let dsh_home = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dsh_home
+        .clone()
+        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+    crate::preset::install_archive(&path, std::path::Path::new(&dsh_home))
+}
+
+/// Export one user-authored preset to a user-chosen location.
+#[tauri::command]
+pub async fn export_preset(
+    app: AppHandle,
+    id: String,
+    runtime: State<'_, Runtime>,
+) -> Result<(), String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    app.dialog()
+        .file()
+        .add_filter("dshpreset", &["dshpreset"])
+        .set_file_name(format!("{id}.dshpreset"))
+        .save_file(move |p| {
+            let _ = tx.send(p.map(|f| f.into_path().unwrap_or_default()));
+        });
+    let Some(dest) = rx.recv().map_err(|e| e.to_string())? else {
+        return Err("cancelled".to_string());
+    };
+    let dsh_home = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dsh_home
+        .clone()
+        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+    crate::preset::export_preset(&id, std::path::Path::new(&dsh_home), &dest)
 }
