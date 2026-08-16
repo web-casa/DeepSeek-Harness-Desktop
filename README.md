@@ -3,9 +3,12 @@
 把官方 DeepSeek Harness 打包成 Windows / macOS 原生应用，让 Harness 及其**插件生态**开箱即用。
 不是 fork：Harness 原样随包携带，桌面层只负责生命周期与安全边界。
 
-> 仓库 [web-casa/DeepSeek-Harness-Desktop](https://github.com/web-casa/DeepSeek-Harness-Desktop) · 下载 [Releases](https://github.com/web-casa/DeepSeek-Harness-Desktop/releases) · 官网 [dsharness.app](https://dsharness.app) · 插件市场 [cordis.run](https://cordis.run) · 英文 [README.en.md](README.en.md)
-> 文档：[SECURITY.md](SECURITY.md) · [FORKING.md](FORKING.md) · [RELEASING.md](RELEASING.md) · [AGENTS.md](AGENTS.md)
-> v0.2.3 · Windows x64 NSIS / macOS arm64 DMG · 未签名预览版
+| 仓库 | [web-casa/DeepSeek-Harness-Desktop](https://github.com/web-casa/DeepSeek-Harness-Desktop) |
+| 下载 | [Releases](https://github.com/web-casa/DeepSeek-Harness-Desktop/releases) |
+| 官网 | [dsharness.app](https://dsharness.app) |
+| 插件市场 | [cordis.run](https://cordis.run) |
+| 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
+| 版本 | v0.2.3 · Windows x64 NSIS / macOS arm64 DMG · 未签名预览版 · [English](README.en.md) |
 
 ## 特性一览
 

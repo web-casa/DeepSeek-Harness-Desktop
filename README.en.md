@@ -4,9 +4,12 @@ Packages the official DeepSeek Harness as a native Windows / macOS app, with
 the Harness **plugin ecosystem** ready to go. Not a fork: the Harness ships
 intact; the desktop layer only handles lifecycle and the security boundary.
 
-> Repo [web-casa/DeepSeek-Harness-Desktop](https://github.com/web-casa/DeepSeek-Harness-Desktop) · Downloads [Releases](https://github.com/web-casa/DeepSeek-Harness-Desktop/releases) · Website [dsharness.app](https://dsharness.app) · Plugin marketplace [cordis.run](https://cordis.run) · 中文 [README.md](README.md)
-> Docs: [SECURITY.md](SECURITY.md) · [FORKING.md](FORKING.md) · [RELEASING.md](RELEASING.md) · [AGENTS.md](AGENTS.md)
-> v0.2.3 · Windows x64 NSIS / macOS arm64 DMG · unsigned preview builds
+| Repo | [web-casa/DeepSeek-Harness-Desktop](https://github.com/web-casa/DeepSeek-Harness-Desktop) |
+| Downloads | [Releases](https://github.com/web-casa/DeepSeek-Harness-Desktop/releases) |
+| Website | [dsharness.app](https://dsharness.app) |
+| Plugin marketplace | [cordis.run](https://cordis.run) |
+| Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
+| Version | v0.2.3 · Windows x64 NSIS / macOS arm64 DMG · unsigned preview · [中文](README.md) |
 
 ## Features
 
