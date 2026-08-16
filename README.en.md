@@ -58,9 +58,13 @@ Plugins land in `<dshHome>/profiles/web/` (user data, never the install
 directory); hit "Restart Harness" in the app to activate.
 
 **Presets** (`.dshpreset`): a set of plugin rows packaged as a shareable agent
-configuration. The settings page offers safe import/export — path/symlink/
-quota/secret validation → two-phase confirmation → atomic install into
-`<dshHome>/.agent-presets/`, visible in the Harness settings immediately.
+configuration. The settings page offers safe import/export/delete —
+path/symlink/quota/secret validation → two-phase confirmation → atomic
+install into `<dshHome>/.agent-presets/`, visible in the Harness settings
+immediately. The settings page also re-validates preset-root health on every
+look: broken (missing/unreadable `agent.cordis.yml` — upstream refuses to
+mount), unsafe (symlinks and other id-occupying entries upstream skips), and
+missing metadata (`preset.yml`) rows are surfaced and deletable.
 
 > ⚠️ **Trust model**: plugins and presets run inside the Harness process
 > with **the same privileges as the Agent**. The desktop validation blocks
@@ -71,7 +75,7 @@ quota/secret validation → two-phase confirmation → atomic install into
 
 ```
 Tauri 2 shell
- ├─ bootstrap window: local Svelte UI · limited desktop IPC (19 commands, ACL-gated)
+ ├─ bootstrap window: local Svelte UI · limited desktop IPC (20 commands, ACL-gated)
  └─ harness window: http://127.0.0.1:<random port> · original Harness Web UI · zero IPC
         │ NDJSON (stdin/stdout)
 dsh-sidecar (Rust, no heavy dependencies)

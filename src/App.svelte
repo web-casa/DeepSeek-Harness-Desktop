@@ -17,6 +17,7 @@
     previewPreset,
     importPreset,
     exportPreset,
+    deletePreset,
     listPlugins,
     installPlugin,
     uninstallPlugin,
@@ -28,6 +29,8 @@
     type Status,
     type StatusPayload,
     type PresetPreview,
+    type PresetIssueKind,
+    type PresetRow,
     type UpdateInfo,
     type Versions,
     type PluginEntry,
@@ -55,10 +58,11 @@
   let updateBusy = $state(false);
   let updateError = $state<string | null>(null);
   let updatePercent = $state<number | null>(null);
-  let userPresets = $state<string[]>([]);
+  let userPresets = $state<PresetRow[]>([]);
   let presetPreview = $state<PresetPreview | null>(null);
   let presetError = $state<string | null>(null);
   let presetBusy = $state(false);
+  let confirmDelete = $state<string | null>(null);
   let plugins = $state<PluginEntry[]>([]);
   let pluginName = $state("");
   let pluginBusy = $state(false);
@@ -73,6 +77,12 @@
     stopping: "正在停止 Harness…",
     stopped: "Harness 已停止",
     crashed: "Harness 进程异常退出",
+  };
+
+  const ISSUE_LABEL: Record<PresetIssueKind, string> = {
+    broken: "已损坏",
+    unsafe: "不安全",
+    info: "缺元数据",
   };
 
   function apply(p: StatusPayload) {
@@ -250,6 +260,20 @@
       showToast(`预设 ${id} 已导出`);
     } catch (e) {
       if (String(e) !== "cancelled") showToast(`导出失败：${e}`);
+    }
+    presetBusy = false;
+  }
+
+  async function doDeletePreset(id: string) {
+    if (presetBusy) return;
+    presetBusy = true;
+    try {
+      await deletePreset(id);
+      confirmDelete = null;
+      showToast(`预设 ${id} 已删除`);
+      await refreshPresets();
+    } catch (e) {
+      showToast(`删除失败：${e}`);
     }
     presetBusy = false;
   }
@@ -591,11 +615,29 @@
       <div class="notice-box">{presetError}</div>
     {/if}
     {#if userPresets.length > 0}
-      {#each userPresets as id}
+      {#each userPresets as row (row.id)}
         <div class="preset-row">
-          <span>{id}</span>
-          <button class="ghost" onclick={() => doExportPreset(id)} disabled={presetBusy}>导出</button>
+          <span class="preset-id">
+            {row.id}
+            {#each row.issues as issue (issue.kind)}
+              <span class="preset-badge {issue.kind}">{ISSUE_LABEL[issue.kind]}</span>
+            {/each}
+          </span>
+          <button class="ghost" onclick={() => doExportPreset(row.id)} disabled={presetBusy}>导出</button>
+          {#if confirmDelete === row.id}
+            <button class="danger-ghost" onclick={() => doDeletePreset(row.id)} disabled={presetBusy}>确认删除？</button>
+            <button class="ghost" onclick={() => (confirmDelete = null)}>取消</button>
+          {:else}
+            <button class="ghost" onclick={() => (confirmDelete = row.id)} disabled={presetBusy}>删除</button>
+          {/if}
         </div>
+        {#if row.issues.length > 0}
+          <div class="preset-issues">
+            {#each row.issues as issue (issue.kind)}
+              <div>· {issue.detail}</div>
+            {/each}
+          </div>
+        {/if}
       {/each}
     {:else}
       <div class="preset-row"><span class="l-empty">（暂无用户预设）</span></div>

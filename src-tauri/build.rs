@@ -19,6 +19,7 @@ fn main() {
         "preview_preset",
         "import_preset",
         "export_preset",
+        "delete_preset",
         "list_plugins",
         "install_plugin",
         "uninstall_plugin",

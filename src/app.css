@@ -312,6 +312,54 @@ button.danger-ghost:hover:not(:disabled) {
 }
 
 /* ---- plugins ---- */
+.preset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.preset-id {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preset-badge {
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.preset-badge.broken {
+  color: #ffb3ae;
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid rgba(248, 81, 73, 0.35);
+}
+.preset-badge.unsafe {
+  color: #e3c077;
+  background: rgba(210, 153, 34, 0.12);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+}
+.preset-badge.info {
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+
+.preset-issues {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  padding-left: 4px;
+  user-select: text;
+}
+
 .plugin-row {
   display: flex;
   align-items: center;

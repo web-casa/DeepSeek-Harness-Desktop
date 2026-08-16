@@ -51,6 +51,19 @@ DSH CLI 的启动契约随版本演进，社区同类项目已实证踩坑（如
    Tauri `start_harness` args、`verify-runtime.ts` 冒烟断言；
 4. 全量冒烟（`verify-runtime` + `verify-heartbeat`）+ golden 测试复核。
 
+同一清单还须复核**插件与预设子命令契约**（升级后）：
+
+- 对照新版复核 `dsh plugin --profile <name> <args...>`（requiredOption
+  --profile、参数原样转发 pnpm、`spawnSync("pnpm", {shell: win32,
+  cwd: profiles/<name>})`、initProfile 产物 package.json/cordis.patch.yml/
+  pnpm-workspace.yaml(nodeLinker:hoisted)、reconcilePlugins 的
+  `dsh.profile.bundles` 语义）。变化时同步 `src-tauri/src/plugins.rs` 注释、
+  `scripts/verify-plugins.ts` 断言与 `verify-bundle.ts` 必含文件；
+- 上游若新增 `.dshpreset` 归档导入/导出入口（或变更 `.agent-presets`
+  根语义），必须复核壳层预设边界（`src-tauri/src/preset.rs`）——当前
+  rc.6 无归档入口，壳层导入/导出是预设根的唯一写入路径，壳层健康复核
+  （validate_user_presets）覆盖该根的全部来源。
+
 Dependabot 对 harness 的 ignore 不作用于 security updates：若收到
 `@deepseek-ai/dsh` 的 security PR（只改 pin+lock、不动 manifest），必须按本
 清单补全（manifest + lock + 全量冒烟）后再合并——CI 的 version-drift 断言会

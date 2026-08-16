@@ -105,6 +105,7 @@ fn main() {
             commands::preview_preset,
             commands::import_preset,
             commands::export_preset,
+            commands::delete_preset,
             commands::list_plugins,
             commands::install_plugin,
             commands::uninstall_plugin,

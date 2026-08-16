@@ -770,6 +770,13 @@ pub fn init(app: &AppHandle) {
         return;
     }
 
+    // Fallback initialization of the user preset root: the import path
+    // creates it on demand; this only guarantees the root exists from first
+    // boot so upstream discovery and the settings-page roster never start
+    // from a missing directory. Best-effort and silent — any real problem
+    // surfaces through the import/validation commands instead.
+    let _ = std::fs::create_dir_all(crate::preset::user_preset_root(&paths.dsh_home));
+
     let versions = read_versions(&paths);
     let state = Arc::new(Mutex::new(SharedState {
         status: Status::Idle,

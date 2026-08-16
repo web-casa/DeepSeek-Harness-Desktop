@@ -31,6 +31,131 @@ pub fn user_preset_root(dsh_home: &Path) -> PathBuf {
     dsh_home.join(".agent-presets")
 }
 
+/// Health kind of a user preset row, aligned with upstream scanRoot
+/// semantics (verified against @deepseek-ai/dsh-agent-presets):
+/// - `Broken` — upstream lists the row with a `broken` marker and refuses to
+///   mount it (composition file missing/unreadable);
+/// - `Unsafe` — upstream SKIPS the entry entirely (not a real directory),
+///   yet the name stays occupied on disk and no surface shows anything to
+///   delete — the shell must surface it;
+/// - `Info` — cosmetic only (no preset.yml → no display name; upstream
+///   still lists and mounts the preset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresetIssueKind {
+    Broken,
+    Unsafe,
+    Info,
+}
+
+impl PresetIssueKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PresetIssueKind::Broken => "broken",
+            PresetIssueKind::Unsafe => "unsafe",
+            PresetIssueKind::Info => "info",
+        }
+    }
+}
+
+/// One roster row's health: healthy presets carry an empty `issues` list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetHealth {
+    pub id: String,
+    pub issues: Vec<(PresetIssueKind, String)>,
+}
+
+/// Re-validate the user preset root the way upstream's scanRoot would see
+/// it. Every entry whose name is a usable preset id gets a row (directories,
+/// symlinks, and regular files alike — the latter two occupy the id while
+/// staying invisible to upstream). Entries with names outside the preset-id
+/// charset are skipped exactly like upstream skips them.
+pub fn validate_user_presets(dsh_home: &Path) -> Vec<PresetHealth> {
+    let root = user_preset_root(dsh_home);
+    let Ok(entries) = fs::read_dir(&root) else {
+        // No root = no presets (upstream scanRoot returns [] on ENOENT).
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !is_valid_preset_id(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue, // raced away mid-scan; invisible either way
+        };
+        let mut issues = Vec::new();
+        if meta.file_type().is_symlink() {
+            issues.push((
+                PresetIssueKind::Unsafe,
+                "symbolic link — upstream discovery skips it, so the id stays occupied and invisible; delete it".to_string(),
+            ));
+        } else if !meta.is_dir() {
+            issues.push((
+                PresetIssueKind::Unsafe,
+                "not a directory — upstream discovery skips it, so the id stays occupied and invisible; delete it".to_string(),
+            ));
+        } else {
+            // Health probe, not a full parse: upstream's scanRoot loads and
+            // validates the whole composition, but the shell only needs
+            // "missing or unreadable" (the plan's broken semantics) — and it
+            // runs on every roster refresh, so never load the file. One byte
+            // proves it opens and is non-empty (an empty file is broken in
+            // upstream's eyes too).
+            let probe = fs::File::open(path.join("agent.cordis.yml"))
+                .and_then(|mut f| f.read(&mut [0u8; 1]));
+            match probe {
+                Err(e) => issues.push((
+                    PresetIssueKind::Broken,
+                    format!(
+                        "agent.cordis.yml is missing or unreadable ({e}) — the preset will fail to mount"
+                    ),
+                )),
+                Ok(0) => issues.push((
+                    PresetIssueKind::Broken,
+                    "agent.cordis.yml is empty — the preset will fail to mount".to_string(),
+                )),
+                Ok(_) => {
+                    if !path.join("preset.yml").is_file() {
+                        issues.push((
+                            PresetIssueKind::Info,
+                            "preset.yml missing — no display name in the roster".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        rows.push(PresetHealth { id: name, issues });
+    }
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    rows
+}
+
+/// Delete one user preset by id. Refuses symbolic links (never follow, never
+/// remove anything a link merely points at — a malicious link must be
+/// resolved manually) and refuses ids outside the preset charset; a regular
+/// file occupying the id is removed too.
+pub fn delete_preset(id: &str, dsh_home: &Path) -> Result<(), String> {
+    if !is_valid_preset_id(id) {
+        return Err(format!("invalid preset id {id:?}"));
+    }
+    let target = user_preset_root(dsh_home).join(id);
+    match fs::symlink_metadata(&target) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
+            "preset {id} is a symbolic link — refusing to delete; remove it manually"
+        )),
+        Ok(meta) if meta.is_dir() => {
+            fs::remove_dir_all(&target).map_err(|e| format!("cannot remove preset {id}: {e}"))
+        }
+        Ok(_) => fs::remove_file(&target).map_err(|e| format!("cannot remove entry {id}: {e}")),
+        Err(_) => Err(format!("preset {id} not found")),
+    }
+}
+
 /// True iff the raw entry name can become a path INSIDE the preset dir:
 /// no NUL, no backslash, no absolute form (leading `/`, drive letter), and
 /// every component is non-empty and not `.`/`..`.
@@ -472,7 +597,7 @@ pub fn export_preset(id: &str, dsh_home: &Path, dest: &Path) -> Result<(), Strin
     }
     let dir = user_preset_root(dsh_home).join(id);
     // Same stance as the import side: never follow a symlink that happens
-    // to wear a valid preset id (list_user_presets already hides those).
+    // to wear a valid preset id (list_user_presets flags those as unsafe).
     match fs::symlink_metadata(&dir) {
         Ok(meta) if meta.file_type().is_symlink() => {
             return Err(format!(
@@ -803,5 +928,127 @@ mod tests {
         fs::remove_dir_all(&dsh_home).unwrap();
         fs::remove_file(&archive).unwrap();
         fs::remove_file(&out).unwrap();
+    }
+
+    // ---- P2: preset-root health re-validation ---------------------------
+
+    fn health_kinds(id: &str, rows: &[PresetHealth]) -> Vec<PresetIssueKind> {
+        rows.iter()
+            .find(|r| r.id == id)
+            .map(|r| r.issues.iter().map(|(k, _)| *k).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn validate_user_presets_table() {
+        let dsh_home = temp_dir("health");
+        let root = user_preset_root(&dsh_home);
+        fs::create_dir_all(&root).unwrap();
+
+        // Healthy: composition + metadata.
+        fs::create_dir_all(root.join("demo")).unwrap();
+        fs::write(root.join("demo").join("agent.cordis.yml"), "[]\n").unwrap();
+        fs::write(root.join("demo").join("preset.yml"), "name: demo\n").unwrap();
+
+        // Broken: composition missing.
+        fs::create_dir_all(root.join("missing")).unwrap();
+        fs::write(root.join("missing").join("preset.yml"), "name: x\n").unwrap();
+
+        // Broken: composition path exists but is not a readable file.
+        fs::create_dir_all(root.join("unreadable")).unwrap();
+        fs::create_dir_all(root.join("unreadable").join("agent.cordis.yml")).unwrap();
+
+        // Broken: composition exists but is empty (upstream treats it as
+        // broken too).
+        fs::create_dir_all(root.join("empty")).unwrap();
+        fs::write(root.join("empty").join("agent.cordis.yml"), "").unwrap();
+
+        // Info: composition fine, metadata missing.
+        fs::create_dir_all(root.join("nometa")).unwrap();
+        fs::write(root.join("nometa").join("agent.cordis.yml"), "[]\n").unwrap();
+
+        // Unsafe: a regular file occupying a preset id (invisible upstream).
+        fs::write(root.join("afile"), "oops").unwrap();
+
+        // Invalid id: skipped like upstream skips it.
+        fs::create_dir_all(root.join("UPPER")).unwrap();
+        fs::write(root.join("UPPER").join("agent.cordis.yml"), "[]\n").unwrap();
+        fs::create_dir_all(root.join(".hidden")).unwrap();
+
+        let rows = validate_user_presets(&dsh_home);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["afile", "demo", "empty", "missing", "nometa", "unreadable"]
+        );
+        assert!(health_kinds("demo", &rows).is_empty());
+        assert_eq!(health_kinds("missing", &rows), [PresetIssueKind::Broken]);
+        assert_eq!(health_kinds("unreadable", &rows), [PresetIssueKind::Broken]);
+        assert_eq!(health_kinds("empty", &rows), [PresetIssueKind::Broken]);
+        assert_eq!(health_kinds("nometa", &rows), [PresetIssueKind::Info]);
+        assert_eq!(health_kinds("afile", &rows), [PresetIssueKind::Unsafe]);
+        fs::remove_dir_all(&dsh_home).unwrap();
+    }
+
+    #[test]
+    fn validate_missing_root_is_empty() {
+        let dsh_home = temp_dir("noroot");
+        assert!(validate_user_presets(&dsh_home).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_flags_symlinks_unsafe() {
+        use std::os::unix::fs::symlink;
+        let dsh_home = temp_dir("symlink");
+        let root = user_preset_root(&dsh_home);
+        fs::create_dir_all(&root).unwrap();
+        let target = temp_dir("link-target");
+        symlink(&target, root.join("linked")).unwrap();
+        let rows = validate_user_presets(&dsh_home);
+        assert_eq!(health_kinds("linked", &rows), [PresetIssueKind::Unsafe]);
+        fs::remove_dir_all(&dsh_home).unwrap();
+        fs::remove_dir_all(&target).unwrap();
+    }
+
+    #[test]
+    fn delete_preset_table() {
+        let dsh_home = temp_dir("delete");
+        let root = user_preset_root(&dsh_home);
+        fs::create_dir_all(root.join("demo")).unwrap();
+        fs::write(root.join("demo").join("agent.cordis.yml"), "[]\n").unwrap();
+        fs::write(root.join("demo").join("preset.yml"), "name: demo\n").unwrap();
+
+        assert!(delete_preset("demo", &dsh_home).is_ok());
+        assert!(!root.join("demo").exists());
+        assert!(delete_preset("demo", &dsh_home).is_err()); // gone now
+
+        assert!(delete_preset("BAD!id", &dsh_home).is_err());
+        assert!(delete_preset("UPPER", &dsh_home).is_err()); // regex mismatch
+
+        // A regular file occupying the id is removable (it blocks the id).
+        fs::write(root.join("afile"), "x").unwrap();
+        assert!(delete_preset("afile", &dsh_home).is_ok());
+        assert!(!root.join("afile").exists());
+        fs::remove_dir_all(&dsh_home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_refuses_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dsh_home = temp_dir("del-link");
+        let root = user_preset_root(&dsh_home);
+        fs::create_dir_all(&root).unwrap();
+        let target = temp_dir("del-link-target");
+        fs::write(target.join("keep.txt"), "keep").unwrap();
+        symlink(&target, root.join("linked")).unwrap();
+        let err = delete_preset("linked", &dsh_home).unwrap_err();
+        assert!(err.contains("symbolic link"), "{err}");
+        // The link and its target are both untouched.
+        assert!(root.join("linked").exists());
+        assert!(target.join("keep.txt").exists());
+        fs::remove_dir_all(&dsh_home).unwrap();
+        fs::remove_dir_all(&target).unwrap();
     }
 }

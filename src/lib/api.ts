@@ -62,11 +62,25 @@ export interface PresetPreview {
   warnings: string[];
 }
 
-export const listUserPresets = (): Promise<string[]> => invoke("list_user_presets");
+export type PresetIssueKind = "broken" | "unsafe" | "info";
+
+export interface PresetIssue {
+  kind: PresetIssueKind;
+  detail: string;
+}
+
+export interface PresetRow {
+  id: string;
+  issues: PresetIssue[];
+}
+
+export const listUserPresets = (): Promise<PresetRow[]> => invoke("list_user_presets");
 export const previewPreset = (): Promise<PresetPreview> => invoke("preview_preset");
 export const importPreset = (): Promise<string> => invoke("import_preset");
 export const exportPreset = (id: string): Promise<void> =>
   invoke("export_preset", { id });
+export const deletePreset = (id: string): Promise<void> =>
+  invoke("delete_preset", { id });
 
 export async function onUpdateProgress(
   handler: (p: { downloaded: number; total: number | null }) => void,

@@ -46,7 +46,7 @@ $env:DSH_HOME="<诊断页 dshHome>"; node "<安装目录>\runtime\harness\node_m
 
 插件装入 `<dshHome>/profiles/web/`（用户数据目录，不写安装目录），装完在应用里「重新启动 Harness」生效。
 
-**预设**（`.dshpreset`）：把一组插件行打包成可分享的智能体配置。设置页提供安全导入/导出——路径/符号链接/配额/密钥扫描 → 两阶段确认 → 原子安装到 `<dshHome>/.agent-presets/`，Harness 设置页立即可见。
+**预设**（`.dshpreset`）：把一组插件行打包成可分享的智能体配置。设置页提供安全导入/导出/删除——路径/符号链接/配额/密钥扫描 → 两阶段确认 → 原子安装到 `<dshHome>/.agent-presets/`，Harness 设置页立即可见。设置页还逐次复核预设根健康：损坏（`agent.cordis.yml` 缺失/不可读，上游会拒绝挂载）、不安全（符号链接等上游跳过但占用 id 的条目）、缺元数据（`preset.yml`）即时可见并可删除。
 
 > ⚠️ **信任模型**：插件与预设运行在 Harness 进程内，**与 Agent 同权限**。桌面校验拦截恶意构造的压缩包，拦不住内容有害的可信包——只安装可信来源。详见 [SECURITY.md](SECURITY.md)。
 
@@ -54,7 +54,7 @@ $env:DSH_HOME="<诊断页 dshHome>"; node "<安装目录>\runtime\harness\node_m
 
 ```
 Tauri 2 壳
- ├─ bootstrap 窗口：本地 Svelte UI · 有限桌面 IPC（19 命令，ACL 授权）
+ ├─ bootstrap 窗口：本地 Svelte UI · 有限桌面 IPC（20 命令，ACL 授权）
  └─ harness 窗口：http://127.0.0.1:<随机端口> · 原版 Harness Web UI · 零 IPC
         │ NDJSON (stdin/stdout)
 dsh-sidecar（Rust，无重依赖）

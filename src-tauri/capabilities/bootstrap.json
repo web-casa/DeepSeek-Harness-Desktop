@@ -24,6 +24,7 @@
     "allow-preview-preset",
     "allow-import-preset",
     "allow-export-preset",
+    "allow-delete-preset",
     "allow-list-plugins",
     "allow-install-plugin",
     "allow-uninstall-plugin",

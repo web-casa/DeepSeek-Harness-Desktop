@@ -455,7 +455,7 @@ pub struct PendingPreset(
 );
 
 #[tauri::command]
-pub fn list_user_presets(runtime: State<'_, Runtime>) -> Vec<String> {
+pub fn list_user_presets(runtime: State<'_, Runtime>) -> Value {
     let dsh_home = runtime
         .state
         .lock()
@@ -463,24 +463,35 @@ pub fn list_user_presets(runtime: State<'_, Runtime>) -> Vec<String> {
         .dsh_home
         .clone()
         .unwrap_or_default();
-    let root = crate::preset::user_preset_root(std::path::Path::new(&dsh_home));
-    let mut ids = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&root) {
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            let is_dir = entry
-                .file_type()
-                .map(|t| t.is_dir() && !t.is_symlink())
-                .unwrap_or(false);
-            if crate::preset::is_valid_preset_id(&name) && is_dir {
-                ids.push(name);
-            }
-        }
-    }
-    ids.sort();
-    ids
+    let rows = crate::preset::validate_user_presets(std::path::Path::new(&dsh_home));
+    serde_json::json!(rows
+        .into_iter()
+        .map(|row| serde_json::json!({
+            "id": row.id,
+            "issues": row
+                .issues
+                .into_iter()
+                .map(|(kind, detail)| serde_json::json!({
+                    "kind": kind.as_str(),
+                    "detail": detail,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .collect::<Vec<_>>())
+}
+
+/// Delete one user preset (see preset::delete_preset for the symlink/id
+/// refusal semantics).
+#[tauri::command]
+pub fn delete_preset(runtime: State<'_, Runtime>, id: String) -> Result<(), String> {
+    let dsh_home = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dsh_home
+        .clone()
+        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+    crate::preset::delete_preset(&id, std::path::Path::new(&dsh_home))
 }
 
 /// Pick an archive, validate it, and hold the result for confirmation.
