@@ -35,9 +35,20 @@ if (bundleType !== "nsis" && bundleType !== "dmg") {
 
 const config = JSON.parse(
   readFileSync(join(repoRoot, "src-tauri", "tauri.conf.json"), "utf8"),
-) as { productName?: string };
+) as {
+  productName?: string;
+  plugins?: { "deep-link"?: { desktop?: { schemes?: string[] } } };
+};
 const productName = config.productName ?? "DeepSeek Harness Desktop";
 const bundleDir = join(repoRoot, "target", "release", "bundle", bundleType);
+
+// Both installers are generated from the same config: keep the market
+// contract (dsharness://) tripwired here, and assert the DMG artifact below.
+const deepLinkSchemes = config.plugins?.["deep-link"]?.desktop?.schemes ?? [];
+if (!deepLinkSchemes.includes("dsharness")) {
+  fail(`tauri.conf.json must register the dsharness deep-link scheme, got: ${deepLinkSchemes.join(", ") || "none"}`);
+}
+ok("tauri.conf.json registers the dsharness deep-link scheme");
 
 function findArtifact(): string {
   if (!existsSync(bundleDir)) {
@@ -344,6 +355,19 @@ function runNsisChecks(): void {
   }
 }
 
+function assertDmgDeepLinkScheme(appRoot: string): void {
+  const plist = join(appRoot, "Contents", "Info.plist");
+  const res = spawnSync("plutil", ["-p", plist], { encoding: "utf8" });
+  if (res.status !== 0) {
+    throw new Error(`plutil failed for Info.plist: ${res.stderr || res.error?.message}`);
+  }
+  const out = res.stdout ?? "";
+  if (!out.includes("CFBundleURLSchemes") || !out.includes('"dsharness"')) {
+    throw new Error(`Info.plist does not register the dsharness URL scheme:\n${out.trim()}`);
+  }
+  ok("Info.plist registers the dsharness URL scheme");
+}
+
 function runDmgChecks(): void {
   const artifact = findArtifact();
   // Attach is covered by the same try/finally as everything after it: any
@@ -407,6 +431,8 @@ function runDmgChecks(): void {
       "Mach-O",
       "main binary",
     );
+
+    assertDmgDeepLinkScheme(appRoot);
 
     checkBundledManifest(
       readFileSync(

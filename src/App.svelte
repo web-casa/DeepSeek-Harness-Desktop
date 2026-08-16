@@ -22,10 +22,13 @@
     installPlugin,
     uninstallPlugin,
     cancelPluginOp,
+    getPendingPluginInstall,
+    dismissPendingPluginInstall,
     onEvent,
     onUpdateProgress,
     onPluginLog,
     onPluginDone,
+    onPluginInstallRequest,
     type Status,
     type StatusPayload,
     type PresetPreview,
@@ -34,6 +37,7 @@
     type UpdateInfo,
     type Versions,
     type PluginEntry,
+    type PluginInstallRequest,
   } from "./lib/api";
 
   let status = $state<Status>("idle");
@@ -69,6 +73,7 @@
   let pluginLogs = $state<string[]>([]);
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
+  let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -329,6 +334,23 @@
     }
   }
 
+  async function dismissPluginInstallRequest() {
+    pluginInstallRequest = null;
+    try {
+      await dismissPendingPluginInstall();
+    } catch {
+      /* the slot is best-effort; the UI state is authoritative */
+    }
+  }
+
+  function confirmPluginInstallRequest() {
+    const request = pluginInstallRequest;
+    if (!request || pluginBusy) return;
+    pluginInstallRequest = null;
+    void dismissPendingPluginInstall().catch(() => {});
+    startPluginOp(request.name, "install");
+  }
+
   // Initial data load (async onMount is fine here — no cleanup needed).
   onMount(async () => {
     try {
@@ -426,6 +448,38 @@
       if (cancelled) fn();
       else unlistenFn = fn;
     });
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
+  });
+
+  // Deep-link requests: warm links arrive as events; the pending Rust slot
+  // is drained only after the listener is armed so a URL delivered during
+  // webview startup can never fall into the gap.
+  $effect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    void (async () => {
+      const fn = await onPluginInstallRequest((request) => {
+        pluginInstallRequest = request;
+      });
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlistenFn = fn;
+      // Drain any cold-start request only AFTER the live listener is armed:
+      // a URL delivered in the gap stays in the Rust slot and is picked up
+      // here instead of being lost.
+      try {
+        const pending = await getPendingPluginInstall();
+        if (!cancelled && pending) pluginInstallRequest = pending;
+      } catch {
+        /* non-fatal */
+      }
+    })();
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -722,6 +776,36 @@
     </div>
   </footer>
 </div>
+
+{#if pluginInstallRequest}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
+      <div class="modal-title">安装 Cordis 插件？</div>
+      <div class="modal-name">{pluginInstallRequest.name}</div>
+      <div class="modal-meta">
+        来源：<button
+          class="inline-link"
+          title={pluginInstallRequest!.source}
+          onclick={() => openSite(pluginInstallRequest!.source)}
+        >
+          {pluginInstallRequest.source}
+        </button>
+      </div>
+      <div class="modal-warn">
+        插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将立即开始安装，完成后需重新启动 Harness 生效。
+      </div>
+      {#if pluginBusy}
+        <div class="notice-box">当前已有插件操作正在进行，请等待完成后再确认安装。</div>
+      {/if}
+      <div class="modal-actions">
+        <button class="primary" onclick={confirmPluginInstallRequest} disabled={pluginBusy}>
+          {pluginBusy ? "已有操作进行中…" : "确认安装"}
+        </button>
+        <button class="ghost" onclick={dismissPluginInstallRequest}>取消</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if toast}
   <div class="toast">{toast}</div>

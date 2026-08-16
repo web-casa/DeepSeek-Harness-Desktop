@@ -119,6 +119,25 @@ export const uninstallPlugin = (name: string): Promise<void> =>
   invoke("uninstall_plugin", { name });
 export const cancelPluginOp = (): Promise<void> => invoke("cancel_plugin_op");
 
+export interface PluginInstallRequest {
+  name: string;
+  source: string;
+}
+
+export const getPendingPluginInstall = (): Promise<PluginInstallRequest | null> =>
+  invoke("get_pending_plugin_install");
+export const dismissPendingPluginInstall = (): Promise<void> =>
+  invoke("dismiss_pending_plugin_install");
+
+export async function onPluginInstallRequest(
+  handler: (request: PluginInstallRequest) => void,
+): Promise<() => void> {
+  const unlisten = await listen<PluginInstallRequest>("plugin-install-request", (event) => {
+    handler(event.payload);
+  });
+  return unlisten;
+}
+
 export async function onPluginLog(
   handler: (lines: PluginLogLine[]) => void,
 ): Promise<() => void> {

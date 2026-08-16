@@ -932,3 +932,23 @@ pub fn cancel_plugin_op(plugins: State<'_, Arc<crate::plugins::PluginRunner>>) {
         });
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deep-link confirmation hand-off: Rust parses and validates the URL before
+// the UI ever sees it. `get_pending_plugin_install` drains the cold-start
+// request after the webview mounts; `dismiss_pending_plugin_install` clears
+// it when the user cancels (warm events leave the same slot populated, so
+// cancellation must not leak into the next mount).
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn get_pending_plugin_install(
+    pending: State<'_, crate::deep_link::PendingPluginInstall>,
+) -> Option<crate::deep_link::PluginInstallRequest> {
+    pending.take()
+}
+
+#[tauri::command]
+pub fn dismiss_pending_plugin_install(pending: State<'_, crate::deep_link::PendingPluginInstall>) {
+    pending.clear();
+}

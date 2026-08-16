@@ -28,6 +28,8 @@
     "allow-list-plugins",
     "allow-install-plugin",
     "allow-uninstall-plugin",
-    "allow-cancel-plugin-op"
+    "allow-cancel-plugin-op",
+    "allow-get-pending-plugin-install",
+    "allow-dismiss-pending-plugin-install"
   ]
 }

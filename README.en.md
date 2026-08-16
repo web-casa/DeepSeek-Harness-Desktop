@@ -9,7 +9,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Version | v0.2.4 · Windows x64 NSIS / macOS arm64 DMG · unsigned preview · [中文](README.md) |
+| Version | v0.2.5 · Windows x64 NSIS / macOS arm64 DMG · unsigned preview · [中文](README.md) |
 
 > ⚠️ **macOS users**: the Apple developer certificate is still being
 > applied for, so the app is unsigned. If Gatekeeper blocks the first
@@ -44,8 +44,14 @@ The Harness's skills, tools, model routes, MCP integrations and presets are
 npm package name and installs/uninstalls it — the desktop layer drives the
 official `dsh plugin --profile web add/remove`, with both the pinned CLI and
 pnpm bundled (**no system pnpm needed**), live install logs, and cancel
-(cleaning the whole node → dsh → pnpm process tree). Command-line equivalent
-(for power users):
+(cleaning the whole node → dsh → pnpm process tree).
+
+On a cordis.run plugin page, "Install in desktop app" opens
+`dsharness://plugin/install?v=1&name=<package>&source=<plugin-page>`. The
+desktop shell validates the URL strictly in Rust, asks for confirmation, and
+only then starts the install. Older desktop builds and market pages without
+the deep-link button can still use copy-paste package names. Command-line
+equivalent (for power users):
 
 ```bash
 # macOS
@@ -79,7 +85,7 @@ may fail to start.
 
 ```
 Tauri 2 shell
- ├─ bootstrap window: local Svelte UI · limited desktop IPC (20 commands, ACL-gated)
+ ├─ bootstrap window: local Svelte UI · limited desktop IPC (22 commands, ACL-gated)
  └─ harness window: http://127.0.0.1:<random port> · original Harness Web UI · zero IPC
         │ NDJSON (stdin/stdout)
 dsh-sidecar (Rust, no heavy dependencies)
@@ -138,9 +144,9 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   draft release + `latest.json`).
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Status: v0.2.4 releasing (Windows updater + preset import/export/health/
-  delete + plugin install/uninstall + website/marketplace entry points; the
-  v0.2.3 draft is obsolete and will not be published).
+- Status: v0.2.5 in development (cordis.run deep-link install confirmation;
+  v0.2.4 is the current release, and the v0.2.3 draft is obsolete and will
+  not be published).
 - Known limits: unsigned (manual SmartScreen/Gatekeeper approval); macOS
   updater pending signing; Linux is dev-only.
 - License: MIT; the bundled Harness and every dependency license ship in

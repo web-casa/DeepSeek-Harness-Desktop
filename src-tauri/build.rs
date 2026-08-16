@@ -24,6 +24,8 @@ fn main() {
         "install_plugin",
         "uninstall_plugin",
         "cancel_plugin_op",
+        "get_pending_plugin_install",
+        "dismiss_pending_plugin_install",
     ]);
     let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));
     if let Err(e) = result {

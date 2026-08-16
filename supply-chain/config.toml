@@ -173,6 +173,16 @@ criteria = "safe-to-deploy"
 version = "2.5.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.const-random]]
+version = "0.1.18"
+criteria = "safe-to-deploy"
+suggest = false
+
+[[exemptions.const-random-macro]]
+version = "0.1.16"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.cookie]]
 version = "0.18.2"
 criteria = "safe-to-deploy"
@@ -200,6 +210,11 @@ criteria = "safe-to-deploy"
 [[exemptions.crossbeam-utils]]
 version = "0.8.22"
 criteria = "safe-to-deploy"
+
+[[exemptions.crunchy]]
+version = "0.2.4"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.crypto-common]]
 version = "0.1.7"
@@ -276,6 +291,11 @@ criteria = "safe-to-deploy"
 [[exemptions.dlopen2_derive]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.dlv-list]]
+version = "0.5.2"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.dom_query]]
 version = "0.27.0"
@@ -489,6 +509,11 @@ criteria = "safe-to-deploy"
 [[exemptions.gtk3-macros]]
 version = "0.18.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.hashbrown]]
+version = "0.14.5"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.hashbrown]]
 version = "0.17.1"
@@ -831,6 +856,11 @@ version = "0.2.1"
 criteria = "safe-to-deploy"
 notes = "Update-delivery chain pulled in by tauri-plugin-updater 2.10.1 (pinned): rustls TLS stack + platform cert stores, minisign signature verification, tar extraction. Well-known ecosystem crates; the update payload authenticity is enforced by the embedded minisign pubkey at runtime."
 
+[[exemptions.ordered-multimap]]
+version = "0.7.3"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.ordered-stream]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
@@ -1001,6 +1031,11 @@ notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (
 version = "0.17.14"
 criteria = "safe-to-deploy"
 notes = "Update-delivery chain pulled in by tauri-plugin-updater 2.10.1 (pinned): rustls TLS stack + platform cert stores, minisign signature verification, tar extraction. Well-known ecosystem crates; the update payload authenticity is enforced by the embedded minisign pubkey at runtime."
+
+[[exemptions.rust-ini]]
+version = "0.21.3"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.rustc-hash]]
 version = "2.1.3"
@@ -1275,6 +1310,11 @@ criteria = "safe-to-deploy"
 version = "2.6.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.tauri-plugin-deep-link]]
+version = "2.4.9"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.tauri-plugin-dialog]]
 version = "2.7.2"
 criteria = "safe-to-deploy"
@@ -1354,6 +1394,11 @@ criteria = "safe-to-deploy"
 [[exemptions.time-macros]]
 version = "0.2.32"
 criteria = "safe-to-deploy"
+
+[[exemptions.tiny-keccak]]
+version = "2.0.2"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.tinystr]]
 version = "0.8.4"
@@ -1625,6 +1670,11 @@ criteria = "safe-to-deploy"
 [[exemptions.windows-numerics]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.windows-registry]]
+version = "0.5.3"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.windows-result]]
 version = "0.3.4"

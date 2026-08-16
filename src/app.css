@@ -463,6 +463,72 @@ footer {
   padding: 8px 12px;
 }
 
+/* ---- deep-link confirmation modal ---- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 14, 0.66);
+  display: grid;
+  place-items: center;
+  z-index: 20;
+  padding: 20px;
+}
+
+.modal {
+  width: min(420px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.modal-name {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  user-select: text;
+  cursor: text;
+  word-break: break-all;
+}
+
+.modal-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.5;
+  user-select: text;
+  word-break: break-all;
+}
+
+.modal-warn {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #e3c077;
+  background: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.3);
+  border-radius: 8px;
+  padding: 9px 11px;
+  user-select: text;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* ---- toast ---- */
 .toast {
   position: fixed;

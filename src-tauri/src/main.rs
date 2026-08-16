@@ -5,6 +5,7 @@
 use tauri::Manager;
 
 mod commands;
+mod deep_link;
 mod harness;
 mod paths;
 mod plugins;
@@ -64,6 +65,7 @@ fn main() {
                 }
             }
         }))
+        .plugin(tauri_plugin_deep_link::init())
         // Persist window size/position but NOT visibility: after hide→quit→
         // relaunch the bootstrap window must always come back.
         .plugin(
@@ -84,6 +86,11 @@ fn main() {
             // an unmanaged State panics at the first command invocation.
             app.manage(commands::PendingPreset(std::sync::Mutex::new(None)));
             app.manage(std::sync::Arc::new(plugins::PluginRunner::new()));
+            // Deep-link parsing/dispatch. Manage the pending-request slot
+            // BEFORE init drains get_current(): a cold start URL can arrive
+            // before the webview subscribed to plugin-install-request.
+            app.manage(deep_link::PendingPluginInstall::default());
+            deep_link::init(app.handle());
             Ok(())
         })
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -109,7 +116,9 @@ fn main() {
             commands::list_plugins,
             commands::install_plugin,
             commands::uninstall_plugin,
-            commands::cancel_plugin_op
+            commands::cancel_plugin_op,
+            commands::get_pending_plugin_install,
+            commands::dismiss_pending_plugin_install
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

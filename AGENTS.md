@@ -13,6 +13,8 @@ Tauri 管窗口/托盘，sidecar 管 Harness 进程树，Harness Web UI 原样�
 - harness 窗口 capability 为空集；远程 webview **零 IPC 面**，且导航只允许
   就绪时捕获的 origin（`same_origin`，见 `harness/mod.rs`）。
 - 桌面命令经 app ACL（`src-tauri/build.rs` AppManifest）只授权 bootstrap。
+- 外部 deep link（`dsharness://plugin/install`）只产生「待确认安装请求」，
+  绝不静默安装；协议/包名/来源在 Rust 侧全量重校验后才可进入 UI。
 - `DSH_HOME` 0700、拒绝符号链接；`withGlobalTauri: false` + CSP。
 - 进程树保证：unix 进程组 + sigaction；Windows Job Object + 隐藏控制台
   CTRL_C 优雅关闭（`platform.rs`）。任何改动不得弱化。
@@ -104,6 +106,8 @@ Dependabot 对 harness 的 ignore 不作用于 security updates：若收到
   sidecar 生命周期、`publish_snapshot` 统一发布通道、`request_restart`
 - `src-tauri/src/tray.rs` — 托盘（`tray_available` 两级策略）
 - `src-tauri/src/commands.rs` — ACL 化 IPC 命令
+- `src-tauri/src/deep_link.rs` — `dsharness://plugin/install` 协议解析、
+  待确认请求槽、事件分发（冷/热启动双路径）
 - `scripts/lib/materialize.ts` — 物化器（硬链接 + 根约束）
 - `scripts/verify-bundle.ts` / `checksums.ts` — 安装包内容与哈希断言
 
@@ -127,6 +131,7 @@ pnpm release:preflight
 1. 新状态变更是否经过 `publish_snapshot`（托盘/UI 不能陈旧）？
 2. 新进程操作是否保持树清理保证（EOF/信号/Job Object 三路径）？
 3. 新 IPC/命令是否在 ACL + capability 中显式授权？
-4. 版本字段是否全部同步？
-5. 供应链：新依赖（Rust/npm）是否过 deny/vet/白名单？
-6. 安装包内容断言是否需要更新（新增必需文件/禁止链接范围）？
+4. 新 deep-link 变化是否同步 `deep_link.rs` 协议版本、市场侧契约与测试？
+5. 版本字段是否全部同步？
+6. 供应链：新依赖（Rust/npm）是否过 deny/vet/白名单？
+7. 安装包内容断言是否需要更新（新增必需文件/禁止链接范围）？

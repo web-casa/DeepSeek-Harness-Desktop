@@ -8,7 +8,7 @@
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| 版本 | v0.2.4 · Windows x64 NSIS / macOS arm64 DMG · 未签名预览版 · [English](README.en.md) |
+| 版本 | v0.2.5 · Windows x64 NSIS / macOS arm64 DMG · 未签名预览版 · [English](README.en.md) |
 
 > ⚠️ **macOS 用户**：Apple 开发者证书仍在申请中，应用尚未签名。首次打开若被
 > Gatekeeper 拦截，请执行：
@@ -35,7 +35,9 @@ Harness 的技能、工具、模型路由、MCP、预设——**全部是 Cordis
 
 **发现**：设置页「资源」一键打开插件市场 [cordis.run](https://cordis.run)。
 
-**安装**：设置页「插件（用户安装）」输入 npm 包名即装即卸——桌面层调用官方 `dsh plugin --profile web add/remove`，pinned CLI 与 pnpm 均随包携带（**无需系统 pnpm**），带实时安装日志与取消（整棵 node → dsh → pnpm 进程树一并清理）。命令行等价路径（高级用法）：
+**安装**：设置页「插件（用户安装）」输入 npm 包名即装即卸——桌面层调用官方 `dsh plugin --profile web add/remove`，pinned CLI 与 pnpm 均随包携带（**无需系统 pnpm**），带实时安装日志与取消（整棵 node → dsh → pnpm 进程树一并清理）。
+
+从 cordis.run 插件详情页点「安装到桌面版」会用 `dsharness://plugin/install?v=1&name=<包名>&source=<插件页>` 唤起桌面版；桌面版在 Rust 侧严格校验协议后弹出确认框，用户确认后才开始安装（旧版本桌面版或不支持的市场页仍可复制包名粘贴安装）。命令行等价路径（高级用法）：
 
 ```bash
 # macOS
@@ -54,7 +56,7 @@ $env:DSH_HOME="<诊断页 dshHome>"; node "<安装目录>\runtime\harness\node_m
 
 ```
 Tauri 2 壳
- ├─ bootstrap 窗口：本地 Svelte UI · 有限桌面 IPC（20 命令，ACL 授权）
+ ├─ bootstrap 窗口：本地 Svelte UI · 有限桌面 IPC（22 命令，ACL 授权）
  └─ harness 窗口：http://127.0.0.1:<随机端口> · 原版 Harness Web UI · 零 IPC
         │ NDJSON (stdin/stdout)
 dsh-sidecar（Rust，无重依赖）
@@ -107,6 +109,6 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 
 - CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发完整发布（质量门 → soak → 打包 → 内容/签名断言 → draft release + `latest.json`）。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
-- 当前状态：v0.2.4 发布中（Windows updater + 预设导入/导出/健康/删除 + 插件安装/卸载 + 官网/插件市场入口；v0.2.3 draft 作废不发布）。
+- 当前状态：v0.2.5 开发中（新增 cordis.run deep-link 一键安装确认；v0.2.4 为当前发布，v0.2.3 draft 作废不发布）。
 - 已知边界：未签名（SmartScreen/Gatekeeper 手动放行）；macOS 更新器待签名；Linux 仅开发用。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。
