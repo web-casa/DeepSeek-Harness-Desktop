@@ -254,17 +254,22 @@
   }
 
   async function confirmSideloadInstall() {
-    if (!sideloadPath || pluginBusy || sideloadBusy) return;
-    sideloadBusy = true;
+    if (!sideloadPath || pluginBusy) return;
     const path = sideloadPath;
+    sideloadPath = null;
+    pluginBusy = true;
+    pluginError = null;
+    pluginLogs = [];
+    pluginLogsOpen = true;
+    showToast(`正在离线安装 ${path}…`);
     try {
       await sideloadPlugin(path);
-      sideloadPath = null;
-      showToast("离线包已开始安装");
     } catch (e) {
-      showToast(`离线安装失败：${e}`);
+      pluginBusy = false;
+      pluginError = `离线安装失败：${e}`;
+      pluginLogsOpen = true;
+      void refreshPlugins();
     }
-    sideloadBusy = false;
   }
 
   async function doRemotePresetDownload() {

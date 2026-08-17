@@ -13,6 +13,8 @@ const DEFAULT_BASE_URL: &str = "https://cordis.run/api/v1";
 const SEARCH_TTL: Duration = Duration::from_secs(60);
 const DETAIL_TTL: Duration = Duration::from_secs(300);
 const IMAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const JSON_MAX_BYTES: usize = 1024 * 1024;
+const CACHE_MAX_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone)]
 struct Cached {
@@ -32,8 +34,17 @@ impl MarketClient {
     pub fn new() -> Result<Self, String> {
         let base_url =
             std::env::var("CORDIS_RUN_API").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base_url = {
+            let parsed = reqwest::Url::parse(&base_url)
+                .map_err(|e| format!("invalid CORDIS_RUN_API URL: {e}"))?;
+            if parsed.scheme() != "https" || parsed.host_str() != Some("cordis.run") {
+                return Err("CORDIS_RUN_API must be https://cordis.run".to_string());
+            }
+            base_url
+        };
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(format!("dsh-desktop/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| format!("market client init failed: {e}"))?;
@@ -66,6 +77,16 @@ impl MarketClient {
         let mut cache = cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.retain(|_, entry| entry.at.elapsed() < Duration::from_secs(24 * 60 * 60));
+        if cache.len() >= CACHE_MAX_ENTRIES {
+            let oldest = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.at)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
         cache.insert(
             key.to_string(),
             Cached {
@@ -116,9 +137,8 @@ impl MarketClient {
             if !response.status().is_success() {
                 return Err(format!("market search failed: HTTP {}", response.status()));
             }
-            let mut json: Value = response
-                .json()
-                .await
+            let body = read_limited_json_body(response).await?;
+            let mut json: Value = serde_json::from_slice(&body)
                 .map_err(|e| format!("market search response was not JSON: {e}"))?;
             filter_items(&mut json, platform);
             MarketClient::cache_put(&self.search_cache, &cache_key, json.clone());
@@ -159,9 +179,8 @@ impl MarketClient {
             if !response.status().is_success() {
                 return Err(format!("market detail failed: HTTP {}", response.status()));
             }
-            let json: Value = response
-                .json()
-                .await
+            let body = read_limited_json_body(response).await?;
+            let json: Value = serde_json::from_slice(&body)
                 .map_err(|e| format!("market detail response was not JSON: {e}"))?;
             MarketClient::cache_put(&self.detail_cache, &cache_key, json.clone());
             Ok(json)
@@ -185,8 +204,8 @@ impl MarketClient {
 
     pub async fn image(&self, url: &str) -> Result<Value, String> {
         let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid image URL: {e}"))?;
-        if parsed.scheme() != "https" {
-            return Err("market images must use https".to_string());
+        if parsed.scheme() != "https" || parsed.host_str() != Some("cordis.run") {
+            return Err("market images must use https and host cordis.run".to_string());
         }
         let response = self
             .http
@@ -203,13 +222,10 @@ impl MarketClient {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_string();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("image read failed: {e}"))?;
-        if bytes.len() > IMAGE_MAX_BYTES {
-            return Err("image exceeds 2 MiB".to_string());
+        if !content_type.starts_with("image/") {
+            return Err("market image response is not an image".to_string());
         }
+        let bytes = read_limited_image_body(response).await?;
         let data_url = format!("data:{content_type};base64,{}", base64_encode(&bytes));
         Ok(serde_json::json!({ "dataUrl": data_url }))
     }
@@ -237,6 +253,34 @@ fn base64_encode(bytes: &[u8]) -> String {
         });
     }
     out
+}
+
+async fn read_limited_json_body(response: reqwest::Response) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("market read failed: {e}"))?;
+        if body.len().saturating_add(chunk.len()) > JSON_MAX_BYTES {
+            return Err("market response exceeds 1 MiB".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn read_limited_image_body(response: reqwest::Response) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("image read failed: {e}"))?;
+        if body.len().saturating_add(chunk.len()) > IMAGE_MAX_BYTES {
+            return Err("image exceeds 2 MiB".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn filter_items(json: &mut Value, platform: &str) {

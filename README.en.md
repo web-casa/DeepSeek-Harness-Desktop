@@ -24,7 +24,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 
 | | |
 |---|---|
-| 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app install/uninstall; safe preset import/export |
+| 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app marketplace search/install; safe preset import/export |
 | 🔄 **Auto-updater** (Windows) | Update packages verified by an embedded minisign pubkey; macOS activates once signed + notarized |
 | 💓 **Hung-process self-healing** | Heartbeat detects an unresponsive Harness and restarts it (backoff + cap) |
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |

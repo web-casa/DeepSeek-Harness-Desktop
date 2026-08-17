@@ -954,10 +954,8 @@ fn plugin_op(
     spec: String,
     op: &'static str,
 ) -> Result<(), String> {
-    if !crate::plugins::is_valid_package_name(&spec)
-        && !crate::plugins::is_valid_sideload_spec(&spec)
-    {
-        return Err(format!("invalid plugin spec: {spec:?}"));
+    if !crate::plugins::is_valid_package_name(&spec) {
+        return Err(format!("invalid package name: {spec:?}"));
     }
     if plugins.busy.swap(true, Ordering::SeqCst) {
         return Err("an operation is already running".to_string());
@@ -989,11 +987,16 @@ pub fn sideload_plugin(
     plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
     path: String,
 ) -> Result<(), String> {
+    let src = std::path::Path::new(&path);
+    let Some(paths) = runtime.paths() else {
+        return Err("runtime paths are not resolved yet".to_string());
+    };
+    let staged = crate::plugins::stage_sideload(&paths.dsh_home, src)?;
     plugin_op(
         app,
         &runtime,
         plugins.inner().clone(),
-        format!("file:{path}"),
+        format!("file:{}", staged.display()),
         "add",
     )
 }
