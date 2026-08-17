@@ -83,6 +83,7 @@
   let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
   let remotePresetRequest = $state<RemotePresetRequest | null>(null);
   let remotePresetPreview = $state<RemotePresetPreview | null>(null);
+  let remotePresetDownloading = $state(false);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -163,25 +164,31 @@
 
   async function doRemotePresetDownload() {
     const request = remotePresetRequest;
-    if (!request || remotePresetPreview) return;
+    if (!request || remotePresetPreview || remotePresetDownloading) return;
+    remotePresetDownloading = true;
     try {
       remotePresetPreview = await confirmRemotePresetDownload(request.requestId);
     } catch (e) {
       showToast(`预设下载失败：${e}`);
-      remotePresetRequest = null;
+      try {
+        const pending = await getPendingRemotePreset();
+        remotePresetRequest = pending;
+      } catch {
+        remotePresetRequest = null;
+      }
     }
+    remotePresetDownloading = false;
   }
 
   async function doRemotePresetDismiss() {
     const request = remotePresetRequest;
+    if (!request || remotePresetDownloading) return;
     remotePresetRequest = null;
     remotePresetPreview = null;
-    if (request) {
-      try {
-        await dismissRemotePreset(request.requestId);
-      } catch {
-        /* best effort */
-      }
+    try {
+      await dismissRemotePreset(request.requestId);
+    } catch {
+      /* best effort */
     }
   }
 
@@ -921,8 +928,10 @@
           将先从 cordis.run 下载 .dshpreset 并做安全检查，确认内容后才会安装。
         </div>
         <div class="modal-actions">
-          <button class="primary" onclick={doRemotePresetDownload}>下载并检查</button>
-          <button class="ghost" onclick={doRemotePresetDismiss}>取消</button>
+          <button class="primary" onclick={doRemotePresetDownload} disabled={remotePresetDownloading}>
+            {remotePresetDownloading ? "下载中…" : "下载并检查"}
+          </button>
+          <button class="ghost" onclick={doRemotePresetDismiss} disabled={remotePresetDownloading}>取消</button>
         </div>
       {/if}
     </div>

@@ -962,16 +962,93 @@ pub fn dismiss_pending_plugin_install(
 // only ever passes a request_id; the validated download URL stays in Rust.
 // ---------------------------------------------------------------------------
 
+fn valid_request_id(request_id: &str) -> bool {
+    request_id.len() == 32
+        && request_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn ensure_remote_tools_dir(dsh_home: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let tools = dsh_home.join(".desktop-tools");
+    match std::fs::symlink_metadata(&tools) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err("refusing to use symlinked .desktop-tools".to_string())
+        }
+        Ok(meta) if !meta.is_dir() => return Err(".desktop-tools is not a directory".to_string()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&tools).map_err(|e| format!("cannot create tools dir: {e}"))?;
+        }
+        Err(e) => return Err(format!("cannot inspect tools dir: {e}")),
+    }
+    let root = tools.join("preset-remote");
+    match std::fs::symlink_metadata(&root) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err("refusing to use symlinked preset-remote".to_string())
+        }
+        Ok(meta) if !meta.is_dir() => return Err("preset-remote is not a directory".to_string()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&root)
+                .map_err(|e| format!("cannot create preset-remote dir: {e}"))?;
+        }
+        Err(e) => return Err(format!("cannot inspect preset-remote dir: {e}")),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot chmod preset-remote dir: {e}"))?;
+    }
+    Ok(root)
+}
+
+fn create_remote_preset_dir(
+    dsh_home: &std::path::Path,
+    request_id: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    if !valid_request_id(request_id) {
+        return Err("invalid request_id".to_string());
+    }
+    let root = ensure_remote_tools_dir(dsh_home)?;
+    let dir = root.join(request_id);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(_) => return Err("request directory already exists".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("cannot inspect request dir: {e}")),
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create request dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot chmod request dir: {e}"))?;
+    }
+    Ok((dir.clone(), dir.join("archive.dshpreset")))
+}
+
+fn remove_remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) {
+    if !valid_request_id(request_id) {
+        return;
+    }
+    let dir = remote_preset_dir(dsh_home, request_id);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&dir);
+        }
+        Ok(meta) if meta.is_dir() => {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        _ => {}
+    }
+}
+
 fn remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) -> std::path::PathBuf {
     dsh_home
         .join(".desktop-tools")
         .join("preset-remote")
         .join(request_id)
-}
-
-fn remove_remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) {
-    let dir = remote_preset_dir(dsh_home, request_id);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Remove stale remote-preset download directories left by a previous run.
@@ -1015,15 +1092,27 @@ pub fn get_pending_remote_preset(
 
 #[tauri::command]
 pub fn dismiss_remote_preset(
+    request_id: String,
     pending: State<'_, crate::deep_link::PendingRemotePreset>,
     arbiter: State<'_, crate::deep_link::InstallArbiter>,
-) {
-    if let Some(archive) = pending.clear() {
+    runtime: State<'_, Runtime>,
+) -> Result<(), String> {
+    let removed = pending.dismiss(&request_id)?;
+    let dsh_home = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dsh_home
+        .clone()
+        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+    if let Some(archive) = removed {
         if let Some(dir) = archive.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+    remove_remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
     arbiter.release();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1031,6 +1120,7 @@ pub async fn confirm_remote_preset_download(
     request_id: String,
     runtime: State<'_, Runtime>,
     pending: State<'_, crate::deep_link::PendingRemotePreset>,
+    arbiter: State<'_, crate::deep_link::InstallArbiter>,
 ) -> Result<Value, String> {
     use futures_util::StreamExt;
 
@@ -1041,54 +1131,111 @@ pub async fn confirm_remote_preset_download(
         .dsh_home
         .clone()
         .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
-    let url = pending.begin_download(&request_id)?;
+
+    // Every failure path below must converge through this closure: clear the
+    // matching Downloading slot and release the global modal arbiter exactly
+    // once. A stale worker must never clear a newer request.
+    let fail = |pending: &crate::deep_link::PendingRemotePreset,
+                arbiter: &crate::deep_link::InstallArbiter,
+                request_id: &str,
+                dir: Option<&std::path::Path>| {
+        if pending.fail_download(request_id) {
+            arbiter.release();
+        }
+        if let Some(dir) = dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    };
+
+    let url = match pending.begin_download(&request_id) {
+        Ok(url) => url,
+        Err(error) => {
+            // The slot may already be gone or owned by another request. If no
+            // matching request is pending, release the arbiter so a stale
+            // frontend retry cannot leave the modal permanently occupied.
+            if pending.snapshot().is_none() {
+                arbiter.release();
+            }
+            return Err(error);
+        }
+    };
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| format!("client init failed: {e}"))?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("download failed: {e}"))?;
+        .map_err(|e| {
+            fail(&pending, &arbiter, &request_id, None);
+            format!("client init failed: {e}")
+        })?;
+    let resp = client.get(&url).send().await.map_err(|e| {
+        fail(&pending, &arbiter, &request_id, None);
+        format!("download failed: {e}")
+    })?;
     if !resp.status().is_success() {
-        pending.clear();
+        fail(&pending, &arbiter, &request_id, None);
         return Err(format!("download failed: HTTP {}", resp.status()));
     }
     let max = crate::deep_link::MAX_REMOTE_PRESET_BYTES as usize;
     if resp.content_length().is_some_and(|n| n > max as u64) {
-        pending.clear();
+        fail(&pending, &arbiter, &request_id, None);
         return Err("preset exceeds 16 MiB".to_string());
     }
 
-    let dir = remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create temp dir: {e}"))?;
-    let archive = dir.join("archive.dshpreset");
+    let (dir, archive) =
+        match create_remote_preset_dir(std::path::Path::new(&dsh_home), &request_id) {
+            Ok(v) => v,
+            Err(e) => {
+                fail(&pending, &arbiter, &request_id, None);
+                return Err(e);
+            }
+        };
 
     let mut body = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            let _ = std::fs::remove_dir_all(&dir);
-            format!("read failed: {e}")
-        })?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                fail(&pending, &arbiter, &request_id, Some(&dir));
+                return Err(format!("read failed: {e}"));
+            }
+        };
         if body.len().saturating_add(chunk.len()) > max {
-            let _ = std::fs::remove_dir_all(&dir);
+            fail(&pending, &arbiter, &request_id, Some(&dir));
             return Err("preset exceeds 16 MiB".to_string());
         }
         body.extend_from_slice(&chunk);
     }
-    std::fs::write(&archive, &body).map_err(|e| {
-        let _ = std::fs::remove_dir_all(&dir);
-        format!("cannot write temp archive: {e}")
-    })?;
 
-    let preview = crate::preset::inspect_archive(&archive).inspect_err(|_| {
-        let _ = std::fs::remove_dir_all(&dir);
-    })?;
-    pending.complete_download(&request_id, archive, preview.clone())?;
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&archive)
+            .map_err(|e| {
+                fail(&pending, &arbiter, &request_id, Some(&dir));
+                format!("cannot write temp archive: {e}")
+            })?;
+        file.write_all(&body).map_err(|e| {
+            fail(&pending, &arbiter, &request_id, Some(&dir));
+            format!("cannot write temp archive: {e}")
+        })?;
+    }
+
+    let preview = match crate::preset::inspect_archive(&archive) {
+        Ok(preview) => preview,
+        Err(error) => {
+            fail(&pending, &arbiter, &request_id, Some(&dir));
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = pending.complete_download(&request_id, archive, preview.clone()) {
+        fail(&pending, &arbiter, &request_id, Some(&dir));
+        return Err(error);
+    }
 
     Ok(serde_json::json!({
         "requestId": request_id,

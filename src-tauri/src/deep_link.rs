@@ -82,6 +82,7 @@ impl PendingPluginInstall {
 pub struct PresetInstallRequest {
     pub url: String,
     pub source: String,
+    pub slug: String,
 }
 
 /// Where a remote preset request is in its lifecycle. `ArchivePreview` is
@@ -104,6 +105,7 @@ pub struct RemotePresetSession {
     pub request_id: String,
     pub url: String,
     pub source: String,
+    pub slug: String,
     pub state: RemotePresetState,
 }
 
@@ -161,11 +163,19 @@ impl PendingRemotePreset {
         arbiter: &InstallArbiter,
         url: String,
         source: String,
+        slug: String,
     ) -> Option<String> {
         if !arbiter.try_acquire(PendingInstallKind::RemotePreset) {
             return None;
         }
-        let request_id = new_request_id();
+        let request_id = match new_request_id() {
+            Ok(id) => id,
+            Err(error) => {
+                eprintln!("[deep-link] cannot generate request_id: {error}");
+                arbiter.release();
+                return None;
+            }
+        };
         let mut slot = self
             .inner
             .lock()
@@ -178,6 +188,7 @@ impl PendingRemotePreset {
             request_id: request_id.clone(),
             url,
             source,
+            slug,
             state: RemotePresetState::AwaitingDownloadConsent,
         });
         Some(request_id)
@@ -232,6 +243,12 @@ impl PendingRemotePreset {
         if !matches!(session.state, RemotePresetState::Downloading) {
             return Err("request is not downloading".to_string());
         }
+        if preview.id != session.slug {
+            return Err(format!(
+                "preset archive id {:?} does not match requested slug {:?}",
+                preview.id, session.slug
+            ));
+        }
         session.state = RemotePresetState::AwaitingInstallConsent { archive, preview };
         Ok(())
     }
@@ -264,25 +281,58 @@ impl PendingRemotePreset {
         }
     }
 
-    /// Clear the slot and release the arbiter. If the session holds a
-    /// downloaded archive, it is returned so the caller can remove it.
-    pub fn clear(&self) -> Option<std::path::PathBuf> {
-        let session = self
+    /// Remove the slot ONLY when it still belongs to `request_id`.
+    /// Returns the archive path if the session had one, or None when it was
+    /// removed while still in a pre-download state. Mismatches are an error
+    /// and do not touch the slot.
+    pub fn dismiss(&self, request_id: &str) -> Result<Option<std::path::PathBuf>, String> {
+        let mut slot = self
             .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        session.and_then(|s| match s.state {
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(session) = slot.as_ref() else {
+            return Err("no pending remote preset request".to_string());
+        };
+        if session.request_id != request_id {
+            return Err("request_id does not match the pending request".to_string());
+        }
+        if matches!(session.state, RemotePresetState::Downloading) {
+            return Err("download is in progress and cannot be dismissed".to_string());
+        }
+        let session = match slot.take() {
+            Some(session) => session,
+            None => return Err("no pending remote preset request".to_string()),
+        };
+        Ok(match session.state {
             RemotePresetState::AwaitingInstallConsent { archive, .. } => Some(archive),
             _ => None,
         })
     }
+
+    /// Clear the slot after a download failure ONLY when it still belongs to
+    /// the same request and is in `Downloading`. Returns true when it cleared.
+    pub fn fail_download(&self, request_id: &str) -> bool {
+        let mut slot = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(session) = slot.as_ref() else {
+            return false;
+        };
+        if session.request_id != request_id
+            || !matches!(session.state, RemotePresetState::Downloading)
+        {
+            return false;
+        }
+        *slot = None;
+        true
+    }
 }
 
-fn new_request_id() -> String {
+fn new_request_id() -> Result<String, String> {
     let mut bytes = [0u8; 16];
-    let _ = getrandom::getrandom(&mut bytes);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("CSPRNG failed: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn query_pairs(url: &Url) -> Vec<(String, String)> {
@@ -522,13 +572,14 @@ pub fn parse_preset_install_url(raw: &str) -> Result<PresetInstallRequest, Strin
 
     let download = Url::parse(&dl_url).map_err(|e| format!("invalid download URL: {e}"))?;
     let source = Url::parse(&source).map_err(|e| format!("invalid source URL: {e}"))?;
-    if preset_slug_of_download(&download) != preset_slug_of_source(&source) {
-        return Err("download URL and source must point to the same preset slug".to_string());
-    }
+    let slug = preset_slug_of_download(&download)
+        .filter(|s| Some(s.as_str()) == preset_slug_of_source(&source).as_deref())
+        .ok_or_else(|| "download URL and source must point to the same preset slug".to_string())?;
 
     Ok(PresetInstallRequest {
         url: download.to_string(),
         source: source.to_string(),
+        slug,
     })
 }
 
@@ -585,7 +636,7 @@ fn handle_preset_url<R: Runtime>(app: &AppHandle<R>, raw: &str) {
                 return;
             };
             let Some(request_id) =
-                pending.try_enqueue(&arbiter, request.url, request.source.clone())
+                pending.try_enqueue(&arbiter, request.url, request.source.clone(), request.slug)
             else {
                 eprintln!("[deep-link] ignored {raw}: another install flow is active");
                 return;
@@ -596,6 +647,7 @@ fn handle_preset_url<R: Runtime>(app: &AppHandle<R>, raw: &str) {
                 serde_json::json!({
                     "requestId": request_id,
                     "source": request.source,
+                    "stage": "awaiting-download",
                 }),
             );
         }
@@ -903,12 +955,14 @@ mod tests {
                 &arbiter,
                 "https://cordis.run/api/presets/code/download".to_string(),
                 "https://cordis.run/presets/code".to_string(),
+                "code".to_string(),
             )
             .expect("first request should enqueue");
         let id2 = pending.try_enqueue(
             &arbiter,
             "https://cordis.run/api/presets/other/download".to_string(),
             "https://cordis.run/presets/other".to_string(),
+            "other".to_string(),
         );
         assert!(id2.is_none(), "second request must not enqueue");
         assert!(pending.snapshot().is_some_and(|s| s.request_id == id1));
