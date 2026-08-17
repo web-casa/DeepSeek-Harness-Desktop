@@ -99,7 +99,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<(tauri::tray::TrayIcon<Wry>, Men
     let settings_item = MenuItem::with_id(app, "settings", "设置与日志", true, None::<&str>)?;
     let restart_item = MenuItem::with_id(app, "restart", "重新启动 Harness", true, None::<&str>)?;
     let status_item = MenuItem::with_id(app, "status", status_label("idle"), false, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出 DSH Desktop", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(

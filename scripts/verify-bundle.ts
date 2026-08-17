@@ -39,7 +39,7 @@ const config = JSON.parse(
   productName?: string;
   plugins?: { "deep-link"?: { desktop?: { schemes?: string[] } } };
 };
-const productName = config.productName ?? "DeepSeek Harness Desktop";
+const productName = config.productName ?? "DSH Desktop";
 const bundleDir = join(repoRoot, "target", "release", "bundle", bundleType);
 
 // Both installers are generated from the same config: keep the market
@@ -118,7 +118,7 @@ Type = Nsis
 Physical Size = 54822827
 
 ----------
-Path = DeepSeek Harness Desktop.exe
+Path = DSH Desktop.exe
 Folder = -
 Size = 18937433
 Packed Size = 11938431
@@ -136,7 +136,7 @@ Size = 2001
 `;
   const entries = parseSltListing(fixture);
   const want = [
-    "DeepSeek Harness Desktop.exe",
+    "DSH Desktop.exe",
     "runtime/node.exe",
     "runtime/harness/node_modules/@deepseek-ai/dsh/lib/bin.js",
   ];

@@ -700,7 +700,10 @@ mod tests {
                 urlencoding("https://cordis.run/presets/code"),
             ),
         ] {
-            assert!(parse_preset_install_url(&raw).is_err(), "should reject {raw}");
+            assert!(
+                parse_preset_install_url(&raw).is_err(),
+                "should reject {raw}"
+            );
         }
     }
 

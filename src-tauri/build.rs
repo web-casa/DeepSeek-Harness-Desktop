@@ -1,4 +1,9 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=STORE_BUILD");
+    println!("cargo:rustc-check-cfg=cfg(store_build)");
+    if std::env::var("STORE_BUILD").as_deref() == Ok("1") {
+        println!("cargo:rustc-cfg=store_build");
+    }
     // App-level ACL: only windows whose capability grants the generated
     // `allow-<command>` permissions may invoke these commands. The remote
     // Harness WebView ("harness" window) has an empty capability set, so it

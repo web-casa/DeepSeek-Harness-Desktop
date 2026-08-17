@@ -14,6 +14,7 @@ export interface Versions {
   harness: string;
   node: string;
   sidecar: string;
+  distribution: "web" | "store";
 }
 
 export interface StatusPayload {

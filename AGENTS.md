@@ -1,4 +1,4 @@
-# AGENTS.md — DeepSeek Harness Desktop
+# AGENTS.md — DSH Desktop
 
 面向 AI 编码代理（codex/claude 等）的项目上下文基线。先读本文，再读 README.md。
 
@@ -28,7 +28,7 @@ Tauri 管窗口/托盘，sidecar 管 Harness 进程树，Harness Web UI 原样�
 
 | 文件 | 内容 |
 |---|---|
-| `runtime/runtime-manifest.json` | desktop/harness/node/sidecar 版本 + nodeSha256（5 平台） |
+| `runtime/runtime-manifest.json` | desktop/harness/node/sidecar 版本 + nodeSha256（6 平台） |
 | `package.json`（根） | desktop 版本 |
 | `src-tauri/Cargo.toml` / `tauri.conf.json` | desktop 版本 + `dsh-sidecar` 依赖的 version pin（与 crates/dsh-sidecar 同步；cargo-deny wildcards=deny 要求非空版本） |
 | `crates/dsh-sidecar/Cargo.toml` | sidecar 版本 |
