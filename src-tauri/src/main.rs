@@ -103,6 +103,8 @@ fn main() {
             // BEFORE init drains get_current(): a cold start URL can arrive
             // before the webview subscribed to plugin-install-request.
             app.manage(deep_link::PendingPluginInstall::default());
+            app.manage(deep_link::PendingRemotePreset::default());
+            app.manage(deep_link::InstallArbiter::default());
             deep_link::init(app.handle());
             Ok(())
         })
@@ -131,7 +133,11 @@ fn main() {
             commands::uninstall_plugin,
             commands::cancel_plugin_op,
             commands::get_pending_plugin_install,
-            commands::dismiss_pending_plugin_install
+            commands::dismiss_pending_plugin_install,
+            commands::get_pending_remote_preset,
+            commands::dismiss_remote_preset,
+            commands::confirm_remote_preset_download,
+            commands::import_remote_preset
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

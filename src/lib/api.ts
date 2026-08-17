@@ -138,6 +138,39 @@ export async function onPluginInstallRequest(
   return unlisten;
 }
 
+export interface RemotePresetRequest {
+  requestId: string;
+  source: string;
+  stage: "awaiting-download" | "downloading" | "awaiting-install";
+}
+
+export interface RemotePresetPreview {
+  requestId: string;
+  id: string;
+  files: [string, number][];
+  warnings: string[];
+}
+
+export const getPendingRemotePreset = (): Promise<RemotePresetRequest | null> =>
+  invoke("get_pending_remote_preset");
+export const dismissRemotePreset = (requestId: string): Promise<void> =>
+  invoke("dismiss_remote_preset", { requestId });
+export const confirmRemotePresetDownload = (
+  requestId: string,
+): Promise<RemotePresetPreview> =>
+  invoke("confirm_remote_preset_download", { requestId });
+export const importRemotePreset = (requestId: string): Promise<string> =>
+  invoke("import_remote_preset", { requestId });
+
+export async function onPresetInstallRequest(
+  handler: (request: RemotePresetRequest) => void,
+): Promise<() => void> {
+  const unlisten = await listen<RemotePresetRequest>("preset-install-request", (event) => {
+    handler(event.payload);
+  });
+  return unlisten;
+}
+
 export async function onPluginLog(
   handler: (lines: PluginLogLine[]) => void,
 ): Promise<() => void> {

@@ -949,6 +949,153 @@ pub fn get_pending_plugin_install(
 }
 
 #[tauri::command]
-pub fn dismiss_pending_plugin_install(pending: State<'_, crate::deep_link::PendingPluginInstall>) {
+pub fn dismiss_pending_plugin_install(
+    pending: State<'_, crate::deep_link::PendingPluginInstall>,
+    arbiter: State<'_, crate::deep_link::InstallArbiter>,
+) {
     pending.clear();
+    arbiter.release();
+}
+
+// ---------------------------------------------------------------------------
+// Remote preset deep-link flow (dsharness://preset/install). The webview
+// only ever passes a request_id; the validated download URL stays in Rust.
+// ---------------------------------------------------------------------------
+
+fn remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) -> std::path::PathBuf {
+    dsh_home
+        .join(".desktop-tools")
+        .join("preset-remote")
+        .join(request_id)
+}
+
+fn remove_remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) {
+    let dir = remote_preset_dir(dsh_home, request_id);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn remote_preset_stage(session: &crate::deep_link::RemotePresetSession) -> &'static str {
+    match session.state {
+        crate::deep_link::RemotePresetState::AwaitingDownloadConsent => "awaiting-download",
+        crate::deep_link::RemotePresetState::Downloading => "downloading",
+        crate::deep_link::RemotePresetState::AwaitingInstallConsent { .. } => "awaiting-install",
+    }
+}
+
+#[tauri::command]
+pub fn get_pending_remote_preset(
+    pending: State<'_, crate::deep_link::PendingRemotePreset>,
+) -> Option<Value> {
+    let session = pending.snapshot()?;
+    Some(serde_json::json!({
+        "requestId": session.request_id,
+        "source": session.source,
+        "stage": remote_preset_stage(&session),
+    }))
+}
+
+#[tauri::command]
+pub fn dismiss_remote_preset(
+    pending: State<'_, crate::deep_link::PendingRemotePreset>,
+    arbiter: State<'_, crate::deep_link::InstallArbiter>,
+) {
+    if let Some(archive) = pending.clear() {
+        if let Some(dir) = archive.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    arbiter.release();
+}
+
+#[tauri::command]
+pub async fn confirm_remote_preset_download(
+    request_id: String,
+    runtime: State<'_, Runtime>,
+    pending: State<'_, crate::deep_link::PendingRemotePreset>,
+) -> Result<Value, String> {
+    use futures_util::StreamExt;
+
+    let dsh_home = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dsh_home
+        .clone()
+        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+    let url = pending.begin_download(&request_id)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("client init failed: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("download failed: {e}"))?;
+    if !resp.status().is_success() {
+        pending.clear();
+        return Err(format!("download failed: HTTP {}", resp.status()));
+    }
+    let max = crate::deep_link::MAX_REMOTE_PRESET_BYTES as usize;
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        pending.clear();
+        return Err("preset exceeds 16 MiB".to_string());
+    }
+
+    let dir = remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create temp dir: {e}"))?;
+    let archive = dir.join("archive.dshpreset");
+
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            let _ = std::fs::remove_dir_all(&dir);
+            format!("read failed: {e}")
+        })?;
+        if body.len().saturating_add(chunk.len()) > max {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err("preset exceeds 16 MiB".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    std::fs::write(&archive, &body).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&dir);
+        format!("cannot write temp archive: {e}")
+    })?;
+
+    let preview = crate::preset::inspect_archive(&archive).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&dir);
+    })?;
+    pending.complete_download(&request_id, archive, preview.clone())?;
+
+    Ok(serde_json::json!({
+        "requestId": request_id,
+        "id": preview.id,
+        "files": preview.files,
+        "warnings": preview.warnings,
+    }))
+}
+
+#[tauri::command]
+pub fn import_remote_preset(
+    request_id: String,
+    runtime: State<'_, Runtime>,
+    pending: State<'_, crate::deep_link::PendingRemotePreset>,
+    arbiter: State<'_, crate::deep_link::InstallArbiter>,
+) -> Result<String, String> {
+    let dsh_home = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dsh_home
+        .clone()
+        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+    let (archive, _preview) = pending.take_archive(&request_id)?;
+    let result = crate::preset::install_archive(&archive, std::path::Path::new(&dsh_home));
+    remove_remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
+    arbiter.release();
+    result
 }
