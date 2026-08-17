@@ -204,7 +204,7 @@ jobs:
 
   windows-deep-link-smoke:
     name: Windows deep-link installer smoke
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && needs.build.result == 'success' }}
     needs: [build]
     runs-on: windows-latest
     timeout-minutes: 15
@@ -277,7 +277,7 @@ jobs:
 
   macos-deep-link-smoke:
     name: macOS deep-link installer smoke
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && needs.build.result == 'success' }}
     needs: [build]
     runs-on: macos-14
     timeout-minutes: 15
