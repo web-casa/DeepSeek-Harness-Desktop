@@ -78,6 +78,14 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
+    # workflow_dispatch is the build+verify-only channel, and tag-gate is
+    # skipped there. A skipped `needs` entry would otherwise skip build too.
+    # Run whenever quality succeeded and tag-gate did not FAIL (skipped is
+    # explicitly allowed for dispatch).
+    if: |
+      always() &&
+      needs.quality.result == 'success' &&
+      needs.tag-gate.result != 'failure'
     needs: [quality, tag-gate]
     strategy:
       fail-fast: false
