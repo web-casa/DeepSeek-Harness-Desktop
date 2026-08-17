@@ -737,7 +737,7 @@ fn run_plugin_spec(
     app: AppHandle,
     paths: crate::paths::RuntimePaths,
     plugins: Arc<crate::plugins::PluginRunner>,
-    spec: String,
+    plugin_spec: String,
     op: &'static str,
 ) {
     use std::io::{BufRead, BufReader};
@@ -756,12 +756,21 @@ fn run_plugin_spec(
             return;
         }
     };
-    let mut path_env = shim_dir.to_string_lossy().to_string();
-    if let Some(old) = std::env::var_os("PATH") {
-        path_env.push(std::path::MAIN_SEPARATOR);
-        path_env.push_str(&old.to_string_lossy());
-    }
-    let spec = SpawnSpec {
+    let path_env = match std::env::join_paths(
+        std::iter::once(shim_dir.as_os_str().to_owned())
+            .chain(std::env::var_os("PATH").map(|old| old.to_owned())),
+    ) {
+        Ok(path_env) => path_env.to_string_lossy().to_string(),
+        Err(e) => {
+            let _ = app.emit(
+                "plugin-done",
+                serde_json::json!({ "exit": 1, "tail": format!("cannot build PATH: {e}") }),
+            );
+            plugins.busy.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    let spawn_spec = SpawnSpec {
         node: paths.node.to_string_lossy().to_string(),
         script: paths
             .harness_dir
@@ -777,7 +786,7 @@ fn run_plugin_spec(
             "--profile".to_string(),
             "web".to_string(),
             op.to_string(),
-            spec,
+            plugin_spec.clone(),
         ],
         cwd: paths.harness_dir.to_string_lossy().to_string(),
         env: vec![
@@ -789,7 +798,7 @@ fn run_plugin_spec(
         ],
     };
     let inherited = std::env::vars_os().collect::<Vec<_>>();
-    let child = match PlatformChild::spawn(&spec, &inherited) {
+    let child = match PlatformChild::spawn(&spawn_spec, &inherited) {
         Ok(c) => c,
         Err(e) => {
             let _ = app.emit(
@@ -941,10 +950,35 @@ fn run_plugin_spec(
     };
     *plugins.child.lock().unwrap_or_else(|p| p.into_inner()) = None;
     plugins.busy.store(false, Ordering::SeqCst);
+    if op == "add" {
+        if let Some(path) = plugin_spec.strip_prefix("file:") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     let _ = app.emit(
         "plugin-done",
         serde_json::json!({ "exit": exit, "tail": tail.join("\n") }),
     );
+}
+
+fn spawn_plugin_spec(
+    app: AppHandle,
+    runtime: &Runtime,
+    plugins: Arc<crate::plugins::PluginRunner>,
+    spec: String,
+    op: &'static str,
+) -> Result<(), String> {
+    if plugins.busy.swap(true, Ordering::SeqCst) {
+        return Err("an operation is already running".to_string());
+    }
+    let Some(paths) = runtime.paths() else {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err("runtime paths are not resolved yet".to_string());
+    };
+    std::thread::spawn(move || {
+        run_plugin_spec(app, paths, plugins, spec, op);
+    });
+    Ok(())
 }
 
 fn plugin_op(
@@ -957,17 +991,7 @@ fn plugin_op(
     if !crate::plugins::is_valid_package_name(&spec) {
         return Err(format!("invalid package name: {spec:?}"));
     }
-    if plugins.busy.swap(true, Ordering::SeqCst) {
-        return Err("an operation is already running".to_string());
-    }
-    let Some(paths) = runtime.paths() else {
-        plugins.busy.store(false, Ordering::SeqCst);
-        return Err("runtime paths are not resolved yet".to_string());
-    };
-    std::thread::spawn(move || {
-        run_plugin_spec(app, paths, plugins, spec, op);
-    });
-    Ok(())
+    spawn_plugin_spec(app, runtime, plugins, spec, op)
 }
 
 #[tauri::command]
@@ -992,13 +1016,16 @@ pub fn sideload_plugin(
         return Err("runtime paths are not resolved yet".to_string());
     };
     let staged = crate::plugins::stage_sideload(&paths.dsh_home, src)?;
-    plugin_op(
-        app,
-        &runtime,
-        plugins.inner().clone(),
-        format!("file:{}", staged.display()),
-        "add",
-    )
+    let spec = format!("file:{}", staged.display());
+    if !crate::plugins::is_shell_safe_spec(&spec) {
+        let _ = std::fs::remove_file(&staged);
+        return Err("staged sideload path is not shell-safe on this platform".to_string());
+    }
+    if let Err(error) = spawn_plugin_spec(app, &runtime, plugins.inner().clone(), spec, "add") {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]

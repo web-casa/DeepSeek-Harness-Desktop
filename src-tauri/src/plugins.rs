@@ -84,6 +84,17 @@ fn validate_sideload_path(path: &Path) -> Result<(), String> {
 /// to pass to the plugin runner: it contains no user-controlled shell
 /// metacharacters and sits in a directory we refuse to create through a
 /// symlink.
+/// Fail-closed shell-safety check for the FINAL spec string that will be
+/// forwarded to upstream `spawnSync("pnpm", { shell: win32 })`. Paths with
+/// spaces or cmd metacharacters are rejected instead of ever being parsed by
+/// the shell.
+pub fn is_shell_safe_spec(spec: &str) -> bool {
+    !spec.is_empty()
+        && spec.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b':' | b'/' | b'\\' | b'.' | b'-' | b'_')
+        })
+}
+
 pub fn stage_sideload(dsh_home: &Path, src: &Path) -> Result<PathBuf, String> {
     validate_sideload_path(src)?;
     let tools = dsh_home.join(".desktop-tools");
@@ -276,6 +287,20 @@ mod tests {
         ] {
             assert!(!is_valid_package_name(bad), "should reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn shell_safe_spec_rejects_metacharacters() {
+        assert!(is_shell_safe_spec("file:C:/Users/me/.dsh/sideload-1.tgz"));
+        assert!(!is_shell_safe_spec(
+            "file:C:/Users/me&you/.dsh/sideload-1.tgz"
+        ));
+        assert!(!is_shell_safe_spec(
+            "file:C:/Users/me you/.dsh/sideload-1.tgz"
+        ));
+        assert!(!is_shell_safe_spec(
+            "file:C:/Users/me|you/.dsh/sideload-1.tgz"
+        ));
     }
 
     #[test]
