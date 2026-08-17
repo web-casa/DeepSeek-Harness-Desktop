@@ -974,6 +974,25 @@ fn remove_remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Remove stale remote-preset download directories left by a previous run.
+/// Only touches the preset-remote subtree; a symlink in its place is removed
+/// as a link, never followed.
+pub fn sweep_remote_preset_temp(runtime: &Runtime) {
+    let Some(paths) = runtime.paths() else {
+        return;
+    };
+    let root = paths.dsh_home.join(".desktop-tools").join("preset-remote");
+    match std::fs::symlink_metadata(&root) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&root);
+        }
+        Ok(meta) if meta.is_dir() => {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        _ => {}
+    }
+}
+
 fn remote_preset_stage(session: &crate::deep_link::RemotePresetSession) -> &'static str {
     match session.state {
         crate::deep_link::RemotePresetState::AwaitingDownloadConsent => "awaiting-download",
