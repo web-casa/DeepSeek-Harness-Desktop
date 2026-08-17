@@ -43,11 +43,19 @@ pub struct PendingPluginInstall {
 }
 
 impl PendingPluginInstall {
+    /// Store the FIRST request until the UI takes it (or dismisses it).
+    /// A second valid link while the confirmation dialog is open must not
+    /// overwrite the slot: the UI already ignores different requests, and
+    /// this keeps the Rust slot consistent with that first-request-wins
+    /// semantics instead of silently remembering a request the UI refused.
     pub fn replace(&self, request: PluginInstallRequest) {
-        *self
+        let mut slot = self
             .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_none() {
+            *slot = Some(request);
+        }
     }
 
     pub fn take(&self) -> Option<PluginInstallRequest> {
@@ -257,6 +265,25 @@ mod tests {
              source=https%3A%2F%2FCORDIS.RUN%2Fen%2Fplugins%2Fis-odd",
         );
         assert_eq!(request.source, "https://cordis.run/en/plugins/is-odd");
+    }
+
+    #[test]
+    fn pending_slot_keeps_first_request_until_taken() {
+        let pending = PendingPluginInstall::default();
+        let first = PluginInstallRequest {
+            name: "is-odd".to_string(),
+            source: "https://cordis.run/plugins/is-odd".to_string(),
+        };
+        let second = PluginInstallRequest {
+            name: "is-even".to_string(),
+            source: "https://cordis.run/plugins/is-even".to_string(),
+        };
+        pending.replace(first.clone());
+        pending.replace(second.clone());
+        assert_eq!(pending.take(), Some(first));
+        assert!(pending.take().is_none());
+        pending.replace(second.clone());
+        assert_eq!(pending.take(), Some(second));
     }
 
     #[test]

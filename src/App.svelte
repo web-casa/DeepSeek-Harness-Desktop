@@ -797,7 +797,7 @@
       <div class="modal-title">安装 Cordis 插件？</div>
       <div class="modal-name">{pluginInstallRequest.name}</div>
       <div class="modal-meta">
-        来源：<button
+        关联页面（未验证与插件包的对应关系）：<button
           class="inline-link"
           title={pluginInstallRequest!.source}
           onclick={() => openSite(pluginInstallRequest!.source)}
@@ -806,7 +806,7 @@
         </button>
       </div>
       <div class="modal-warn">
-        插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将立即开始安装，完成后需重新启动 Harness 生效。
+        该链接可由任意网页或程序构造，只能确认关联页面格式来自 cordis.run，无法证明插件包由该页面提供。插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将立即开始安装，完成后需重新启动 Harness 生效。
       </div>
       {#if pluginBusy}
         <div class="notice-box">当前已有插件操作正在进行，请等待完成后再确认安装。</div>
