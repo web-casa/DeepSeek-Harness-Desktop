@@ -201,6 +201,131 @@ jobs:
             ${{ matrix.updaterGlob }}
           if-no-files-found: error
 
+
+  windows-deep-link-smoke:
+    name: Windows deep-link installer smoke
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
+        with:
+          name: deepseek-harness-desktop-windows-x64
+          path: artifacts
+
+      - name: Silent install NSIS
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem artifacts/*-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw "installer not found" }
+          Write-Host "Installing $($installer.FullName)"
+          $p = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit $($p.ExitCode)" }
+
+      - name: Verify dsharness registry registration
+        shell: pwsh
+        run: |
+          $keys = @(
+            "Registry::HKEY_CURRENT_USER\Software\Classes\dsharness\shell\open\command",
+            "Registry::HKEY_LOCAL_MACHINE\Software\Classes\dsharness\shell\open\command"
+          )
+          $found = $false
+          foreach ($key in $keys) {
+            if (Test-Path $key) {
+              $command = (Get-ItemProperty $key).'(default)'
+              Write-Host "$key -> $command"
+              if ($command -notlike "*deepseek-harness-desktop.exe*") {
+                throw "registered command does not point at the desktop binary: $command"
+              }
+              if ($command -notlike '*"%1"*') {
+                throw "registered command does not forward the URL argument: $command"
+              }
+              $found = $true
+            }
+          }
+          if (-not $found) { throw "dsharness URL protocol is not registered" }
+
+      - name: Cold-start via dsharness URL
+        shell: pwsh
+        run: |
+          Get-Process deepseek-harness-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = 'dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd'
+          $psi.UseShellExecute = $true
+          [System.Diagnostics.Process]::Start($psi) | Out-Null
+          Start-Sleep -Seconds 20
+          $procs = @(Get-Process deepseek-harness-desktop -ErrorAction SilentlyContinue)
+          if ($procs.Count -eq 0) { throw "app was not launched by dsharness:// cold-start" }
+          Write-Host "app running pid=$($procs[0].Id)"
+
+      - name: Warm relaunch via dsharness URL
+        shell: pwsh
+        run: |
+          $before = @(Get-Process deepseek-harness-desktop -ErrorAction SilentlyContinue)
+          if ($before.Count -eq 0) { throw "app is not running before warm link" }
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = 'dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd'
+          $psi.UseShellExecute = $true
+          [System.Diagnostics.Process]::Start($psi) | Out-Null
+          Start-Sleep -Seconds 10
+          $after = @(Get-Process deepseek-harness-desktop -ErrorAction SilentlyContinue)
+          if ($after.Count -eq 0) { throw "app disappeared after warm dsharness:// link" }
+          if ($after[0].Id -ne $before[0].Id) { throw "warm link spawned a second instance; single-instance failed" }
+          Write-Host "single instance retained pid=$($after[0].Id)"
+
+  macos-deep-link-smoke:
+    name: macOS deep-link installer smoke
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build]
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
+        with:
+          name: deepseek-harness-desktop-macos-arm64
+          path: artifacts
+
+      - name: Mount and copy app
+        run: |
+          dmg=$(find artifacts -name '*.dmg' | head -1)
+          [ -n "$dmg" ] || { echo "dmg not found"; exit 1; }
+          mountpoint=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$dmg"
+          cp -R "$mountpoint/DeepSeek Harness Desktop.app" /tmp/DeepSeek-Harness-Desktop-smoke.app
+          hdiutil detach "$mountpoint"
+
+      - name: Verify Info.plist registers dsharness
+        run: |
+          plist=/tmp/DeepSeek-Harness-Desktop-smoke.app/Contents/Info.plist
+          plutil -extract CFBundleURLTypes xml1 -o - "$plist" > /tmp/cfbundle.xml
+          cat /tmp/cfbundle.xml
+          grep -q '<string>dsharness</string>' /tmp/cfbundle.xml
+
+      - name: Register with LaunchServices and cold-open
+        run: |
+          app=/tmp/DeepSeek-Harness-Desktop-smoke.app
+          xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
+          pkill -f "deepseek-harness-desktop" 2>/dev/null || true
+          open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd"
+          sleep 15
+          pgrep -f "DeepSeek-Harness-Desktop-smoke.app/Contents/MacOS/deepseek-harness-desktop" || {
+            echo "app was not launched by dsharness:// cold-start"
+            exit 1
+          }
+
+      - name: Warm open keeps single process
+        run: |
+          before=$(pgrep -f "DeepSeek-Harness-Desktop-smoke.app/Contents/MacOS/deepseek-harness-desktop" | head -1)
+          [ -n "$before" ] || { echo "app not running before warm link"; exit 1; }
+          open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd"
+          sleep 10
+          after=$(pgrep -f "DeepSeek-Harness-Desktop-smoke.app/Contents/MacOS/deepseek-harness-desktop" | wc -l | tr -d ' ')
+          echo "before_pid=$before after_count=$after"
+          [ "$after" -eq 1 ] || { echo "expected one app process after warm link"; exit 1; }
+
   release:
     name: Publish GitHub Release
     # Only real tag pushes publish; workflow_dispatch is the build+verify-only
