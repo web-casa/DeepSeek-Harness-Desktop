@@ -77,6 +77,8 @@ export interface PresetRow {
 export const listUserPresets = (): Promise<PresetRow[]> => invoke("list_user_presets");
 export const previewPreset = (): Promise<PresetPreview> => invoke("preview_preset");
 export const importPreset = (): Promise<string> => invoke("import_preset");
+export const cancelPresetPreview = (): Promise<void> =>
+  invoke("cancel_preset_preview");
 export const exportPreset = (id: string): Promise<void> =>
   invoke("export_preset", { id });
 export const deletePreset = (id: string): Promise<void> =>
@@ -133,6 +135,39 @@ export async function onPluginInstallRequest(
   handler: (request: PluginInstallRequest) => void,
 ): Promise<() => void> {
   const unlisten = await listen<PluginInstallRequest>("plugin-install-request", (event) => {
+    handler(event.payload);
+  });
+  return unlisten;
+}
+
+export interface RemotePresetRequest {
+  requestId: string;
+  source: string;
+  stage: "awaiting-download" | "downloading" | "awaiting-install";
+}
+
+export interface RemotePresetPreview {
+  requestId: string;
+  id: string;
+  files: [string, number][];
+  warnings: string[];
+}
+
+export const getPendingRemotePreset = (): Promise<RemotePresetRequest | null> =>
+  invoke("get_pending_remote_preset");
+export const dismissRemotePreset = (requestId: string): Promise<void> =>
+  invoke("dismiss_remote_preset", { requestId });
+export const confirmRemotePresetDownload = (
+  requestId: string,
+): Promise<RemotePresetPreview> =>
+  invoke("confirm_remote_preset_download", { requestId });
+export const importRemotePreset = (requestId: string): Promise<string> =>
+  invoke("import_remote_preset", { requestId });
+
+export async function onPresetInstallRequest(
+  handler: (request: RemotePresetRequest) => void,
+): Promise<() => void> {
+  const unlisten = await listen<RemotePresetRequest>("preset-install-request", (event) => {
     handler(event.payload);
   });
   return unlisten;

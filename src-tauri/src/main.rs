@@ -94,6 +94,7 @@ fn main() {
             // must reach the tray status line.
             tray::init(&app.handle().clone());
             harness::init(&app.handle().clone());
+            commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
             // The two-phase preset import holds its preview here between
             // preview_preset and import_preset. MUST be managed: extracting
             // an unmanaged State panics at the first command invocation.
@@ -103,6 +104,8 @@ fn main() {
             // BEFORE init drains get_current(): a cold start URL can arrive
             // before the webview subscribed to plugin-install-request.
             app.manage(deep_link::PendingPluginInstall::default());
+            app.manage(deep_link::PendingRemotePreset::default());
+            app.manage(deep_link::InstallArbiter::default());
             deep_link::init(app.handle());
             Ok(())
         })
@@ -123,6 +126,7 @@ fn main() {
             commands::quit_app,
             commands::list_user_presets,
             commands::preview_preset,
+            commands::cancel_preset_preview,
             commands::import_preset,
             commands::export_preset,
             commands::delete_preset,
@@ -131,7 +135,11 @@ fn main() {
             commands::uninstall_plugin,
             commands::cancel_plugin_op,
             commands::get_pending_plugin_install,
-            commands::dismiss_pending_plugin_install
+            commands::dismiss_pending_plugin_install,
+            commands::get_pending_remote_preset,
+            commands::dismiss_remote_preset,
+            commands::confirm_remote_preset_download,
+            commands::import_remote_preset
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {
@@ -157,6 +165,7 @@ fn main() {
             }
         }
         tauri::RunEvent::Exit => {
+            commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
             // Kill a running `dsh plugin` tree first: it is a separate
             // process group / Job Object from the sidecar's Harness tree,
             // and on unix it would be orphaned once the shell exits.

@@ -30,6 +30,11 @@
     "allow-uninstall-plugin",
     "allow-cancel-plugin-op",
     "allow-get-pending-plugin-install",
-    "allow-dismiss-pending-plugin-install"
+    "allow-dismiss-pending-plugin-install",
+    "allow-get-pending-remote-preset",
+    "allow-dismiss-remote-preset",
+    "allow-confirm-remote-preset-download",
+    "allow-import-remote-preset",
+    "allow-cancel-preset-preview"
   ]
 }

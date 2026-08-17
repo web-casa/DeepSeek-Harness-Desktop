@@ -16,6 +16,7 @@
     listUserPresets,
     previewPreset,
     importPreset,
+    cancelPresetPreview,
     exportPreset,
     deletePreset,
     listPlugins,
@@ -29,6 +30,13 @@
     onPluginLog,
     onPluginDone,
     onPluginInstallRequest,
+    getPendingRemotePreset,
+    dismissRemotePreset,
+    confirmRemotePresetDownload,
+    importRemotePreset,
+    onPresetInstallRequest,
+    type RemotePresetRequest,
+    type RemotePresetPreview,
     type Status,
     type StatusPayload,
     type PresetPreview,
@@ -74,6 +82,9 @@
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
   let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
+  let remotePresetRequest = $state<RemotePresetRequest | null>(null);
+  let remotePresetPreview = $state<RemotePresetPreview | null>(null);
+  let remotePresetDownloading = $state(false);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -127,7 +138,74 @@
       }
       return;
     }
+    if (remotePresetRequest || presetPreview) {
+      showToast("已有待处理的预设请求，插件安装请求已忽略");
+      return;
+    }
     pluginInstallRequest = request;
+  }
+
+  function presentRemotePresetRequest(request: RemotePresetRequest) {
+    if (pluginInstallRequest || presetPreview) {
+      showToast("已有待处理的安装请求，预设请求已忽略");
+      void dismissRemotePreset(request.requestId).catch(() => {});
+      return;
+    }
+    if (
+      remotePresetRequest &&
+      remotePresetRequest.requestId !== request.requestId
+    ) {
+      showToast("已有待处理的预设请求，新请求已忽略");
+      void dismissRemotePreset(request.requestId).catch(() => {});
+      return;
+    }
+    remotePresetRequest = request;
+    remotePresetPreview = null;
+  }
+
+  async function doRemotePresetDownload() {
+    const request = remotePresetRequest;
+    if (!request || remotePresetPreview || remotePresetDownloading) return;
+    remotePresetDownloading = true;
+    try {
+      remotePresetPreview = await confirmRemotePresetDownload(request.requestId);
+    } catch (e) {
+      showToast(`预设下载失败：${e}`);
+      try {
+        const pending = await getPendingRemotePreset();
+        remotePresetRequest = pending;
+      } catch {
+        remotePresetRequest = null;
+      }
+    }
+    remotePresetDownloading = false;
+  }
+
+  async function doRemotePresetDismiss() {
+    const request = remotePresetRequest;
+    if (!request || remotePresetDownloading) return;
+    remotePresetRequest = null;
+    remotePresetPreview = null;
+    try {
+      await dismissRemotePreset(request.requestId);
+    } catch {
+      /* best effort */
+    }
+  }
+
+  async function doRemotePresetImport() {
+    const request = remotePresetRequest;
+    const preview = remotePresetPreview;
+    if (!request || !preview || preview.requestId !== request.requestId) return;
+    try {
+      const id = await importRemotePreset(request.requestId);
+      showToast(`预设 ${id} 已导入`);
+      remotePresetRequest = null;
+      remotePresetPreview = null;
+      await refreshPresets();
+    } catch (e) {
+      showToast(`预设导入失败：${e}`);
+    }
   }
 
   async function doRestart() {
@@ -271,6 +349,15 @@
       presetError = `导入失败：${e}`;
     }
     presetBusy = false;
+  }
+
+  async function doCancelPresetPreview() {
+    presetPreview = null;
+    try {
+      await cancelPresetPreview();
+    } catch {
+      /* best effort */
+    }
   }
 
   async function doExportPreset(id: string) {
@@ -500,6 +587,30 @@
     };
   });
 
+  $effect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    void (async () => {
+      const fn = await onPresetInstallRequest(presentRemotePresetRequest);
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlistenFn = fn;
+      try {
+        const pending = await getPendingRemotePreset();
+        if (!cancelled && pending) presentRemotePresetRequest(pending);
+      } catch {
+        /* non-fatal */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
+  });
+
   // Poll logs only while the console is open; clean up via effect return.
   $effect(() => {
     if (!inTauri || !logsOpen) return;
@@ -676,7 +787,7 @@
         {/if}
         <div>预设与 Agent 同权限运行工具和命令——仅导入可信来源。</div>
         <button class="primary" onclick={doImportPreset} disabled={presetBusy}>确认导入</button>
-        <button class="ghost" onclick={() => (presetPreview = null)}>取消</button>
+        <button class="ghost" onclick={doCancelPresetPreview}>取消</button>
       </div>
     {/if}
     {#if presetError}
@@ -790,6 +901,52 @@
     </div>
   </footer>
 </div>
+
+{#if remotePresetRequest}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="预设一键安装确认">
+      <div class="modal-title">安装 Cordis 预设？</div>
+      <div class="modal-meta">
+        关联页面（未验证与预设内容的对应关系）：<button
+          class="inline-link"
+          title={remotePresetRequest!.source}
+          onclick={() => openSite(remotePresetRequest!.source)}
+        >
+          {remotePresetRequest.source}
+        </button>
+      </div>
+      {#if remotePresetPreview && remotePresetPreview.requestId === remotePresetRequest.requestId}
+        <div class="modal-name">{remotePresetPreview.id}</div>
+        <div class="modal-meta">
+          {remotePresetPreview.files.length} 个文件
+          {#if remotePresetPreview.warnings.includes("possible-secrets")}
+            · <span class="warn">⚠ 检测到疑似密钥</span>
+          {/if}
+          {#if remotePresetPreview.warnings.includes("absolute-paths")}
+            · <span class="warn">⚠ 含绝对路径</span>
+          {/if}
+        </div>
+        <div class="modal-warn">
+          预设与 Agent 同权限运行工具和命令——仅导入可信来源。确认后将安装到用户预设目录。
+        </div>
+        <div class="modal-actions">
+          <button class="primary" onclick={doRemotePresetImport}>确认安装</button>
+          <button class="ghost" onclick={doRemotePresetDismiss}>取消</button>
+        </div>
+      {:else}
+        <div class="modal-warn">
+          将先从 cordis.run 下载 .dshpreset 并做安全检查，确认内容后才会安装。
+        </div>
+        <div class="modal-actions">
+          <button class="primary" onclick={doRemotePresetDownload} disabled={remotePresetDownloading}>
+            {remotePresetDownloading ? "下载中…" : "下载并检查"}
+          </button>
+          <button class="ghost" onclick={doRemotePresetDismiss} disabled={remotePresetDownloading}>取消</button>
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
 
 {#if pluginInstallRequest}
   <div class="modal-backdrop">
