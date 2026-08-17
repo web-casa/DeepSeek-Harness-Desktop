@@ -4,10 +4,65 @@
 //! entry (when one exists) instead of dropping an otherwise usable catalog.
 
 use reqwest::header::CONTENT_TYPE;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MarketItem {
+    slug: String,
+    name: String,
+    #[serde(default)]
+    npm: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    platforms: Vec<String>,
+    #[serde(default)]
+    stars: Option<u32>,
+    #[serde(default)]
+    homepage: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MarketDetail {
+    slug: String,
+    name: String,
+    #[serde(default)]
+    npm: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    platforms: Vec<String>,
+    #[serde(default)]
+    stars: Option<u32>,
+    #[serde(default)]
+    homepage: Option<String>,
+    #[serde(default)]
+    screenshots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MarketSearchResponse {
+    #[serde(default)]
+    items: Vec<MarketItem>,
+    #[serde(default)]
+    total: u32,
+    #[serde(default)]
+    page: u32,
+    #[serde(default)]
+    per_page: u32,
+}
 
 const DEFAULT_BASE_URL: &str = "https://cordis.run/api/v1";
 const SEARCH_TTL: Duration = Duration::from_secs(60);
@@ -138,9 +193,13 @@ impl MarketClient {
                 return Err(format!("market search failed: HTTP {}", response.status()));
             }
             let body = read_limited_json_body(response).await?;
-            let mut json: Value = serde_json::from_slice(&body)
+            let mut parsed: MarketSearchResponse = serde_json::from_slice(&body)
                 .map_err(|e| format!("market search response was not JSON: {e}"))?;
-            filter_items(&mut json, platform);
+            parsed
+                .items
+                .retain(|item| item.platforms.iter().any(|p| p == platform));
+            let json = serde_json::to_value(parsed)
+                .map_err(|e| format!("market search response serialization failed: {e}"))?;
             MarketClient::cache_put(&self.search_cache, &cache_key, json.clone());
             Ok(json)
         };
@@ -180,8 +239,10 @@ impl MarketClient {
                 return Err(format!("market detail failed: HTTP {}", response.status()));
             }
             let body = read_limited_json_body(response).await?;
-            let json: Value = serde_json::from_slice(&body)
+            let detail: MarketDetail = serde_json::from_slice(&body)
                 .map_err(|e| format!("market detail response was not JSON: {e}"))?;
+            let json = serde_json::to_value(detail)
+                .map_err(|e| format!("market detail response serialization failed: {e}"))?;
             MarketClient::cache_put(&self.detail_cache, &cache_key, json.clone());
             Ok(json)
         };
@@ -283,17 +344,6 @@ async fn read_limited_image_body(response: reqwest::Response) -> Result<Vec<u8>,
     Ok(body)
 }
 
-fn filter_items(json: &mut Value, platform: &str) {
-    let Some(items) = json.get_mut("items").and_then(Value::as_array_mut) else {
-        return;
-    };
-    items.retain(|item| {
-        item.get("platforms")
-            .and_then(Value::as_array)
-            .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(platform)))
-    });
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -307,19 +357,34 @@ mod tests {
     }
 
     #[test]
-    fn filter_keeps_desktop_items() {
-        let mut json = serde_json::json!({
+    fn parses_and_filters_desktop_items() {
+        let body = br#"{
             "items": [
-                {"slug":"a","platforms":["web","desktop"]},
-                {"slug":"b","platforms":["web"]},
-                {"slug":"c","platforms":["desktop"]}
+                {"slug":"a","name":"A","platforms":["web","desktop"]},
+                {"slug":"b","name":"B","platforms":["web"]},
+                {"slug":"c","name":"C","platforms":["desktop"]}
             ],
-            "total": 3
-        });
-        filter_items(&mut json, "desktop");
-        assert_eq!(json["items"].as_array().unwrap().len(), 2);
-        assert_eq!(json["items"][0]["slug"], "a");
-        assert_eq!(json["items"][1]["slug"], "c");
+            "total": 3,
+            "page": 1,
+            "per_page": 20
+        }"#;
+        let mut parsed: MarketSearchResponse =
+            serde_json::from_slice(body).expect("fixture should parse");
+        parsed
+            .items
+            .retain(|item| item.platforms.iter().any(|p| p == "desktop"));
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.items[0].slug, "a");
+        assert_eq!(parsed.items[1].slug, "c");
+    }
+
+    #[test]
+    fn detail_defaults_screenshots_to_empty() {
+        let detail: MarketDetail =
+            serde_json::from_str(r#"{"slug":"x","name":"X","platforms":["desktop"]}"#)
+                .expect("detail fixture should parse");
+        assert!(detail.screenshots.is_empty());
+        assert_eq!(detail.platforms, vec!["desktop".to_string()]);
     }
 
     #[test]

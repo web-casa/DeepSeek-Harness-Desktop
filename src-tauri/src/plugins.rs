@@ -279,6 +279,27 @@ mod tests {
     }
 
     #[test]
+    fn stage_sideload_uses_safe_generated_name() {
+        let home = std::env::temp_dir().join(format!("dsh-stage-sideload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let src = home.join("bad&name.tgz");
+        std::fs::write(&src, b"fake").unwrap();
+        let staged = stage_sideload(&home, &src).expect("stage sideload");
+        assert_eq!(
+            staged.parent().unwrap(),
+            &home.join(".desktop-tools").join("sideload")
+        );
+        let name = staged.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("sideload-") && name.ends_with(".tgz"));
+        assert!(name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'));
+        assert!(staged.is_file());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn shim_texts_quote_paths_and_forward_args() {
         assert_eq!(
             pnpm_shim_script("/opt/node", "/opt/harness/node_modules/pnpm/bin/pnpm.cjs"),
