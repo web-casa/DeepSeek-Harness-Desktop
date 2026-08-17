@@ -204,7 +204,7 @@ jobs:
 
   windows-deep-link-smoke:
     name: Windows deep-link installer smoke
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && needs.build.result == 'success' }}
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' }}
     needs: [build]
     runs-on: windows-latest
     timeout-minutes: 15
@@ -306,7 +306,7 @@ jobs:
 
   macos-deep-link-smoke:
     name: macOS deep-link installer smoke
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && needs.build.result == 'success' }}
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' }}
     needs: [build]
     runs-on: macos-14
     timeout-minutes: 15
@@ -393,7 +393,7 @@ jobs:
     # soak is a publish gate: a heartbeat regression must surface before
     # release, and the 5-minute soak overlaps the (much longer) platform
     # builds, so waiting on it adds no wall time.
-    needs: [build, soak, tag-gate]
+    needs: [build, soak, tag-gate, windows-deep-link-smoke, macos-deep-link-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
