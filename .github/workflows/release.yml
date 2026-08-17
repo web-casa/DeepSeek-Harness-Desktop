@@ -82,10 +82,10 @@ jobs:
     # skipped there. A skipped `needs` entry would otherwise skip build too.
     # Run whenever quality succeeded and tag-gate did not FAIL (skipped is
     # explicitly allowed for dispatch).
-    if: |
-      always() &&
+    if: >-
+      !cancelled() &&
       needs.quality.result == 'success' &&
-      needs.tag-gate.result != 'failure'
+      (needs.tag-gate.result == 'success' || needs.tag-gate.result == 'skipped')
     needs: [quality, tag-gate]
     strategy:
       fail-fast: false
@@ -257,21 +257,21 @@ jobs:
           [System.Diagnostics.Process]::Start($psi) | Out-Null
           Start-Sleep -Seconds 20
           $procs = @(Get-Process deepseek-harness-desktop -ErrorAction SilentlyContinue)
-          if ($procs.Count -eq 0) { throw "app was not launched by dsharness:// cold-start" }
+          if ($procs.Count -ne 1) { throw "expected exactly one app process after dsharness:// cold-start, got $($procs.Count)" }
           Write-Host "app running pid=$($procs[0].Id)"
 
       - name: Warm relaunch via dsharness URL
         shell: pwsh
         run: |
           $before = @(Get-Process deepseek-harness-desktop -ErrorAction SilentlyContinue)
-          if ($before.Count -eq 0) { throw "app is not running before warm link" }
+          if ($before.Count -ne 1) { throw "expected exactly one app process before warm link, got $($before.Count)" }
           $psi = [System.Diagnostics.ProcessStartInfo]::new()
           $psi.FileName = 'dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd'
           $psi.UseShellExecute = $true
           [System.Diagnostics.Process]::Start($psi) | Out-Null
           Start-Sleep -Seconds 10
           $after = @(Get-Process deepseek-harness-desktop -ErrorAction SilentlyContinue)
-          if ($after.Count -eq 0) { throw "app disappeared after warm dsharness:// link" }
+          if ($after.Count -ne 1) { throw "expected exactly one app process after warm dsharness:// link, got $($after.Count)" }
           if ($after[0].Id -ne $before[0].Id) { throw "warm link spawned a second instance; single-instance failed" }
           Write-Host "single instance retained pid=$($after[0].Id)"
 
@@ -312,12 +312,12 @@ jobs:
           xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
           "$lsregister" -f -R "$app"
           sleep 3
-          "$lsregister" -dump | grep -A4 -B2 dsharness || true
+          "$lsregister" -dump > /tmp/lsregister-dump.txt
+          grep -q 'claimed schemes:.*dsharness' /tmp/lsregister-dump.txt
+          grep -q 'claim id:.*com.yeagoo.dsh-desktop dsharness' /tmp/lsregister-dump.txt
+          cat /tmp/lsregister-dump.txt | grep -A4 -B2 dsharness || true
           pkill -f "deepseek-harness-desktop" 2>/dev/null || true
-          open -a "$app" "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd" || {
-            echo "open -a failed; falling back to bare scheme open"
-            open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd"
-          }
+          open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd"
           sleep 20
           pgrep -f "DeepSeek Harness Desktop.app/Contents/MacOS/deepseek-harness-desktop" || {
             echo "app was not launched by dsharness:// cold-start"
@@ -329,9 +329,7 @@ jobs:
           app="$HOME/Applications/DeepSeek Harness Desktop.app"
           before=$(pgrep -f "DeepSeek Harness Desktop.app/Contents/MacOS/deepseek-harness-desktop" | head -1)
           [ -n "$before" ] || { echo "app not running before warm link"; exit 1; }
-          open -a "$app" "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd" || {
-            open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd"
-          }
+          open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd"
           sleep 10
           after=$(pgrep -f "DeepSeek Harness Desktop.app/Contents/MacOS/deepseek-harness-desktop" | wc -l | tr -d ' ')
           echo "before_pid=$before after_count=$after"
@@ -345,7 +343,7 @@ jobs:
     # soak is a publish gate: a heartbeat regression must surface before
     # release, and the 5-minute soak overlaps the (much longer) platform
     # builds, so waiting on it adds no wall time.
-    needs: [build, soak]
+    needs: [build, soak, tag-gate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
