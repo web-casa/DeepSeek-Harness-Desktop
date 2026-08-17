@@ -103,6 +103,7 @@ fn main() {
             // BEFORE init drains get_current(): a cold start URL can arrive
             // before the webview subscribed to plugin-install-request.
             app.manage(deep_link::PendingPluginInstall::default());
+            app.manage(deep_link::PendingPresetInstall::default());
             deep_link::init(app.handle());
             Ok(())
         })
@@ -123,6 +124,7 @@ fn main() {
             commands::quit_app,
             commands::list_user_presets,
             commands::preview_preset,
+            commands::preview_remote_preset,
             commands::import_preset,
             commands::export_preset,
             commands::delete_preset,
@@ -131,13 +133,16 @@ fn main() {
             commands::uninstall_plugin,
             commands::cancel_plugin_op,
             commands::get_pending_plugin_install,
-            commands::dismiss_pending_plugin_install
+            commands::dismiss_pending_plugin_install,
+            commands::get_pending_preset_install,
+            commands::dismiss_pending_preset_install,
+            commands::cancel_remote_preset
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {
         Ok(app) => app,
         Err(e) => {
-            eprintln!("error while building DeepSeek Harness Desktop: {e}");
+            eprintln!("error while building DSH Desktop: {e}");
             std::process::exit(1);
         }
     };

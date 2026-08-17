@@ -22,6 +22,7 @@
     "opener:allow-open-url",
     "allow-list-user-presets",
     "allow-preview-preset",
+    "allow-preview-remote-preset",
     "allow-import-preset",
     "allow-export-preset",
     "allow-delete-preset",
@@ -30,6 +31,9 @@
     "allow-uninstall-plugin",
     "allow-cancel-plugin-op",
     "allow-get-pending-plugin-install",
-    "allow-dismiss-pending-plugin-install"
+    "allow-dismiss-pending-plugin-install",
+    "allow-get-pending-preset-install",
+    "allow-dismiss-pending-preset-install",
+    "allow-cancel-remote-preset"
   ]
 }

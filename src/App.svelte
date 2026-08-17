@@ -15,6 +15,7 @@
     quitApp,
     listUserPresets,
     previewPreset,
+    previewRemotePreset,
     importPreset,
     exportPreset,
     deletePreset,
@@ -24,11 +25,15 @@
     cancelPluginOp,
     getPendingPluginInstall,
     dismissPendingPluginInstall,
+    getPendingPresetInstall,
+    dismissPendingPresetInstall,
+    cancelRemotePreset,
     onEvent,
     onUpdateProgress,
     onPluginLog,
     onPluginDone,
     onPluginInstallRequest,
+    onPresetInstallRequest,
     type Status,
     type StatusPayload,
     type PresetPreview,
@@ -38,6 +43,7 @@
     type Versions,
     type PluginEntry,
     type PluginInstallRequest,
+    type PresetInstallRequest,
   } from "./lib/api";
 
   let status = $state<Status>("idle");
@@ -74,6 +80,8 @@
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
   let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
+  let presetInstallRequest = $state<PresetInstallRequest | null>(null);
+  let presetRemoteSource = $state<string | null>(null);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -265,6 +273,7 @@
     try {
       const id = await importPreset();
       presetPreview = null;
+      presetRemoteSource = null;
       showToast(`预设 ${id} 已导入（在 Harness 设置页可见）`);
       await refreshPresets();
     } catch (e) {
@@ -365,6 +374,45 @@
     pluginInstallRequest = null;
     void dismissPendingPluginInstall().catch(() => {});
     startPluginOp(request.name, "install");
+  }
+
+  // Preset deep link: unlike plugins (package name is installed directly),
+  // a preset deep link first downloads the .dshpreset and runs the read-only
+  // archive inspection, then reuses the existing preset confirm box. The
+  // request slot only gates concurrent handling; the confirm UI is
+  // `presetPreview` + `presetRemoteSource`.
+  async function handlePresetInstallRequest(request: PresetInstallRequest) {
+    if (presetPreview || presetInstallRequest) {
+      if (
+        presetInstallRequest &&
+        (presetInstallRequest.url !== request.url ||
+          presetInstallRequest.source !== request.source)
+      ) {
+        showToast("已有待确认的安装请求，新请求已忽略");
+      }
+      return;
+    }
+    presetInstallRequest = request;
+    presetBusy = true;
+    presetError = null;
+    try {
+      const preview = await previewRemotePreset(request.url);
+      presetPreview = preview;
+      presetRemoteSource = request.source;
+      void dismissPendingPresetInstall().catch(() => {});
+    } catch (e) {
+      presetError = `读取远程预设失败：${e}`;
+    } finally {
+      presetBusy = false;
+      presetInstallRequest = null;
+    }
+  }
+
+  function dismissPresetInstallRequest() {
+    presetPreview = null;
+    presetRemoteSource = null;
+    void dismissPendingPresetInstall().catch(() => {});
+    void cancelRemotePreset().catch(() => {});
   }
 
   // Initial data load (async onMount is fine here — no cleanup needed).
@@ -500,6 +548,31 @@
     };
   });
 
+  // Preset deep-link requests: same armed-then-drain pattern as plugins.
+  $effect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    void (async () => {
+      const fn = await onPresetInstallRequest(handlePresetInstallRequest);
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlistenFn = fn;
+      try {
+        const pending = await getPendingPresetInstall();
+        if (!cancelled && pending) void handlePresetInstallRequest(pending);
+      } catch {
+        /* non-fatal */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
+  });
+
   // Poll logs only while the console is open; clean up via effect return.
   $effect(() => {
     if (!inTauri || !logsOpen) return;
@@ -532,7 +605,7 @@
       </svg>
     </div>
     <div class="title-wrap">
-      <h1>DeepSeek Harness</h1>
+      <h1>DSH Desktop</h1>
       <span class="subtitle">桌面发行层 · 原版 Harness Web UI · 内置 Node Runtime</span>
     </div>
     <div class="spacer"></div>
@@ -674,9 +747,20 @@
         {#if presetPreview.warnings.includes("absolute-paths")}
           · <span class="warn">⚠ 含绝对路径</span>
         {/if}
+        {#if presetRemoteSource}
+          <div>
+            来源：<button
+              class="inline-link"
+              title={presetRemoteSource}
+              onclick={() => openSite(presetRemoteSource!)}
+            >
+              {presetRemoteSource}
+            </button>
+          </div>
+        {/if}
         <div>预设与 Agent 同权限运行工具和命令——仅导入可信来源。</div>
         <button class="primary" onclick={doImportPreset} disabled={presetBusy}>确认导入</button>
-        <button class="ghost" onclick={() => (presetPreview = null)}>取消</button>
+        <button class="ghost" onclick={dismissPresetInstallRequest}>取消</button>
       </div>
     {/if}
     {#if presetError}

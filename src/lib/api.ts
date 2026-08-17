@@ -76,11 +76,34 @@ export interface PresetRow {
 
 export const listUserPresets = (): Promise<PresetRow[]> => invoke("list_user_presets");
 export const previewPreset = (): Promise<PresetPreview> => invoke("preview_preset");
+export const previewRemotePreset = (url: string): Promise<PresetPreview> =>
+  invoke("preview_remote_preset", { url });
 export const importPreset = (): Promise<string> => invoke("import_preset");
 export const exportPreset = (id: string): Promise<void> =>
   invoke("export_preset", { id });
 export const deletePreset = (id: string): Promise<void> =>
   invoke("delete_preset", { id });
+
+export interface PresetInstallRequest {
+  url: string;
+  source: string;
+}
+
+export const getPendingPresetInstall = (): Promise<PresetInstallRequest | null> =>
+  invoke("get_pending_preset_install");
+export const dismissPendingPresetInstall = (): Promise<void> =>
+  invoke("dismiss_pending_preset_install");
+export const cancelRemotePreset = (): Promise<void> =>
+  invoke("cancel_remote_preset");
+
+export async function onPresetInstallRequest(
+  handler: (request: PresetInstallRequest) => void,
+): Promise<() => void> {
+  const unlisten = await listen<PresetInstallRequest>("preset-install-request", (event) => {
+    handler(event.payload);
+  });
+  return unlisten;
+}
 
 export async function onUpdateProgress(
   handler: (p: { downloaded: number; total: number | null }) => void,

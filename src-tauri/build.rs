@@ -17,6 +17,7 @@ fn main() {
         "quit_app",
         "list_user_presets",
         "preview_preset",
+        "preview_remote_preset",
         "import_preset",
         "export_preset",
         "delete_preset",
@@ -26,6 +27,9 @@ fn main() {
         "cancel_plugin_op",
         "get_pending_plugin_install",
         "dismiss_pending_plugin_install",
+        "get_pending_preset_install",
+        "dismiss_pending_preset_install",
+        "cancel_remote_preset",
     ]);
     let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));
     if let Err(e) = result {

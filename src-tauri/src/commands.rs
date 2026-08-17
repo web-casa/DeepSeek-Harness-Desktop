@@ -553,10 +553,85 @@ pub fn import_preset(
                 .0
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            // Remote deep-link previews land in a temp file we own; a
+            // file-picker path is a user file and must never be deleted.
+            remove_remote_temp(&path);
             Ok(id)
         }
         Err(e) => Err(e),
     }
+}
+
+/// Delete a remote-preview temp file (only the `dsh-remote-preset-*` names we
+/// create; anything else is a user file and is left alone).
+fn remove_remote_temp(path: &std::path::Path) {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if name.starts_with("dsh-remote-preset-") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Download a remote .dshpreset (following the 307 → R2 redirect), bounded at
+/// `MAX_REMOTE_PRESET_BYTES` (16 MiB). The URL has already been re-validated
+/// as a canonical cordis.run download endpoint by `validate_preset_download_url`.
+async fn download_remote_preset(url: &str) -> Result<Vec<u8>, String> {
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("download failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("download failed: HTTP {}", resp.status()));
+    }
+    if let Some(len) = resp.content_length() {
+        if len > crate::deep_link::MAX_REMOTE_PRESET_BYTES {
+            return Err("preset exceeds 16 MiB".to_string());
+        }
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read failed: {e}"))?;
+    if bytes.len() as u64 > crate::deep_link::MAX_REMOTE_PRESET_BYTES {
+        return Err("preset exceeds 16 MiB".to_string());
+    }
+    Ok(bytes.to_vec())
+}
+
+/// Phase 1 of remote preset install: download the .dshpreset, run the same
+/// read-only `inspect_archive` validation as the file picker, and hold the
+/// temp path + preview in `PendingPreset`. Confirmation reuses `import_preset`.
+#[tauri::command]
+pub async fn preview_remote_preset(
+    pending: State<'_, PendingPreset>,
+    url: String,
+) -> Result<Value, String> {
+    // Defense in depth: the webview (if ever compromised) must not be able to
+    // point this command at an arbitrary host.
+    let url = crate::deep_link::validate_preset_download_url(&url)?;
+    let bytes = download_remote_preset(&url).await?;
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "dsh-remote-preset-{}-{}.dshpreset",
+        std::process::id(),
+        nanos
+    ));
+    std::fs::write(&path, &bytes).map_err(|e| format!("cannot write temp archive: {e}"))?;
+
+    let preview = crate::preset::inspect_archive(&path)?;
+    let json = serde_json::json!({
+        "id": preview.id,
+        "files": preview.files,
+        "warnings": preview.warnings,
+    });
+    *pending
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((path, preview));
+    Ok(json)
 }
 
 /// Export one user-authored preset to a user-chosen location.
@@ -951,4 +1026,31 @@ pub fn get_pending_plugin_install(
 #[tauri::command]
 pub fn dismiss_pending_plugin_install(pending: State<'_, crate::deep_link::PendingPluginInstall>) {
     pending.clear();
+}
+
+#[tauri::command]
+pub fn get_pending_preset_install(
+    pending: State<'_, crate::deep_link::PendingPresetInstall>,
+) -> Option<crate::deep_link::PresetInstallRequest> {
+    pending.take()
+}
+
+#[tauri::command]
+pub fn dismiss_pending_preset_install(pending: State<'_, crate::deep_link::PendingPresetInstall>) {
+    pending.clear();
+}
+
+/// Cancel a remote preset preview: drop the held preview and delete its temp
+/// download file. A file-picker preview is never deleted (`remove_remote_temp`
+/// only touches the `dsh-remote-preset-*` names we create).
+#[tauri::command]
+pub fn cancel_remote_preset(pending: State<'_, PendingPreset>) {
+    let held = pending
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some((path, _)) = held {
+        remove_remote_temp(&path);
+    }
 }
