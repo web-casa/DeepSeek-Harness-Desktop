@@ -132,6 +132,10 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
 /// Result of a silent update check, surfaced to the bootstrap UI.
 #[tauri::command]
 pub async fn check_update(app: AppHandle) -> Result<Value, String> {
+    if crate::build_info::STORE_BUILD {
+        let _ = app;
+        return Ok(serde_json::json!({ "available": false, "unsupported": true }));
+    }
     // macOS updater is deliberately OFF until signing + notarization land
     // (Gatekeeper rejects un-notarized updates) — report it as unsupported,
     // NOT as "already up to date".
@@ -159,6 +163,10 @@ pub async fn check_update(app: AppHandle) -> Result<Value, String> {
 /// Download and install the latest update, then restart the app.
 #[tauri::command]
 pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
+    if crate::build_info::STORE_BUILD {
+        let _ = app;
+        return Err("updates are managed by the Microsoft Store".to_string());
+    }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
@@ -454,6 +462,11 @@ pub struct PendingPreset(
     pub std::sync::Mutex<Option<(std::path::PathBuf, crate::preset::ArchivePreview)>>,
 );
 
+/// The temp file path of a remote-preview download, if any. Tracked separately
+/// (not inferred from a filename prefix) so a user-picked file that happens to
+/// share a name is never deleted.
+pub struct RemotePresetTemp(pub std::sync::Mutex<Option<std::path::PathBuf>>);
+
 #[tauri::command]
 pub fn list_user_presets(runtime: State<'_, Runtime>) -> Value {
     // Resolved paths only: Path::new("") would make read_dir resolve the
@@ -528,6 +541,7 @@ pub async fn preview_preset(
 pub fn import_preset(
     runtime: State<'_, Runtime>,
     pending: State<'_, PendingPreset>,
+    remote_temp: State<'_, RemotePresetTemp>,
 ) -> Result<String, String> {
     // Clone, not take(): a failed import must keep the preview so the user
     // can see the error and retry without re-picking the file.
@@ -553,48 +567,62 @@ pub fn import_preset(
                 .0
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-            // Remote deep-link previews land in a temp file we own; a
-            // file-picker path is a user file and must never be deleted.
-            remove_remote_temp(&path);
+            // Delete the remote-preview temp file if one was recorded; a
+            // file-picker preview records nothing, so user files are untouched.
+            take_remote_temp(&remote_temp);
             Ok(id)
         }
         Err(e) => Err(e),
     }
 }
 
-/// Delete a remote-preview temp file (only the `dsh-remote-preset-*` names we
-/// create; anything else is a user file and is left alone).
-fn remove_remote_temp(path: &std::path::Path) {
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if name.starts_with("dsh-remote-preset-") {
-            let _ = std::fs::remove_file(path);
-        }
+/// Delete the recorded remote-preview temp file (if any) and clear the slot.
+fn take_remote_temp(remote_temp: &State<'_, RemotePresetTemp>) {
+    let held = remote_temp
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(path) = held {
+        let _ = std::fs::remove_file(path);
     }
 }
 
-/// Download a remote .dshpreset (following the 307 → R2 redirect), bounded at
-/// `MAX_REMOTE_PRESET_BYTES` (16 MiB). The URL has already been re-validated
-/// as a canonical cordis.run download endpoint by `validate_preset_download_url`.
+/// Download a remote .dshpreset following the 307 → R2 redirect, with an
+/// overall timeout and a hard 16 MiB cap enforced WHILE STREAMING (so a server
+/// that omits or lies about Content-Length cannot make us buffer unboundedly).
+/// The URL has already been re-validated as a canonical cordis.run endpoint.
 async fn download_remote_preset(url: &str) -> Result<Vec<u8>, String> {
-    let resp = reqwest::get(url)
+    use futures_util::StreamExt;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|e| format!("client init failed: {e}"))?;
+    let resp = client
+        .get(url)
+        .send()
         .await
         .map_err(|e| format!("download failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download failed: HTTP {}", resp.status()));
     }
-    if let Some(len) = resp.content_length() {
-        if len > crate::deep_link::MAX_REMOTE_PRESET_BYTES {
-            return Err("preset exceeds 16 MiB".to_string());
-        }
-    }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("read failed: {e}"))?;
-    if bytes.len() as u64 > crate::deep_link::MAX_REMOTE_PRESET_BYTES {
+    let max = crate::deep_link::MAX_REMOTE_PRESET_BYTES as usize;
+    if resp.content_length().is_some_and(|n| n > max as u64) {
         return Err("preset exceeds 16 MiB".to_string());
     }
-    Ok(bytes.to_vec())
+
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read failed: {e}"))?;
+        if body.len().saturating_add(chunk.len()) > max {
+            return Err("preset exceeds 16 MiB".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Phase 1 of remote preset install: download the .dshpreset, run the same
@@ -603,6 +631,7 @@ async fn download_remote_preset(url: &str) -> Result<Vec<u8>, String> {
 #[tauri::command]
 pub async fn preview_remote_preset(
     pending: State<'_, PendingPreset>,
+    remote_temp: State<'_, RemotePresetTemp>,
     url: String,
 ) -> Result<Value, String> {
     // Defense in depth: the webview (if ever compromised) must not be able to
@@ -627,6 +656,10 @@ pub async fn preview_remote_preset(
         "files": preview.files,
         "warnings": preview.warnings,
     });
+    *remote_temp
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path.clone());
     *pending
         .0
         .lock()
@@ -968,6 +1001,9 @@ pub fn install_plugin(
     plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
     name: String,
 ) -> Result<(), String> {
+    if crate::build_info::STORE_BUILD && !crate::curated_plugins::is_allowed(&name) {
+        return Err("仅允许安装 cordis.run 已审核插件".to_string());
+    }
     plugin_op(app, &runtime, plugins.inner().clone(), name, "add")
 }
 
@@ -1041,16 +1077,16 @@ pub fn dismiss_pending_preset_install(pending: State<'_, crate::deep_link::Pendi
 }
 
 /// Cancel a remote preset preview: drop the held preview and delete its temp
-/// download file. A file-picker preview is never deleted (`remove_remote_temp`
-/// only touches the `dsh-remote-preset-*` names we create).
+/// download file. A file-picker preview records no remote temp, so user files
+/// are never deleted.
 #[tauri::command]
-pub fn cancel_remote_preset(pending: State<'_, PendingPreset>) {
-    let held = pending
+pub fn cancel_remote_preset(
+    pending: State<'_, PendingPreset>,
+    remote_temp: State<'_, RemotePresetTemp>,
+) {
+    *pending
         .0
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
-    if let Some((path, _)) = held {
-        remove_remote_temp(&path);
-    }
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    take_remote_temp(&remote_temp);
 }

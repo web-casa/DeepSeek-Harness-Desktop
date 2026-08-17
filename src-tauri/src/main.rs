@@ -98,6 +98,7 @@ fn main() {
             // preview_preset and import_preset. MUST be managed: extracting
             // an unmanaged State panics at the first command invocation.
             app.manage(commands::PendingPreset(std::sync::Mutex::new(None)));
+            app.manage(commands::RemotePresetTemp(std::sync::Mutex::new(None)));
             app.manage(std::sync::Arc::new(plugins::PluginRunner::new()));
             // Deep-link parsing/dispatch. Manage the pending-request slot
             // BEFORE init drains get_current(): a cold start URL can arrive

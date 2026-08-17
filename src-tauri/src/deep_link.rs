@@ -353,10 +353,35 @@ pub fn parse_preset_install_url(raw: &str) -> Result<PresetInstallRequest, Strin
     let source = source.ok_or_else(|| "missing query parameter 'source'".to_string())?;
     let source = validate_preset_source(source)?;
 
+    // The confirmation dialog shows `source`; it must be the SAME preset the
+    // download URL fetches, otherwise a crafted link shows one preset's page
+    // while installing another.
+    if preset_slug_of_download(&dl_url) != preset_slug_of_source(&source) {
+        return Err("download URL and source must be the same preset".to_string());
+    }
+
     Ok(PresetInstallRequest {
         url: dl_url,
         source,
     })
+}
+
+fn preset_slug_of_download(url: &str) -> Option<String> {
+    let u = Url::parse(url).ok()?;
+    let slug = u
+        .path()
+        .strip_prefix("/api/presets/")?
+        .strip_suffix("/download")?;
+    Some(slug.to_string())
+}
+
+fn preset_slug_of_source(url: &str) -> Option<String> {
+    let u = Url::parse(url).ok()?;
+    let slug = u
+        .path()
+        .strip_prefix("/presets/")
+        .or_else(|| u.path().strip_prefix("/en/presets/"))?;
+    Some(slug.to_string())
 }
 
 /// Bring the bootstrap window back when a VALID deep link arrives. macOS
@@ -698,6 +723,15 @@ mod tests {
                 "should reject {download}"
             );
         }
+    }
+
+    #[test]
+    fn preset_rejects_mismatched_download_and_source_slug() {
+        let raw = preset_raw(
+            "https://cordis.run/api/presets/code/download",
+            "https://cordis.run/presets/other",
+        );
+        assert!(parse_preset_install_url(&raw).is_err());
     }
 
     #[test]
