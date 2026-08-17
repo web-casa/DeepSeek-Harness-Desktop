@@ -31,6 +31,11 @@ fn main() {
         "dismiss_remote_preset",
         "confirm_remote_preset_download",
         "import_remote_preset",
+        "pick_sideload_file",
+        "market_search",
+        "market_plugin",
+        "market_image",
+        "sideload_plugin",
     ]);
     let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));
     if let Err(e) = result {

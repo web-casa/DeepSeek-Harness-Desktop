@@ -121,6 +121,60 @@ export const uninstallPlugin = (name: string): Promise<void> =>
   invoke("uninstall_plugin", { name });
 export const cancelPluginOp = (): Promise<void> => invoke("cancel_plugin_op");
 
+
+export interface MarketPluginSummary {
+  slug: string;
+  name: string;
+  npm?: string;
+  version?: string;
+  description?: string;
+  category?: string;
+  platforms: string[];
+  stars?: number;
+  homepage?: string;
+}
+
+export interface MarketPluginDetail {
+  slug: string;
+  name: string;
+  npm?: string;
+  version?: string;
+  description?: string;
+  category?: string;
+  platforms: string[];
+  stars?: number;
+  homepage?: string;
+  screenshots?: string[];
+}
+
+export interface MarketSearchResult {
+  items: MarketPluginSummary[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
+export const marketSearch = (
+  query: string,
+  category?: string,
+  page?: number,
+  perPage?: number,
+  platform = "desktop",
+): Promise<MarketSearchResult> =>
+  invoke("market_search", { query, category, page, perPage, platform });
+
+export const marketPlugin = (slug: string): Promise<MarketPluginDetail> =>
+  invoke("market_plugin", { slug });
+
+export const marketImage = (url: string): Promise<{ dataUrl: string }> =>
+  invoke("market_image", { url });
+
+export const sideloadPlugin = (path: string): Promise<void> =>
+  invoke("sideload_plugin", { path });
+
+export const pickSideloadFile = (): Promise<string | null> =>
+  invoke("pick_sideload_file");
+
 export interface PluginInstallRequest {
   name: string;
   source: string;

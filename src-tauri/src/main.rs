@@ -7,6 +7,7 @@ use tauri::Manager;
 mod commands;
 mod deep_link;
 mod harness;
+mod market;
 mod paths;
 mod plugins;
 mod preset;
@@ -106,6 +107,9 @@ fn main() {
             app.manage(deep_link::PendingPluginInstall::default());
             app.manage(deep_link::PendingRemotePreset::default());
             app.manage(deep_link::InstallArbiter::default());
+            let market = market::MarketClient::new()
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            app.manage(std::sync::Arc::new(market));
             deep_link::init(app.handle());
             Ok(())
         })
@@ -139,7 +143,12 @@ fn main() {
             commands::get_pending_remote_preset,
             commands::dismiss_remote_preset,
             commands::confirm_remote_preset_download,
-            commands::import_remote_preset
+            commands::import_remote_preset,
+            commands::pick_sideload_file,
+            commands::market_search,
+            commands::market_plugin,
+            commands::market_image,
+            commands::sideload_plugin
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

@@ -39,6 +39,30 @@ pub fn is_valid_package_name(name: &str) -> bool {
     }
 }
 
+pub const MAX_SIDELOAD_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Validate a sideload spec: `file:<absolute-path>` with a `.tgz` suffix,
+/// no NUL, existing regular file, size <= 64 MiB.
+pub fn is_valid_sideload_spec(spec: &str) -> bool {
+    let Some(path) = spec.strip_prefix("file:") else {
+        return false;
+    };
+    let path = Path::new(path);
+    if !path.is_absolute() || path.as_os_str().to_string_lossy().contains('\0') {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !name.to_ascii_lowercase().ends_with(".tgz") {
+        return false;
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && meta.len() <= MAX_SIDELOAD_BYTES,
+        Err(_) => false,
+    }
+}
+
 /// Pure shim-text generation (unit-tested).
 pub fn pnpm_shim_script(node: &str, pnpm_cjs: &str) -> String {
     format!("#!/bin/sh\nexec \"{node}\" \"{pnpm_cjs}\" \"$@\"\n")

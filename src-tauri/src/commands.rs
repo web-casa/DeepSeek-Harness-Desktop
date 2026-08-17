@@ -328,6 +328,56 @@ pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+// ---------------------------------------------------------------------------
+// Plugin-market commands (cordis.run). All network I/O happens here; the
+// bootstrap webview is not permitted to fetch external hosts (CSP).
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn pick_sideload_file(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    app.dialog()
+        .file()
+        .add_filter("dsh plugin package", &["tgz"])
+        .pick_file(move |p| {
+            let _ = tx.send(p.map(|f| f.into_path().unwrap_or_default()));
+        });
+    let path = rx.recv().map_err(|e| e.to_string())?;
+    Ok(path.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn market_search(
+    query: String,
+    category: Option<String>,
+    page: Option<u32>,
+    per_page: Option<u32>,
+    platform: Option<String>,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<Value, String> {
+    let platform = platform.unwrap_or_else(|| "desktop".to_string());
+    market
+        .search(&query, category.as_deref(), page, per_page, &platform)
+        .await
+}
+
+#[tauri::command]
+pub async fn market_plugin(
+    slug: String,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<Value, String> {
+    market.detail(&slug).await
+}
+
+#[tauri::command]
+pub async fn market_image(
+    url: String,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<Value, String> {
+    market.image(&url).await
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -683,11 +733,11 @@ pub fn list_plugins(
     })
 }
 
-fn run_plugin_op(
+fn run_plugin_spec(
     app: AppHandle,
     paths: crate::paths::RuntimePaths,
     plugins: Arc<crate::plugins::PluginRunner>,
-    name: String,
+    spec: String,
     op: &'static str,
 ) {
     use std::io::{BufRead, BufReader};
@@ -727,7 +777,7 @@ fn run_plugin_op(
             "--profile".to_string(),
             "web".to_string(),
             op.to_string(),
-            name,
+            spec,
         ],
         cwd: paths.harness_dir.to_string_lossy().to_string(),
         env: vec![
@@ -901,11 +951,13 @@ fn plugin_op(
     app: AppHandle,
     runtime: &Runtime,
     plugins: Arc<crate::plugins::PluginRunner>,
-    name: String,
+    spec: String,
     op: &'static str,
 ) -> Result<(), String> {
-    if !crate::plugins::is_valid_package_name(&name) {
-        return Err(format!("invalid package name: {name:?}"));
+    if !crate::plugins::is_valid_package_name(&spec)
+        && !crate::plugins::is_valid_sideload_spec(&spec)
+    {
+        return Err(format!("invalid plugin spec: {spec:?}"));
     }
     if plugins.busy.swap(true, Ordering::SeqCst) {
         return Err("an operation is already running".to_string());
@@ -915,7 +967,7 @@ fn plugin_op(
         return Err("runtime paths are not resolved yet".to_string());
     };
     std::thread::spawn(move || {
-        run_plugin_op(app, paths, plugins, name, op);
+        run_plugin_spec(app, paths, plugins, spec, op);
     });
     Ok(())
 }
@@ -928,6 +980,22 @@ pub fn install_plugin(
     name: String,
 ) -> Result<(), String> {
     plugin_op(app, &runtime, plugins.inner().clone(), name, "add")
+}
+
+#[tauri::command]
+pub fn sideload_plugin(
+    app: AppHandle,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    path: String,
+) -> Result<(), String> {
+    plugin_op(
+        app,
+        &runtime,
+        plugins.inner().clone(),
+        format!("file:{path}"),
+        "add",
+    )
 }
 
 #[tauri::command]

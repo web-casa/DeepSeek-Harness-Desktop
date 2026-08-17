@@ -35,6 +35,13 @@
     confirmRemotePresetDownload,
     importRemotePreset,
     onPresetInstallRequest,
+    marketSearch,
+    marketPlugin,
+    marketImage,
+    sideloadPlugin,
+    pickSideloadFile,
+    type MarketPluginSummary,
+    type MarketPluginDetail,
     type RemotePresetRequest,
     type RemotePresetPreview,
     type Status,
@@ -85,6 +92,16 @@
   let remotePresetRequest = $state<RemotePresetRequest | null>(null);
   let remotePresetPreview = $state<RemotePresetPreview | null>(null);
   let remotePresetDownloading = $state(false);
+  let marketQuery = $state("");
+  let marketItems = $state<MarketPluginSummary[]>([]);
+  let marketBusy = $state(false);
+  let marketError = $state<string | null>(null);
+  let marketConfirm = $state<MarketPluginSummary | null>(null);
+  let marketDetail = $state<MarketPluginDetail | null>(null);
+  let marketDetailBusy = $state(false);
+  let marketImages = $state<string[]>([]);
+  let sideloadPath = $state<string | null>(null);
+  let sideloadBusy = $state(false);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -175,6 +192,79 @@
         warnings: request.warnings,
       };
     }
+  }
+
+  async function doMarketSearch() {
+    if (marketBusy) return;
+    marketBusy = true;
+    marketError = null;
+    try {
+      const res = await marketSearch(marketQuery.trim(), undefined, 1, 30, "desktop");
+      marketItems = res.items ?? [];
+    } catch (e) {
+      marketError = `市场搜索失败：${e}`;
+    }
+    marketBusy = false;
+  }
+
+  async function doMarketDetail(slug: string) {
+    if (marketDetailBusy) return;
+    marketDetailBusy = true;
+    marketImages = [];
+    try {
+      const detail = await marketPlugin(slug);
+      marketDetail = detail;
+      const shots = (detail.screenshots ?? []).slice(0, 4);
+      const loaded: string[] = [];
+      for (const url of shots) {
+        try {
+          const image = await marketImage(url);
+          loaded.push(image.dataUrl);
+        } catch {
+          /* skip invalid/oversized screenshots */
+        }
+      }
+      marketImages = loaded;
+    } catch (e) {
+      marketError = `插件详情加载失败：${e}`;
+    }
+    marketDetailBusy = false;
+  }
+
+  function doMarketInstall(item: MarketPluginSummary) {
+    if (pluginBusy) return;
+    marketConfirm = item;
+  }
+
+  function confirmMarketInstall() {
+    const item = marketConfirm;
+    if (!item || pluginBusy) return;
+    const name = item.npm?.trim() || item.name.trim();
+    marketConfirm = null;
+    startPluginOp(name, "install");
+  }
+
+  async function doPickSideload() {
+    try {
+      const path = await pickSideloadFile();
+      if (path) sideloadPath = path;
+    } catch (e) {
+      showToast(`选择文件失败：${e}`);
+    }
+  }
+
+  async function confirmSideloadInstall() {
+    if (!sideloadPath || pluginBusy || sideloadBusy) return;
+    sideloadBusy = true;
+    const path = sideloadPath;
+    try {
+      await sideloadPlugin(path);
+      sideloadPath = null;
+      showToast("离线包已开始安装");
+    } catch (e) {
+      showToast(`离线安装失败：${e}`);
+    }
+    sideloadBusy = false;
   }
 
   async function doRemotePresetDownload() {
@@ -845,6 +935,56 @@
 
   <div class="card plugin-card">
     <div class="update-row">
+      <span class="update-title">插件市场</span>
+      <button class="ghost" onclick={doPickSideload}>离线安装 .tgz</button>
+    </div>
+    <div class="plugin-row">
+      <input
+        class="plugin-input"
+        type="text"
+        placeholder="搜索 cordis.run 插件…"
+        bind:value={marketQuery}
+        disabled={marketBusy}
+        spellcheck="false"
+        onkeydown={(e) => {
+          if (e.key === "Enter") doMarketSearch();
+        }}
+      />
+      <button class="primary" onclick={doMarketSearch} disabled={marketBusy || !marketQuery.trim()}>
+        {marketBusy ? "搜索中…" : "搜索"}
+      </button>
+    </div>
+    {#if marketError}
+      <div class="notice-box">{marketError}</div>
+    {/if}
+    {#if marketItems.length > 0}
+      {#each marketItems as item (item.slug)}
+        <div class="preset-row">
+          <span class="preset-id">
+            <span class="preset-name">{item.name}</span>
+            {#if item.version}<span class="badge">v{item.version}</span>{/if}
+            {#if item.stars !== undefined}<span class="badge">★ {item.stars}</span>{/if}
+            {#if item.category}<span class="badge">{item.category}</span>{/if}
+            <span class="badge">{item.platforms.includes("desktop") ? "desktop" : "web-only"}</span>
+          </span>
+          <button class="ghost" onclick={() => doMarketDetail(item.slug)} disabled={marketDetailBusy}>详情</button>
+          {#if item.platforms.includes("desktop")}
+            <button class="primary" onclick={() => doMarketInstall(item)} disabled={pluginBusy}>安装</button>
+          {:else}
+            <button class="ghost" disabled>仅网页版</button>
+          {/if}
+        </div>
+        {#if item.description}
+          <div class="preset-issues">{item.description}</div>
+        {/if}
+      {/each}
+    {:else}
+      <div class="preset-row"><span class="l-empty">（输入关键词搜索插件市场）</span></div>
+    {/if}
+  </div>
+
+  <div class="card plugin-card">
+    <div class="update-row">
       <span class="update-title">插件（用户安装）</span>
     </div>
     <div class="plugin-row">
@@ -960,6 +1100,59 @@
           <button class="ghost" onclick={doRemotePresetDismiss} disabled={remotePresetDownloading}>取消</button>
         </div>
       {/if}
+    </div>
+  </div>
+{/if}
+
+{#if marketDetail}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="插件详情">
+      <div class="modal-title">{marketDetail.name}</div>
+      <div class="modal-name">{marketDetail.npm ?? marketDetail.slug}</div>
+      <div class="modal-meta">{marketDetail.description}</div>
+      {#if marketImages.length > 0}
+        <div class="market-shots">
+          {#each marketImages as src, i (i)}
+            <img src={src} alt="{marketDetail.name} screenshot {i + 1}" class="market-shot" />
+          {/each}
+        </div>
+      {/if}
+      <div class="modal-actions">
+        <button class="ghost" onclick={() => (marketDetail = null)}>关闭</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if marketConfirm}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
+      <div class="modal-title">安装 Cordis 插件？</div>
+      <div class="modal-name">{marketConfirm.npm ?? marketConfirm.name}</div>
+      <div class="modal-meta">
+        来源：<button class="inline-link" onclick={() => openSite(`https://cordis.run/plugins/${marketConfirm!.slug}`)}>
+          https://cordis.run/plugins/{marketConfirm.slug}
+        </button>
+      </div>
+      <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将立即开始安装。</div>
+      <div class="modal-actions">
+        <button class="primary" onclick={confirmMarketInstall} disabled={pluginBusy}>确认安装</button>
+        <button class="ghost" onclick={() => (marketConfirm = null)}>取消</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if sideloadPath}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="离线插件安装确认">
+      <div class="modal-title">离线安装插件？</div>
+      <div class="modal-name">{sideloadPath}</div>
+      <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将通过 `dsh plugin add` 安装该 .tgz。</div>
+      <div class="modal-actions">
+        <button class="primary" onclick={confirmSideloadInstall} disabled={pluginBusy || sideloadBusy}>确认安装</button>
+        <button class="ghost" onclick={() => (sideloadPath = null)}>取消</button>
+      </div>
     </div>
   </div>
 {/if}

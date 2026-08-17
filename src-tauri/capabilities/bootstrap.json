@@ -35,6 +35,12 @@
     "allow-dismiss-remote-preset",
     "allow-confirm-remote-preset-download",
     "allow-import-remote-preset",
-    "allow-cancel-preset-preview"
+    "allow-cancel-preset-preview",
+    "dialog:allow-open",
+    "allow-market-search",
+    "allow-market-plugin",
+    "allow-market-image",
+    "allow-sideload-plugin",
+    "allow-pick-sideload-file"
   ]
 }
