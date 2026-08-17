@@ -1109,6 +1109,7 @@ fn remote_preset_stage(session: &crate::deep_link::RemotePresetSession) -> &'sta
         crate::deep_link::RemotePresetState::AwaitingDownloadConsent => "awaiting-download",
         crate::deep_link::RemotePresetState::Downloading => "downloading",
         crate::deep_link::RemotePresetState::AwaitingInstallConsent { .. } => "awaiting-install",
+        crate::deep_link::RemotePresetState::Installing { .. } => "installing",
     }
 }
 
@@ -1117,11 +1118,19 @@ pub fn get_pending_remote_preset(
     pending: State<'_, crate::deep_link::PendingRemotePreset>,
 ) -> Option<Value> {
     let session = pending.snapshot()?;
-    Some(serde_json::json!({
+    let mut json = serde_json::json!({
         "requestId": session.request_id,
         "source": session.source,
         "stage": remote_preset_stage(&session),
-    }))
+    });
+    if let crate::deep_link::RemotePresetState::AwaitingInstallConsent { preview, .. } =
+        &session.state
+    {
+        json["id"] = serde_json::json!(preview.id);
+        json["files"] = serde_json::json!(preview.files);
+        json["warnings"] = serde_json::json!(preview.warnings);
+    }
+    Some(json)
 }
 
 #[tauri::command]
@@ -1293,9 +1302,17 @@ pub fn import_remote_preset(
         .dsh_home
         .clone()
         .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
-    let (archive, _preview) = pending.take_archive(&request_id)?;
-    let result = crate::preset::install_archive(&archive, std::path::Path::new(&dsh_home));
-    remove_remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
-    arbiter.release();
-    result
+    let archive = pending.begin_install(&request_id)?;
+    match crate::preset::install_archive(&archive, std::path::Path::new(&dsh_home)) {
+        Ok(id) => {
+            pending.finish_install_success(&request_id);
+            remove_remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
+            arbiter.release();
+            Ok(id)
+        }
+        Err(error) => {
+            pending.finish_install_failure(&request_id);
+            Err(error)
+        }
+    }
 }

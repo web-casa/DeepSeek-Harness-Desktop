@@ -143,7 +143,10 @@ export async function onPluginInstallRequest(
 export interface RemotePresetRequest {
   requestId: string;
   source: string;
-  stage: "awaiting-download" | "downloading" | "awaiting-install";
+  stage: "awaiting-download" | "downloading" | "awaiting-install" | "installing";
+  id?: string;
+  files?: [string, number][];
+  warnings?: string[];
 }
 
 export interface RemotePresetPreview {

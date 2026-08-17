@@ -161,6 +161,20 @@
     }
     remotePresetRequest = request;
     remotePresetPreview = null;
+    remotePresetDownloading = request.stage === "downloading";
+    if (
+      request.stage === "awaiting-install" &&
+      request.id &&
+      request.files &&
+      request.warnings
+    ) {
+      remotePresetPreview = {
+        requestId: request.requestId,
+        id: request.id,
+        files: request.files,
+        warnings: request.warnings,
+      };
+    }
   }
 
   async function doRemotePresetDownload() {
@@ -915,7 +929,9 @@
           {remotePresetRequest.source}
         </button>
       </div>
-      {#if remotePresetPreview && remotePresetPreview.requestId === remotePresetRequest.requestId}
+      {#if remotePresetRequest.stage === "installing"}
+        <div class="modal-warn">正在安装预设…</div>
+      {:else if remotePresetPreview && remotePresetPreview.requestId === remotePresetRequest.requestId}
         <div class="modal-name">{remotePresetPreview.id}</div>
         <div class="modal-meta">
           {remotePresetPreview.files.length} 个文件

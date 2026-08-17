@@ -96,6 +96,10 @@ pub enum RemotePresetState {
         archive: std::path::PathBuf,
         preview: crate::preset::ArchivePreview,
     },
+    Installing {
+        archive: std::path::PathBuf,
+        preview: crate::preset::ArchivePreview,
+    },
 }
 
 /// One validated remote-preset session. `request_id` is generated from a
@@ -252,31 +256,71 @@ impl PendingRemotePreset {
         Ok(())
     }
 
-    /// Take the archive for install, leaving the slot empty but NOT releasing
-    /// the arbiter (the caller releases it after success/failure cleanup).
-    pub fn take_archive(
-        &self,
-        request_id: &str,
-    ) -> Result<(std::path::PathBuf, crate::preset::ArchivePreview), String> {
+    /// Move AwaitingInstallConsent -> Installing and return the archive path.
+    pub fn begin_install(&self, request_id: &str) -> Result<std::path::PathBuf, String> {
         let mut slot = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(session) = slot.take() else {
+        let Some(session) = slot.as_mut() else {
             return Err("no pending remote preset request".to_string());
         };
         if session.request_id != request_id {
-            *slot = Some(session);
             return Err("request_id does not match the pending request".to_string());
         }
-        match session.state {
+        match &session.state {
             RemotePresetState::AwaitingInstallConsent { archive, preview } => {
-                Ok((archive, preview))
+                let archive = archive.clone();
+                let preview = preview.clone();
+                session.state = RemotePresetState::Installing {
+                    archive: archive.clone(),
+                    preview,
+                };
+                Ok(archive)
             }
-            _ => {
-                *slot = Some(session);
-                Err("request is not awaiting install consent".to_string())
+            _ => Err("request is not awaiting install consent".to_string()),
+        }
+    }
+
+    /// Install succeeded: remove the session. Returns true when it removed it.
+    pub fn finish_install_success(&self, request_id: &str) -> bool {
+        let mut slot = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(session) = slot.as_ref() else {
+            return false;
+        };
+        if session.request_id != request_id
+            || !matches!(session.state, RemotePresetState::Installing { .. })
+        {
+            return false;
+        }
+        *slot = None;
+        true
+    }
+
+    /// Install failed: restore AwaitingInstallConsent so the same confirm page
+    /// can retry without re-downloading.
+    pub fn finish_install_failure(&self, request_id: &str) -> bool {
+        let mut slot = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(session) = slot.as_mut() else {
+            return false;
+        };
+        if session.request_id != request_id {
+            return false;
+        }
+        match &session.state {
+            RemotePresetState::Installing { archive, preview } => {
+                let archive = archive.clone();
+                let preview = preview.clone();
+                session.state = RemotePresetState::AwaitingInstallConsent { archive, preview };
+                true
             }
+            _ => false,
         }
     }
 
@@ -295,8 +339,11 @@ impl PendingRemotePreset {
         if session.request_id != request_id {
             return Err("request_id does not match the pending request".to_string());
         }
-        if matches!(session.state, RemotePresetState::Downloading) {
-            return Err("download is in progress and cannot be dismissed".to_string());
+        if matches!(
+            session.state,
+            RemotePresetState::Downloading | RemotePresetState::Installing { .. }
+        ) {
+            return Err("operation is in progress and cannot be dismissed".to_string());
         }
         let session = match slot.take() {
             Some(session) => session,
@@ -1027,20 +1074,37 @@ mod tests {
     }
 
     #[test]
-    fn remote_take_archive_rejects_wrong_id_and_wrong_stage() {
+    fn remote_begin_install_rejects_wrong_id_and_wrong_stage() {
         let (pending, _arbiter) = remote_pending();
         let id = pending.snapshot().unwrap().request_id;
-        assert!(pending.take_archive("bad-id").is_err());
-        assert!(pending.take_archive(&id).is_err()); // still AwaitingDownloadConsent
+        assert!(pending.begin_install("bad-id").is_err());
+        assert!(pending.begin_install(&id).is_err()); // still AwaitingDownloadConsent
 
         pending.begin_download(&id).expect("begin download");
         let archive = std::env::temp_dir().join(format!("dsh-test-{id}.dshpreset"));
-        let preview = fake_preview("code");
         pending
-            .complete_download(&id, archive.clone(), preview)
+            .complete_download(&id, archive.clone(), fake_preview("code"))
             .expect("complete download");
-        assert_eq!(pending.take_archive(&id).expect("take archive").0, archive);
+        assert_eq!(pending.begin_install(&id).expect("begin install"), archive);
+        assert!(pending.finish_install_success(&id));
         assert!(pending.snapshot().is_none());
+    }
+
+    #[test]
+    fn remote_install_failure_restores_for_retry() {
+        let (pending, _arbiter) = remote_pending();
+        let id = pending.snapshot().unwrap().request_id;
+        pending.begin_download(&id).expect("begin download");
+        let archive = std::env::temp_dir().join(format!("dsh-test-{id}.dshpreset"));
+        pending
+            .complete_download(&id, archive, fake_preview("code"))
+            .expect("complete download");
+        assert!(pending.begin_install(&id).is_ok());
+        assert!(pending.finish_install_failure(&id));
+        assert!(matches!(
+            pending.snapshot().unwrap().state,
+            RemotePresetState::AwaitingInstallConsent { .. }
+        ));
     }
 
     #[test]
