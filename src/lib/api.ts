@@ -77,6 +77,8 @@ export interface PresetRow {
 export const listUserPresets = (): Promise<PresetRow[]> => invoke("list_user_presets");
 export const previewPreset = (): Promise<PresetPreview> => invoke("preview_preset");
 export const importPreset = (): Promise<string> => invoke("import_preset");
+export const cancelPresetPreview = (): Promise<void> =>
+  invoke("cancel_preset_preview");
 export const exportPreset = (id: string): Promise<void> =>
   invoke("export_preset", { id });
 export const deletePreset = (id: string): Promise<void> =>

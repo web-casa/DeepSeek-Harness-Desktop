@@ -497,8 +497,12 @@ pub fn delete_preset(runtime: State<'_, Runtime>, id: String) -> Result<(), Stri
 pub async fn preview_preset(
     app: AppHandle,
     pending: State<'_, PendingPreset>,
+    arbiter: State<'_, crate::deep_link::InstallArbiter>,
 ) -> Result<Value, String> {
     use tauri_plugin_dialog::DialogExt;
+    if !arbiter.try_acquire(crate::deep_link::PendingInstallKind::LocalPresetPicker) {
+        return Err("another install flow is active".to_string());
+    }
     let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
     app.dialog()
         .file()
@@ -506,10 +510,24 @@ pub async fn preview_preset(
         .pick_file(move |p| {
             let _ = tx.send(p.map(|f| f.into_path().unwrap_or_default()));
         });
-    let Some(path) = rx.recv().map_err(|e| e.to_string())? else {
-        return Err("cancelled".to_string());
+    let path = match rx.recv().map_err(|e| e.to_string()) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            arbiter.release();
+            return Err("cancelled".to_string());
+        }
+        Err(error) => {
+            arbiter.release();
+            return Err(error);
+        }
     };
-    let preview = crate::preset::inspect_archive(&path)?;
+    let preview = match crate::preset::inspect_archive(&path) {
+        Ok(preview) => preview,
+        Err(error) => {
+            arbiter.release();
+            return Err(error);
+        }
+    };
     let json = serde_json::json!({
         "id": preview.id,
         "files": preview.files,
@@ -522,12 +540,27 @@ pub async fn preview_preset(
     Ok(json)
 }
 
+/// Release the local-picker arbiter slot when the user closes the preview
+/// without importing.
+#[tauri::command]
+pub fn cancel_preset_preview(
+    pending: State<'_, PendingPreset>,
+    arbiter: State<'_, crate::deep_link::InstallArbiter>,
+) {
+    *pending
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    arbiter.release();
+}
+
 /// Install the previously previewed archive (two-phase: the confirmation
 /// dialog sits between preview_preset and this call).
 #[tauri::command]
 pub fn import_preset(
     runtime: State<'_, Runtime>,
     pending: State<'_, PendingPreset>,
+    arbiter: State<'_, crate::deep_link::InstallArbiter>,
 ) -> Result<String, String> {
     // Clone, not take(): a failed import must keep the preview so the user
     // can see the error and retry without re-picking the file.
@@ -553,6 +586,7 @@ pub fn import_preset(
                 .0
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            arbiter.release();
             Ok(id)
         }
         Err(e) => Err(e),

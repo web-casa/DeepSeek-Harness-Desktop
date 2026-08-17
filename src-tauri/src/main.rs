@@ -126,6 +126,7 @@ fn main() {
             commands::quit_app,
             commands::list_user_presets,
             commands::preview_preset,
+            commands::cancel_preset_preview,
             commands::import_preset,
             commands::export_preset,
             commands::delete_preset,

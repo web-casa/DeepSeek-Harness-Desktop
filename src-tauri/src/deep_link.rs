@@ -126,7 +126,6 @@ pub struct InstallArbiter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // LocalPresetPicker is wired in a follow-up preview_preset migration
 pub enum PendingInstallKind {
     Plugin,
     RemotePreset,

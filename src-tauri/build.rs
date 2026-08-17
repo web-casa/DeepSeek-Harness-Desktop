@@ -17,6 +17,7 @@ fn main() {
         "quit_app",
         "list_user_presets",
         "preview_preset",
+        "cancel_preset_preview",
         "import_preset",
         "export_preset",
         "delete_preset",

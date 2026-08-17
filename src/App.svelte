@@ -16,6 +16,7 @@
     listUserPresets,
     previewPreset,
     importPreset,
+    cancelPresetPreview,
     exportPreset,
     deletePreset,
     listPlugins,
@@ -348,6 +349,15 @@
       presetError = `导入失败：${e}`;
     }
     presetBusy = false;
+  }
+
+  async function doCancelPresetPreview() {
+    presetPreview = null;
+    try {
+      await cancelPresetPreview();
+    } catch {
+      /* best effort */
+    }
   }
 
   async function doExportPreset(id: string) {
@@ -777,7 +787,7 @@
         {/if}
         <div>预设与 Agent 同权限运行工具和命令——仅导入可信来源。</div>
         <button class="primary" onclick={doImportPreset} disabled={presetBusy}>确认导入</button>
-        <button class="ghost" onclick={() => (presetPreview = null)}>取消</button>
+        <button class="ghost" onclick={doCancelPresetPreview}>取消</button>
       </div>
     {/if}
     {#if presetError}

@@ -34,6 +34,7 @@
     "allow-get-pending-remote-preset",
     "allow-dismiss-remote-preset",
     "allow-confirm-remote-preset-download",
-    "allow-import-remote-preset"
+    "allow-import-remote-preset",
+    "allow-cancel-preset-preview"
   ]
 }
