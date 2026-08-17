@@ -967,6 +967,91 @@ mod tests {
         assert!(pending.snapshot().is_some_and(|s| s.request_id == id1));
     }
 
+    fn remote_pending() -> (PendingRemotePreset, InstallArbiter) {
+        let pending = PendingRemotePreset::default();
+        let arbiter = InstallArbiter::default();
+        let id = pending
+            .try_enqueue(
+                &arbiter,
+                "https://cordis.run/api/presets/code/download".to_string(),
+                "https://cordis.run/presets/code".to_string(),
+                "code".to_string(),
+            )
+            .expect("first request should enqueue");
+        assert!(!arbiter.try_acquire(PendingInstallKind::Plugin));
+        assert_eq!(id.len(), 32);
+        (pending, arbiter)
+    }
+
+    fn fake_preview(id: &str) -> crate::preset::ArchivePreview {
+        crate::preset::ArchivePreview {
+            id: id.to_string(),
+            files: vec![("agent.cordis.yml".to_string(), 10)],
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn remote_dismiss_rejects_mismatch_and_downloading() {
+        let (pending, arbiter) = remote_pending();
+        assert!(pending.dismiss("bad-id").is_err());
+        assert!(pending.snapshot().is_some());
+
+        let id = pending.snapshot().unwrap().request_id;
+        pending.begin_download(&id).expect("begin download");
+        assert!(pending.dismiss(&id).is_err());
+        assert!(!arbiter.try_acquire(PendingInstallKind::Plugin));
+    }
+
+    #[test]
+    fn remote_fail_download_clears_only_matching_request() {
+        let (pending, arbiter) = remote_pending();
+        let id = pending.snapshot().unwrap().request_id;
+        pending.begin_download(&id).expect("begin download");
+        assert!(!pending.fail_download("bad-id"));
+        assert!(pending.snapshot().is_some());
+        assert!(pending.fail_download(&id));
+        assert!(pending.snapshot().is_none());
+        arbiter.release();
+    }
+
+    #[test]
+    fn remote_complete_download_enforces_slug_id_binding() {
+        let (pending, _arbiter) = remote_pending();
+        let id = pending.snapshot().unwrap().request_id;
+        pending.begin_download(&id).expect("begin download");
+        let archive = std::env::temp_dir().join(format!("dsh-test-{id}.dshpreset"));
+        let preview = fake_preview("other");
+        assert!(pending.complete_download(&id, archive, preview).is_err());
+        assert!(pending.fail_download(&id));
+    }
+
+    #[test]
+    fn remote_take_archive_rejects_wrong_id_and_wrong_stage() {
+        let (pending, _arbiter) = remote_pending();
+        let id = pending.snapshot().unwrap().request_id;
+        assert!(pending.take_archive("bad-id").is_err());
+        assert!(pending.take_archive(&id).is_err()); // still AwaitingDownloadConsent
+
+        pending.begin_download(&id).expect("begin download");
+        let archive = std::env::temp_dir().join(format!("dsh-test-{id}.dshpreset"));
+        let preview = fake_preview("code");
+        pending
+            .complete_download(&id, archive.clone(), preview)
+            .expect("complete download");
+        assert_eq!(pending.take_archive(&id).expect("take archive").0, archive);
+        assert!(pending.snapshot().is_none());
+    }
+
+    #[test]
+    fn install_arbiter_release_allows_next_flow() {
+        let arbiter = InstallArbiter::default();
+        assert!(arbiter.try_acquire(PendingInstallKind::Plugin));
+        assert!(!arbiter.try_acquire(PendingInstallKind::RemotePreset));
+        arbiter.release();
+        assert!(arbiter.try_acquire(PendingInstallKind::RemotePreset));
+    }
+
     fn urlencoding(value: &str) -> String {
         let mut out = String::new();
         for byte in value.as_bytes() {
