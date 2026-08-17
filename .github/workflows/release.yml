@@ -293,36 +293,47 @@ jobs:
           [ -n "$dmg" ] || { echo "dmg not found"; exit 1; }
           mountpoint=$(mktemp -d)
           hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$dmg"
-          cp -R "$mountpoint/DeepSeek Harness Desktop.app" /tmp/DeepSeek-Harness-Desktop-smoke.app
+          mkdir -p "$HOME/Applications"
+          rm -rf "$HOME/Applications/DeepSeek Harness Desktop.app"
+          cp -R "$mountpoint/DeepSeek Harness Desktop.app" "$HOME/Applications/DeepSeek Harness Desktop.app"
           hdiutil detach "$mountpoint"
 
       - name: Verify Info.plist registers dsharness
         run: |
-          plist=/tmp/DeepSeek-Harness-Desktop-smoke.app/Contents/Info.plist
-          plutil -extract CFBundleURLTypes xml1 -o - "$plist" > /tmp/cfbundle.xml
+          app="$HOME/Applications/DeepSeek Harness Desktop.app"
+          plutil -extract CFBundleURLTypes xml1 -o - "$app/Contents/Info.plist" > /tmp/cfbundle.xml
           cat /tmp/cfbundle.xml
           grep -q '<string>dsharness</string>' /tmp/cfbundle.xml
 
       - name: Register with LaunchServices and cold-open
         run: |
-          app=/tmp/DeepSeek-Harness-Desktop-smoke.app
+          app="$HOME/Applications/DeepSeek Harness Desktop.app"
+          lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
           xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
-          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
+          "$lsregister" -f -R "$app"
+          sleep 3
+          "$lsregister" -dump | grep -A4 -B2 dsharness || true
           pkill -f "deepseek-harness-desktop" 2>/dev/null || true
-          open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd"
-          sleep 15
-          pgrep -f "DeepSeek-Harness-Desktop-smoke.app/Contents/MacOS/deepseek-harness-desktop" || {
+          open -a "$app" "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd" || {
+            echo "open -a failed; falling back to bare scheme open"
+            open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd"
+          }
+          sleep 20
+          pgrep -f "DeepSeek Harness Desktop.app/Contents/MacOS/deepseek-harness-desktop" || {
             echo "app was not launched by dsharness:// cold-start"
             exit 1
           }
 
       - name: Warm open keeps single process
         run: |
-          before=$(pgrep -f "DeepSeek-Harness-Desktop-smoke.app/Contents/MacOS/deepseek-harness-desktop" | head -1)
+          app="$HOME/Applications/DeepSeek Harness Desktop.app"
+          before=$(pgrep -f "DeepSeek Harness Desktop.app/Contents/MacOS/deepseek-harness-desktop" | head -1)
           [ -n "$before" ] || { echo "app not running before warm link"; exit 1; }
-          open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd"
+          open -a "$app" "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd" || {
+            open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd"
+          }
           sleep 10
-          after=$(pgrep -f "DeepSeek-Harness-Desktop-smoke.app/Contents/MacOS/deepseek-harness-desktop" | wc -l | tr -d ' ')
+          after=$(pgrep -f "DeepSeek Harness Desktop.app/Contents/MacOS/deepseek-harness-desktop" | wc -l | tr -d ' ')
           echo "before_pid=$before after_count=$after"
           [ "$after" -eq 1 ] || { echo "expected one app process after warm link"; exit 1; }
 
