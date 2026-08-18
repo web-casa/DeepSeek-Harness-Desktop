@@ -69,5 +69,8 @@ jobs:
       - name: Plugin install smoke
         run: node scripts/verify-plugins.ts
 
+      - name: Sideload plugin smoke
+        run: node scripts/verify-sideload.ts
+
       - name: Relocation smoke
         run: node scripts/relocate-runtime.ts && node scripts/verify-runtime.ts --runtime-dir .tmp/relocated-runtime

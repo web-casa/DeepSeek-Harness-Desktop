@@ -8,7 +8,7 @@
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| 版本 | v0.2.6 · Windows x64 NSIS / macOS arm64 DMG · 未签名预览版 · [English](README.en.md) |
+| 版本 | v0.2.8 · Windows x64 NSIS / macOS arm64 DMG · 未签名预览版 · [English](README.en.md) |
 
 > ⚠️ **macOS 用户**：Apple 开发者证书仍在申请中，应用尚未签名。首次打开若被
 > Gatekeeper 拦截，请执行：
@@ -21,7 +21,7 @@
 
 | | |
 |---|---|
-| 🔌 **插件生态** | Cordis 插件体系随包携带；设置页一键安装/卸载插件；预设安全导入导出 |
+| 🔌 **插件生态** | Cordis 插件体系随包携带；插件市场浏览/搜索/一键安装；预设安全导入导出；离线 `.tgz` 侧载 |
 | 🔄 **自动更新**（Windows） | 更新包由内嵌 minisign 公钥校验；macOS 待签名+公证后启用 |
 | 💓 **挂死自愈** | 心跳检测 Harness「活着但无响应」并自动重启（退避+上限） |
 | 🛡️ **安全边界** | Harness 窗口零 IPC 权限；桌面命令仅授权本地窗口；环境消毒 |
@@ -109,6 +109,6 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 
 - CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发完整发布（质量门 → soak → 打包 → 内容/签名断言 → draft release + `latest.json`）。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
-- 当前状态：v0.2.6 开发中（新增 cordis.run deep-link 一键安装确认；v0.2.4 为当前发布，v0.2.3 draft 作废不发布）。
+- 当前状态：v0.2.8 开发中（新增 cordis.run deep-link 一键安装确认；v0.2.4 为当前发布，v0.2.3 draft 作废不发布）。
 - 已知边界：未签名（SmartScreen/Gatekeeper 手动放行）；macOS 更新器待签名；Linux 仅开发用。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。

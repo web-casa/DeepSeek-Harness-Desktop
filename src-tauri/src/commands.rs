@@ -328,10 +328,119 @@ pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+// ---------------------------------------------------------------------------
+// Plugin-market commands (cordis.run). All network I/O happens here; the
+// bootstrap webview is not permitted to fetch external hosts (CSP).
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn pick_sideload_file(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    app.dialog()
+        .file()
+        .add_filter("dsh plugin package", &["tgz"])
+        .pick_file(move |p| {
+            let _ = tx.send(p.map(|f| f.into_path().unwrap_or_default()));
+        });
+    let path = rx.recv().map_err(|e| e.to_string())?;
+    Ok(path.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn market_search(
+    query: String,
+    category: Option<String>,
+    page: Option<u32>,
+    per_page: Option<u32>,
+    platform: Option<String>,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<Value, String> {
+    let platform = platform.unwrap_or_else(|| "desktop".to_string());
+    market
+        .search(&query, category.as_deref(), page, per_page, &platform)
+        .await
+}
+
+#[tauri::command]
+pub async fn market_plugin(
+    slug: String,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<Value, String> {
+    market.detail(&slug).await
+}
+
+#[tauri::command]
+pub async fn market_image(
+    url: String,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<Value, String> {
+    market.image(&url).await
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{read_installed_plugins, redact};
+    use super::{read_installed_plugins, redact, sweep_sideload_dir, sweep_sideloads_root};
+
+    #[test]
+    fn sideload_sweep_does_not_follow_symlinked_tools_parent() {
+        let root =
+            std::env::temp_dir().join(format!("dsh-sideload-parent-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_sideload = outside.join("sideload");
+        std::fs::create_dir_all(&outside_sideload).unwrap();
+        let victim = outside_sideload.join("victim.tgz");
+        std::fs::write(&victim, b"x").unwrap();
+        let link = root.join(".desktop-tools");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &link).unwrap();
+        let referenced = std::collections::HashSet::new();
+        sweep_sideloads_root(&link, &referenced);
+        assert!(victim.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sideload_sweep_does_not_follow_symlink_dir() {
+        let root = std::env::temp_dir().join(format!("dsh-sideload-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.tgz");
+        std::fs::write(&victim, b"x").unwrap();
+        let link = root.join("sideload-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &link).unwrap();
+        let referenced = std::collections::HashSet::new();
+        sweep_sideload_dir(&link, &referenced);
+        assert!(victim.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sideload_sweep_keeps_referenced_tarball() {
+        let dir = std::env::temp_dir().join(format!("dsh-sideload-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let keep = dir.join("keep.tgz");
+        let stale = dir.join("stale.tgz");
+        std::fs::write(&keep, b"a").unwrap();
+        std::fs::write(&stale, b"b").unwrap();
+        let referenced = std::collections::HashSet::from([keep.clone()]);
+        sweep_sideload_dir(&dir, &referenced);
+        assert!(keep.is_file());
+        assert!(!stale.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir =
@@ -683,11 +792,11 @@ pub fn list_plugins(
     })
 }
 
-fn run_plugin_op(
+fn run_plugin_spec(
     app: AppHandle,
     paths: crate::paths::RuntimePaths,
     plugins: Arc<crate::plugins::PluginRunner>,
-    name: String,
+    plugin_spec: String,
     op: &'static str,
 ) {
     use std::io::{BufRead, BufReader};
@@ -706,12 +815,21 @@ fn run_plugin_op(
             return;
         }
     };
-    let mut path_env = shim_dir.to_string_lossy().to_string();
-    if let Some(old) = std::env::var_os("PATH") {
-        path_env.push(std::path::MAIN_SEPARATOR);
-        path_env.push_str(&old.to_string_lossy());
-    }
-    let spec = SpawnSpec {
+    let path_env = match std::env::join_paths(
+        std::iter::once(shim_dir.as_os_str().to_owned())
+            .chain(std::env::var_os("PATH").map(|old| old.to_owned())),
+    ) {
+        Ok(path_env) => path_env.to_string_lossy().to_string(),
+        Err(e) => {
+            let _ = app.emit(
+                "plugin-done",
+                serde_json::json!({ "exit": 1, "tail": format!("cannot build PATH: {e}") }),
+            );
+            plugins.busy.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    let spawn_spec = SpawnSpec {
         node: paths.node.to_string_lossy().to_string(),
         script: paths
             .harness_dir
@@ -727,7 +845,7 @@ fn run_plugin_op(
             "--profile".to_string(),
             "web".to_string(),
             op.to_string(),
-            name,
+            plugin_spec.clone(),
         ],
         cwd: paths.harness_dir.to_string_lossy().to_string(),
         env: vec![
@@ -739,7 +857,7 @@ fn run_plugin_op(
         ],
     };
     let inherited = std::env::vars_os().collect::<Vec<_>>();
-    let child = match PlatformChild::spawn(&spec, &inherited) {
+    let child = match PlatformChild::spawn(&spawn_spec, &inherited) {
         Ok(c) => c,
         Err(e) => {
             let _ = app.emit(
@@ -897,16 +1015,13 @@ fn run_plugin_op(
     );
 }
 
-fn plugin_op(
+fn spawn_plugin_spec(
     app: AppHandle,
     runtime: &Runtime,
     plugins: Arc<crate::plugins::PluginRunner>,
-    name: String,
+    spec: String,
     op: &'static str,
 ) -> Result<(), String> {
-    if !crate::plugins::is_valid_package_name(&name) {
-        return Err(format!("invalid package name: {name:?}"));
-    }
     if plugins.busy.swap(true, Ordering::SeqCst) {
         return Err("an operation is already running".to_string());
     }
@@ -915,9 +1030,22 @@ fn plugin_op(
         return Err("runtime paths are not resolved yet".to_string());
     };
     std::thread::spawn(move || {
-        run_plugin_op(app, paths, plugins, name, op);
+        run_plugin_spec(app, paths, plugins, spec, op);
     });
     Ok(())
+}
+
+fn plugin_op(
+    app: AppHandle,
+    runtime: &Runtime,
+    plugins: Arc<crate::plugins::PluginRunner>,
+    spec: String,
+    op: &'static str,
+) -> Result<(), String> {
+    if !crate::plugins::is_valid_package_name(&spec) {
+        return Err(format!("invalid package name: {spec:?}"));
+    }
+    spawn_plugin_spec(app, runtime, plugins, spec, op)
 }
 
 #[tauri::command]
@@ -928,6 +1056,34 @@ pub fn install_plugin(
     name: String,
 ) -> Result<(), String> {
     plugin_op(app, &runtime, plugins.inner().clone(), name, "add")
+}
+
+#[tauri::command]
+pub fn sideload_plugin(
+    app: AppHandle,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    path: String,
+) -> Result<(), String> {
+    let src = std::path::Path::new(&path);
+    let Some(paths) = runtime.paths() else {
+        return Err("runtime paths are not resolved yet".to_string());
+    };
+    let staged = crate::plugins::stage_sideload(&paths.dsh_home, src)?;
+    let spec = format!("file:{}", staged.display());
+    #[cfg(windows)]
+    if !crate::plugins::is_shell_safe_spec(&spec) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(
+            "当前用户目录路径包含空格或特殊字符，离线安装暂不可用；请使用插件市场在线安装"
+                .to_string(),
+        );
+    }
+    if let Err(error) = spawn_plugin_spec(app, &runtime, plugins.inner().clone(), spec, "add") {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1076,6 +1232,90 @@ fn remove_remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) {
         }
         _ => {}
     }
+}
+
+/// Remove staged sideload tarballs that are no longer referenced by the web
+/// profile. A successfully installed `file:` dependency must keep its source
+/// tarball: pnpm re-reads that path for later lock/store operations.
+pub fn sweep_stale_sideloads(runtime: &Runtime) {
+    let Some(paths) = runtime.paths() else {
+        return;
+    };
+    let referenced: std::collections::HashSet<std::path::PathBuf> = read_web_deps(&paths)
+        .values()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|spec| spec.strip_prefix("file:"))
+        .map(std::path::PathBuf::from)
+        .collect();
+    sweep_sideloads_root(&paths.dsh_home.join(".desktop-tools"), &referenced);
+}
+
+fn sweep_sideloads_root(
+    tools: &std::path::Path,
+    referenced: &std::collections::HashSet<std::path::PathBuf>,
+) {
+    match std::fs::symlink_metadata(tools) {
+        Ok(meta) if meta.file_type().is_symlink() => return,
+        Ok(meta) if !meta.is_dir() => return,
+        Ok(_) => {}
+        Err(_) => return,
+    }
+    sweep_sideload_dir(&tools.join("sideload"), referenced);
+}
+
+fn sweep_sideload_dir(
+    dir: &std::path::Path,
+    referenced: &std::collections::HashSet<std::path::PathBuf>,
+) {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(dir);
+            return;
+        }
+        Ok(meta) if !meta.is_dir() => return,
+        Ok(_) => {}
+        Err(_) => return,
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.to_ascii_lowercase().ends_with(".tgz") {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        if !referenced.contains(&path) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+fn read_web_deps(paths: &crate::paths::RuntimePaths) -> serde_json::Map<String, serde_json::Value> {
+    let path = paths
+        .dsh_home
+        .join("profiles")
+        .join("web")
+        .join("package.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return serde_json::Map::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return serde_json::Map::new();
+    };
+    json.get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) -> std::path::PathBuf {

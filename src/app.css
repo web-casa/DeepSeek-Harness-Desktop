@@ -463,6 +463,22 @@ footer {
   padding: 8px 12px;
 }
 
+/* ---- market ---- */
+.market-shots {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.market-shot {
+  width: 180px;
+  height: 112px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
 /* ---- deep-link confirmation modal ---- */
 .modal-backdrop {
   position: fixed;

@@ -7,6 +7,7 @@ use tauri::Manager;
 mod commands;
 mod deep_link;
 mod harness;
+mod market;
 mod paths;
 mod plugins;
 mod preset;
@@ -95,6 +96,7 @@ fn main() {
             tray::init(&app.handle().clone());
             harness::init(&app.handle().clone());
             commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
+            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
             // The two-phase preset import holds its preview here between
             // preview_preset and import_preset. MUST be managed: extracting
             // an unmanaged State panics at the first command invocation.
@@ -106,6 +108,9 @@ fn main() {
             app.manage(deep_link::PendingPluginInstall::default());
             app.manage(deep_link::PendingRemotePreset::default());
             app.manage(deep_link::InstallArbiter::default());
+            let market = market::MarketClient::new()
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            app.manage(std::sync::Arc::new(market));
             deep_link::init(app.handle());
             Ok(())
         })
@@ -139,7 +144,12 @@ fn main() {
             commands::get_pending_remote_preset,
             commands::dismiss_remote_preset,
             commands::confirm_remote_preset_download,
-            commands::import_remote_preset
+            commands::import_remote_preset,
+            commands::pick_sideload_file,
+            commands::market_search,
+            commands::market_plugin,
+            commands::market_image,
+            commands::sideload_plugin
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {
@@ -165,12 +175,13 @@ fn main() {
             }
         }
         tauri::RunEvent::Exit => {
-            commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
             // Kill a running `dsh plugin` tree first: it is a separate
             // process group / Job Object from the sidecar's Harness tree,
             // and on unix it would be orphaned once the shell exits.
-            app.state::<std::sync::Arc<plugins::PluginRunner>>()
-                .shutdown();
+            let plugin_runner = app.state::<std::sync::Arc<plugins::PluginRunner>>().clone();
+            plugin_runner.shutdown();
+            commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
+            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
             // The sidecar kills the whole Node/Harness tree on stdin EOF,
             // and the Windows Job Object guarantees cleanup even if we
             // crash. This is the polite path.

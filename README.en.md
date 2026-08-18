@@ -9,7 +9,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Version | v0.2.6 · Windows x64 NSIS / macOS arm64 DMG · unsigned preview · [中文](README.md) |
+| Version | v0.2.8 · Windows x64 NSIS / macOS arm64 DMG · unsigned preview · [中文](README.md) |
 
 > ⚠️ **macOS users**: the Apple developer certificate is still being
 > applied for, so the app is unsigned. If Gatekeeper blocks the first
@@ -24,7 +24,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 
 | | |
 |---|---|
-| 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app install/uninstall; safe preset import/export |
+| 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app marketplace search/install; safe preset import/export |
 | 🔄 **Auto-updater** (Windows) | Update packages verified by an embedded minisign pubkey; macOS activates once signed + notarized |
 | 💓 **Hung-process self-healing** | Heartbeat detects an unresponsive Harness and restarts it (backoff + cap) |
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |
@@ -144,7 +144,7 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   draft release + `latest.json`).
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Status: v0.2.6 in development (cordis.run deep-link install confirmation;
+- Status: v0.2.8 in development (cordis.run deep-link install confirmation;
   v0.2.4 is the current release, and the v0.2.3 draft is obsolete and will
   not be published).
 - Known limits: unsigned (manual SmartScreen/Gatekeeper approval); macOS
