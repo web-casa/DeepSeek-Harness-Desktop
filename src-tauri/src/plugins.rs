@@ -88,6 +88,7 @@ fn validate_sideload_path(path: &Path) -> Result<(), String> {
 /// forwarded to upstream `spawnSync("pnpm", { shell: win32 })`. Paths with
 /// spaces or cmd metacharacters are rejected instead of ever being parsed by
 /// the shell.
+#[cfg_attr(not(windows), allow(dead_code))] // Windows-only safety gate
 pub fn is_shell_safe_spec(spec: &str) -> bool {
     !spec.is_empty()
         && spec.bytes().all(|b| {

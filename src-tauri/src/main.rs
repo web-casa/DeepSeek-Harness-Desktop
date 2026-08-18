@@ -175,14 +175,13 @@ fn main() {
             }
         }
         tauri::RunEvent::Exit => {
-            commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
-            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
-            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
             // Kill a running `dsh plugin` tree first: it is a separate
             // process group / Job Object from the sidecar's Harness tree,
             // and on unix it would be orphaned once the shell exits.
-            app.state::<std::sync::Arc<plugins::PluginRunner>>()
-                .shutdown();
+            let plugin_runner = app.state::<std::sync::Arc<plugins::PluginRunner>>().clone();
+            plugin_runner.shutdown();
+            commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
+            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
             // The sidecar kills the whole Node/Harness tree on stdin EOF,
             // and the Windows Job Object guarantees cleanup even if we
             // crash. This is the polite path.

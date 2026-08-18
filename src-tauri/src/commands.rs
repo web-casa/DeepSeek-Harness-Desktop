@@ -381,7 +381,23 @@ pub async fn market_image(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{read_installed_plugins, redact};
+    use super::{read_installed_plugins, redact, sweep_sideload_dir};
+
+    #[test]
+    fn sideload_sweep_keeps_referenced_tarball() {
+        let dir = std::env::temp_dir().join(format!("dsh-sideload-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let keep = dir.join("keep.tgz");
+        let stale = dir.join("stale.tgz");
+        std::fs::write(&keep, b"a").unwrap();
+        std::fs::write(&stale, b"b").unwrap();
+        let referenced = std::collections::HashSet::from([keep.clone()]);
+        sweep_sideload_dir(&dir, &referenced);
+        assert!(keep.is_file());
+        assert!(!stale.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir =
@@ -1012,6 +1028,7 @@ pub fn sideload_plugin(
     };
     let staged = crate::plugins::stage_sideload(&paths.dsh_home, src)?;
     let spec = format!("file:{}", staged.display());
+    #[cfg(windows)]
     if !crate::plugins::is_shell_safe_spec(&spec) {
         let _ = std::fs::remove_file(&staged);
         return Err(
@@ -1187,8 +1204,17 @@ pub fn sweep_stale_sideloads(runtime: &Runtime) {
         .filter_map(|spec| spec.strip_prefix("file:"))
         .map(std::path::PathBuf::from)
         .collect();
-    let dir = paths.dsh_home.join(".desktop-tools").join("sideload");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    sweep_sideload_dir(
+        &paths.dsh_home.join(".desktop-tools").join("sideload"),
+        &referenced,
+    );
+}
+
+fn sweep_sideload_dir(
+    dir: &std::path::Path,
+    referenced: &std::collections::HashSet<std::path::PathBuf>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
