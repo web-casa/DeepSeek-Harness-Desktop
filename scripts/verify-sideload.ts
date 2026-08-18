@@ -127,6 +127,12 @@ async function main(): Promise<void> {
   }
   ok(`profile dependency recorded as ${deps["dsh-sideload-fixture"]}`);
 
+  // The desktop keeps a successfully installed file: tarball around because
+  // the profile dependency still references it. Prove a later pnpm operation
+  // can still resolve that path before the package is removed.
+  await run(["add", "is-odd"], "dsh plugin add is-odd while file: dep is retained");
+  ok("subsequent add succeeded while file: dependency source was retained");
+
   await run(["remove", "dsh-sideload-fixture"], "dsh plugin remove dsh-sideload-fixture");
   ok("dsh plugin remove dsh-sideload-fixture exited 0");
 

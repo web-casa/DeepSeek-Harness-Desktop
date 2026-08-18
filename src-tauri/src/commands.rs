@@ -950,11 +950,6 @@ fn run_plugin_spec(
     };
     *plugins.child.lock().unwrap_or_else(|p| p.into_inner()) = None;
     plugins.busy.store(false, Ordering::SeqCst);
-    if op == "add" {
-        if let Some(path) = plugin_spec.strip_prefix("file:") {
-            let _ = std::fs::remove_file(path);
-        }
-    }
     let _ = app.emit(
         "plugin-done",
         serde_json::json!({ "exit": exit, "tail": tail.join("\n") }),
@@ -1177,6 +1172,62 @@ fn remove_remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) {
         }
         _ => {}
     }
+}
+
+/// Remove staged sideload tarballs that are no longer referenced by the web
+/// profile. A successfully installed `file:` dependency must keep its source
+/// tarball: pnpm re-reads that path for later lock/store operations.
+pub fn sweep_stale_sideloads(runtime: &Runtime) {
+    let Some(paths) = runtime.paths() else {
+        return;
+    };
+    let referenced: std::collections::HashSet<std::path::PathBuf> = read_web_deps(&paths)
+        .values()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|spec| spec.strip_prefix("file:"))
+        .map(std::path::PathBuf::from)
+        .collect();
+    let dir = paths.dsh_home.join(".desktop-tools").join("sideload");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.to_ascii_lowercase().ends_with(".tgz") {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        if !referenced.contains(&path) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+fn read_web_deps(paths: &crate::paths::RuntimePaths) -> serde_json::Map<String, serde_json::Value> {
+    let path = paths
+        .dsh_home
+        .join("profiles")
+        .join("web")
+        .join("package.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return serde_json::Map::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return serde_json::Map::new();
+    };
+    json.get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) -> std::path::PathBuf {

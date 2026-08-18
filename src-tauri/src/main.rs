@@ -96,6 +96,7 @@ fn main() {
             tray::init(&app.handle().clone());
             harness::init(&app.handle().clone());
             commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
+            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
             // The two-phase preset import holds its preview here between
             // preview_preset and import_preset. MUST be managed: extracting
             // an unmanaged State panics at the first command invocation.
@@ -175,6 +176,8 @@ fn main() {
         }
         tauri::RunEvent::Exit => {
             commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
+            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
+            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
             // Kill a running `dsh plugin` tree first: it is a separate
             // process group / Job Object from the sidecar's Harness tree,
             // and on unix it would be orphaned once the shell exits.
