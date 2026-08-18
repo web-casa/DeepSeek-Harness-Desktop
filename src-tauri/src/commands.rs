@@ -381,7 +381,30 @@ pub async fn market_image(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{read_installed_plugins, redact, sweep_sideload_dir};
+    use super::{read_installed_plugins, redact, sweep_sideload_dir, sweep_sideloads_root};
+
+    #[test]
+    fn sideload_sweep_does_not_follow_symlinked_tools_parent() {
+        let root =
+            std::env::temp_dir().join(format!("dsh-sideload-parent-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_sideload = outside.join("sideload");
+        std::fs::create_dir_all(&outside_sideload).unwrap();
+        let victim = outside_sideload.join("victim.tgz");
+        std::fs::write(&victim, b"x").unwrap();
+        let link = root.join(".desktop-tools");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &link).unwrap();
+        let referenced = std::collections::HashSet::new();
+        sweep_sideloads_root(&link, &referenced);
+        assert!(victim.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn sideload_sweep_does_not_follow_symlink_dir() {
@@ -1224,10 +1247,20 @@ pub fn sweep_stale_sideloads(runtime: &Runtime) {
         .filter_map(|spec| spec.strip_prefix("file:"))
         .map(std::path::PathBuf::from)
         .collect();
-    sweep_sideload_dir(
-        &paths.dsh_home.join(".desktop-tools").join("sideload"),
-        &referenced,
-    );
+    sweep_sideloads_root(&paths.dsh_home.join(".desktop-tools"), &referenced);
+}
+
+fn sweep_sideloads_root(
+    tools: &std::path::Path,
+    referenced: &std::collections::HashSet<std::path::PathBuf>,
+) {
+    match std::fs::symlink_metadata(tools) {
+        Ok(meta) if meta.file_type().is_symlink() => return,
+        Ok(meta) if !meta.is_dir() => return,
+        Ok(_) => {}
+        Err(_) => return,
+    }
+    sweep_sideload_dir(&tools.join("sideload"), referenced);
 }
 
 fn sweep_sideload_dir(
