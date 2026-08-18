@@ -81,6 +81,14 @@ pub fn is_valid_market_slug(slug: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+fn base_url_allowed(url: &reqwest::Url) -> bool {
+    let https_cordis = url.scheme() == "https" && url.host_str() == Some("cordis.run");
+    let debug_loopback = cfg!(debug_assertions)
+        && url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
+    https_cordis || debug_loopback
+}
+
 #[derive(Debug, Clone)]
 struct Cached {
     at: Instant,
@@ -102,8 +110,8 @@ impl MarketClient {
         let base_url = {
             let parsed = reqwest::Url::parse(&base_url)
                 .map_err(|e| format!("invalid CORDIS_RUN_API URL: {e}"))?;
-            if parsed.scheme() != "https" || parsed.host_str() != Some("cordis.run") {
-                return Err("CORDIS_RUN_API must be https://cordis.run".to_string());
+            if !base_url_allowed(&parsed) {
+                return Err("CORDIS_RUN_API must be https://cordis.run (debug builds may use http://127.0.0.1)".to_string());
             }
             base_url
         };
@@ -281,8 +289,8 @@ impl MarketClient {
 
     pub async fn image(&self, url: &str) -> Result<Value, String> {
         let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid image URL: {e}"))?;
-        if parsed.scheme() != "https" || parsed.host_str() != Some("cordis.run") {
-            return Err("market images must use https and host cordis.run".to_string());
+        if !base_url_allowed(&parsed) {
+            return Err("market images must use an allowed market host".to_string());
         }
         let response = self
             .http
@@ -401,6 +409,22 @@ mod tests {
                 .expect("detail fixture should parse");
         assert!(detail.screenshots.is_empty());
         assert_eq!(detail.platforms, vec!["desktop".to_string()]);
+    }
+
+    #[test]
+    fn loopback_allowed_only_in_debug_builds() {
+        let release_cordis =
+            base_url_allowed(&reqwest::Url::parse("https://cordis.run/api/v1").expect("url"));
+        assert!(release_cordis);
+        if cfg!(debug_assertions) {
+            let loopback = base_url_allowed(
+                &reqwest::Url::parse("http://127.0.0.1:8787/api/v1").expect("url"),
+            );
+            assert!(loopback);
+        }
+        assert!(!base_url_allowed(
+            &reqwest::Url::parse("https://evil.example/api/v1").expect("url")
+        ));
     }
 
     #[test]
