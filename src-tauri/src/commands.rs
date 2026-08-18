@@ -384,6 +384,26 @@ mod tests {
     use super::{read_installed_plugins, redact, sweep_sideload_dir};
 
     #[test]
+    fn sideload_sweep_does_not_follow_symlink_dir() {
+        let root = std::env::temp_dir().join(format!("dsh-sideload-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.tgz");
+        std::fs::write(&victim, b"x").unwrap();
+        let link = root.join("sideload-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &link).unwrap();
+        let referenced = std::collections::HashSet::new();
+        sweep_sideload_dir(&link, &referenced);
+        assert!(victim.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn sideload_sweep_keeps_referenced_tarball() {
         let dir = std::env::temp_dir().join(format!("dsh-sideload-sweep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1214,6 +1234,15 @@ fn sweep_sideload_dir(
     dir: &std::path::Path,
     referenced: &std::collections::HashSet<std::path::PathBuf>,
 ) {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(dir);
+            return;
+        }
+        Ok(meta) if !meta.is_dir() => return,
+        Ok(_) => {}
+        Err(_) => return,
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
