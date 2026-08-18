@@ -354,14 +354,20 @@ pub async fn pick_sideload_file(app: AppHandle) -> Result<Option<String>, String
 pub async fn market_search(
     query: String,
     category: Option<String>,
-    page: Option<u32>,
-    per_page: Option<u32>,
+    limit: Option<u32>,
+    cursor: Option<String>,
     platform: Option<String>,
     market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
 ) -> Result<Value, String> {
     let platform = platform.unwrap_or_else(|| "desktop".to_string());
     market
-        .search(&query, category.as_deref(), page, per_page, &platform)
+        .search(
+            &query,
+            category.as_deref(),
+            limit,
+            cursor.as_deref(),
+            &platform,
+        )
         .await
 }
 

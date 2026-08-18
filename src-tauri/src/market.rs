@@ -11,15 +11,41 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+struct Source {
+    #[serde(rename = "type", default)]
+    source_type: Option<String>,
+    #[serde(rename = "packageName", default)]
+    package_name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    integrity: Option<String>,
+    #[serde(default)]
+    registry: Option<String>,
+    #[serde(default)]
+    tarball: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum Description {
+    Text(String),
+    Localized {
+        #[serde(default)]
+        zh: Option<String>,
+        #[serde(default)]
+        en: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct MarketItem {
     slug: String,
     name: String,
     #[serde(default)]
-    npm: Option<String>,
+    source: Option<Source>,
     #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
+    description: Option<Description>,
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
@@ -28,6 +54,28 @@ struct MarketItem {
     stars: Option<u32>,
     #[serde(default)]
     homepage: Option<String>,
+    #[serde(default)]
+    blocked: Option<bool>,
+    #[serde(default)]
+    deprecated: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MarketVersion {
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    source: Option<Source>,
+    #[serde(default)]
+    platforms: Vec<String>,
+    #[serde(default)]
+    engines: Option<serde_json::Value>,
+    #[serde(default)]
+    blocked: Option<bool>,
+    #[serde(default)]
+    deprecated: Option<bool>,
+    #[serde(rename = "publishedAt", default)]
+    published_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -35,11 +83,9 @@ struct MarketDetail {
     slug: String,
     name: String,
     #[serde(default)]
-    npm: Option<String>,
+    source: Option<Source>,
     #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
+    description: Option<Description>,
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
@@ -49,7 +95,23 @@ struct MarketDetail {
     #[serde(default)]
     homepage: Option<String>,
     #[serde(default)]
+    blocked: Option<bool>,
+    #[serde(default)]
+    deprecated: Option<bool>,
+    #[serde(default)]
     screenshots: Vec<String>,
+    #[serde(default)]
+    versions: Vec<MarketVersion>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct MarketPage {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(rename = "hasMore", default)]
+    has_more: bool,
+    #[serde(default)]
+    limit: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -57,11 +119,9 @@ struct MarketSearchResponse {
     #[serde(default)]
     items: Vec<MarketItem>,
     #[serde(default)]
-    total: u32,
+    count: u32,
     #[serde(default)]
-    page: u32,
-    #[serde(default)]
-    per_page: u32,
+    page: MarketPage,
 }
 
 const DEFAULT_BASE_URL: &str = "https://cordis.run/api/v1";
@@ -173,17 +233,18 @@ impl MarketClient {
         &self,
         query: &str,
         category: Option<&str>,
-        page: Option<u32>,
-        per_page: Option<u32>,
+        limit: Option<u32>,
+        cursor: Option<&str>,
         platform: &str,
     ) -> Result<Value, String> {
+        let limit = limit.unwrap_or(30);
         let cache_key = format!(
             "{:?}",
             (
                 query,
                 category.unwrap_or(""),
-                page.unwrap_or(1),
-                per_page.unwrap_or(20),
+                limit,
+                cursor.unwrap_or(""),
                 platform
             )
         );
@@ -196,8 +257,12 @@ impl MarketClient {
         url.query_pairs_mut()
             .append_pair("q", query)
             .append_pair("platform", platform)
-            .append_pair("page", &page.unwrap_or(1).to_string())
-            .append_pair("per_page", &per_page.unwrap_or(20).to_string());
+            .append_pair("limit", &limit.to_string());
+        if let Some(cursor) = cursor {
+            if !cursor.is_empty() {
+                url.query_pairs_mut().append_pair("cursor", cursor);
+            }
+        }
         if let Some(category) = category {
             url.query_pairs_mut().append_pair("category", category);
         }
@@ -215,10 +280,14 @@ impl MarketClient {
             let body = read_limited_json_body(response).await?;
             let mut parsed: MarketSearchResponse = serde_json::from_slice(&body)
                 .map_err(|e| format!("market search response was not JSON: {e}"))?;
+            // Defensive only: the server already filters by `platform`.
+            // Keep `count` and `page` exactly as sent — they are the server's
+            // cursor-pagination truth. If the server ignored the filter, the
+            // worst case is an item/count mismatch, not a wrong-platform
+            // install (the UI still checks platforms before installing).
             parsed
                 .items
                 .retain(|item| item.platforms.iter().any(|p| p == platform));
-            parsed.total = parsed.items.len() as u32;
             let json = serde_json::to_value(parsed)
                 .map_err(|e| format!("market search response serialization failed: {e}"))?;
             MarketClient::cache_put(&self.search_cache, &cache_key, json.clone());
@@ -381,34 +450,79 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_filters_desktop_items() {
-        let body = br#"{
+    fn parses_cursor_page_and_defensively_filters_items() {
+        let body = r#"{
             "items": [
-                {"slug":"a","name":"A","platforms":["web","desktop"]},
-                {"slug":"b","name":"B","platforms":["web"]},
-                {"slug":"c","name":"C","platforms":["desktop"]}
+                {
+                    "slug":"a",
+                    "name":"A",
+                    "source":{"type":"npm","packageName":"a-pkg","version":"1.0.0"},
+                    "description":{"zh":"甲","en":"A"},
+                    "platforms":["web","desktop"]
+                },
+                {
+                    "slug":"b",
+                    "name":"B",
+                    "source":{"type":"npm","packageName":"b-pkg","version":"2.0.0"},
+                    "platforms":["web"]
+                },
+                {
+                    "slug":"c",
+                    "name":"C",
+                    "source":{"type":"npm","packageName":"c-pkg","version":"3.0.0"},
+                    "platforms":["desktop"]
+                }
             ],
-            "total": 3,
-            "page": 1,
-            "per_page": 20
+            "count": 3,
+            "page": {"cursor":"opaque","hasMore":true,"limit":50}
         }"#;
         let mut parsed: MarketSearchResponse =
-            serde_json::from_slice(body).expect("fixture should parse");
+            serde_json::from_str(body).expect("fixture should parse");
+        assert_eq!(parsed.page.limit, 50);
+        assert!(parsed.page.has_more);
+        assert_eq!(parsed.page.cursor.as_deref(), Some("opaque"));
         parsed
             .items
             .retain(|item| item.platforms.iter().any(|p| p == "desktop"));
         assert_eq!(parsed.items.len(), 2);
         assert_eq!(parsed.items[0].slug, "a");
+        assert_eq!(
+            parsed.items[0]
+                .source
+                .as_ref()
+                .and_then(|s| s.package_name.as_deref()),
+            Some("a-pkg")
+        );
         assert_eq!(parsed.items[1].slug, "c");
+        // Server pagination fields are preserved untouched.
+        assert_eq!(parsed.count, 3);
+        assert_eq!(parsed.page.limit, 50);
+        assert!(parsed.page.has_more);
+        assert_eq!(parsed.page.cursor.as_deref(), Some("opaque"));
+        match parsed.items[0].description.as_ref() {
+            Some(Description::Localized { zh, en }) => {
+                assert_eq!(zh.as_deref(), Some("甲"));
+                assert_eq!(en.as_deref(), Some("A"));
+            }
+            _ => panic!("description should parse as localized text"),
+        }
     }
 
     #[test]
-    fn detail_defaults_screenshots_to_empty() {
-        let detail: MarketDetail =
-            serde_json::from_str(r#"{"slug":"x","name":"X","platforms":["desktop"]}"#)
-                .expect("detail fixture should parse");
+    fn detail_defaults_screenshots_to_empty_and_parses_source() {
+        let detail: MarketDetail = serde_json::from_str(
+            r#"{"slug":"x","name":"X","platforms":["desktop"],"source":{"type":"npm","packageName":"x-pkg","version":"1.0.0"}}"#,
+        )
+        .expect("detail fixture should parse");
         assert!(detail.screenshots.is_empty());
         assert_eq!(detail.platforms, vec!["desktop".to_string()]);
+        assert_eq!(
+            detail
+                .source
+                .as_ref()
+                .and_then(|s| s.package_name.as_deref()),
+            Some("x-pkg")
+        );
     }
 
     #[test]

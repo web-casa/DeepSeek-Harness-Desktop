@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "catalogRevision": "2026-08-18T00:00:00Z-8f3a",
+  "updated": "2026-08-18T00:00:00Z",
+  "page": { "cursor": "opaque", "hasMore": false, "limit": 50 },
+  "count": 2,
+  "items": [
+    {
+      "slug": "dsh-market",
+      "name": "dshmarket",
+      "entryRevision": "2026-08-18T00:00:00Z-a1b2",
+      "description": { "zh": "可视化插件市场", "en": "Visual plugin market" },
+      "category": "market",
+      "homepage": "https://github.com/dsh-market/dsh-market",
+      "source": {
+        "type": "npm",
+        "packageName": "dshmarket",
+        "version": "1.11.2",
+        "integrity": "sha512-CFx+GExHSBJVeF66kKBdGr+aQp7bbWF90fEEZpjW5REzmdpRC2gBnAt5BpkT9pcBSL7fkmW/2s4G2vFo7FD6Mw==",
+        "registry": "https://registry.npmjs.org",
+        "tarball": "https://registry.npmjs.org/dshmarket/-/dshmarket-1.11.2.tgz"
+      },
+      "platforms": ["web", "desktop"],
+      "engines": { "dsh": ">=0.1.0-rc.6 <0.2.0" },
+      "stars": 805,
+      "added": "2026-08-14",
+      "deprecated": false,
+      "replacementSlug": null,
+      "blocked": false,
+      "installHint": "dsh plugin --profile web add dshmarket",
+      "updatedAt": "2026-08-18T00:00:00Z"
+    },
+    {
+      "slug": "desktop-only",
+      "name": "desktop-only-pkg",
+      "entryRevision": "2026-08-18T00:00:00Z-b2c3",
+      "description": { "zh": "仅桌面", "en": "Desktop only" },
+      "category": "agent",
+      "source": {
+        "type": "npm",
+        "packageName": "desktop-only-pkg",
+        "version": "1.0.0",
+        "integrity": "sha512-AAAA",
+        "registry": "https://registry.npmjs.org",
+        "tarball": "https://registry.npmjs.org/desktop-only-pkg/-/desktop-only-pkg-1.0.0.tgz"
+      },
+      "platforms": ["desktop"],
+      "engines": { "dsh": ">=0.1.0-rc.6 <0.2.0" },
+      "blocked": false,
+      "installHint": "dsh plugin --profile desktop add desktop-only-pkg"
+    }
+  ]
+}

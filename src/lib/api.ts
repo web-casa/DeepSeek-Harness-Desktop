@@ -122,46 +122,75 @@ export const uninstallPlugin = (name: string): Promise<void> =>
 export const cancelPluginOp = (): Promise<void> => invoke("cancel_plugin_op");
 
 
+export interface MarketPluginSource {
+  type?: string;
+  packageName?: string;
+  version?: string;
+  integrity?: string;
+  registry?: string;
+  tarball?: string;
+}
+
+export type MarketDescription = string | { zh?: string; en?: string };
+
 export interface MarketPluginSummary {
   slug: string;
   name: string;
-  npm?: string;
-  version?: string;
-  description?: string;
-  category?: string;
+  source?: MarketPluginSource | null;
+  description?: MarketDescription | null;
+  category?: string | null;
   platforms: string[];
-  stars?: number;
-  homepage?: string;
+  stars?: number | null;
+  homepage?: string | null;
+  blocked?: boolean | null;
+  deprecated?: boolean | null;
+}
+
+export interface MarketPluginVersion {
+  version?: string;
+  source?: MarketPluginSource | null;
+  platforms?: string[];
+  engines?: Record<string, unknown> | null;
+  blocked?: boolean | null;
+  deprecated?: boolean | null;
+  publishedAt?: string | null;
 }
 
 export interface MarketPluginDetail {
   slug: string;
   name: string;
-  npm?: string;
-  version?: string;
-  description?: string;
-  category?: string;
+  source?: MarketPluginSource | null;
+  description?: MarketDescription | null;
+  category?: string | null;
   platforms: string[];
-  stars?: number;
-  homepage?: string;
+  stars?: number | null;
+  homepage?: string | null;
+  blocked?: boolean | null;
+  deprecated?: boolean | null;
   screenshots?: string[];
+  versions?: MarketPluginVersion[];
+}
+
+export interface MarketSearchPage {
+  cursor?: string | null;
+  hasMore: boolean;
+  limit: number;
 }
 
 export interface MarketSearchResult {
   items: MarketPluginSummary[];
-  total: number;
-  page: number;
-  per_page: number;
+  count: number;
+  page: MarketSearchPage;
 }
 
 export const marketSearch = (
   query: string,
   category?: string,
-  page?: number,
-  perPage?: number,
+  limit?: number,
+  cursor?: string,
   platform = "desktop",
 ): Promise<MarketSearchResult> =>
-  invoke("market_search", { query, category, page, perPage, platform });
+  invoke("market_search", { query, category, limit, cursor, platform });
 
 export const marketPlugin = (slug: string): Promise<MarketPluginDetail> =>
   invoke("market_plugin", { slug });

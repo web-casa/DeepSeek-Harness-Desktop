@@ -42,6 +42,7 @@
     pickSideloadFile,
     type MarketPluginSummary,
     type MarketPluginDetail,
+    type MarketDescription,
     type RemotePresetRequest,
     type RemotePresetPreview,
     type Status,
@@ -193,12 +194,26 @@
     }
   }
 
+  function marketVersion(item: MarketPluginSummary | MarketPluginDetail): string | null {
+    return item.source?.version ?? null;
+  }
+
+  function marketPackageName(item: MarketPluginSummary | MarketPluginDetail): string {
+    return item.source?.packageName?.trim() || item.name.trim();
+  }
+
+  function marketDescriptionText(desc: MarketDescription | null | undefined): string {
+    if (!desc) return "";
+    if (typeof desc === "string") return desc;
+    return desc.zh ?? desc.en ?? "";
+  }
+
   async function doMarketSearch() {
     if (marketBusy) return;
     marketBusy = true;
     marketError = null;
     try {
-      const res = await marketSearch(marketQuery.trim(), undefined, 1, 30, "desktop");
+      const res = await marketSearch(marketQuery.trim(), undefined, 30, undefined, "desktop");
       marketItems = res.items ?? [];
     } catch (e) {
       marketError = `市场搜索失败：${e}`;
@@ -238,7 +253,7 @@
   function confirmMarketInstall() {
     const item = marketConfirm;
     if (!item || pluginBusy) return;
-    const name = item.npm?.trim() || item.name.trim();
+    const name = item.source?.packageName?.trim() || item.name.trim();
     marketConfirm = null;
     startPluginOp(name, "install");
   }
@@ -966,8 +981,8 @@
         <div class="preset-row">
           <span class="preset-id">
             <span class="preset-name">{item.name}</span>
-            {#if item.version}<span class="badge">v{item.version}</span>{/if}
-            {#if item.stars !== undefined}<span class="badge">★ {item.stars}</span>{/if}
+            {#if marketVersion(item)}<span class="badge">v{marketVersion(item)}</span>{/if}
+            {#if item.stars != null}<span class="badge">★ {item.stars}</span>{/if}
             {#if item.category}<span class="badge">{item.category}</span>{/if}
             <span class="badge">{item.platforms.includes("desktop") ? "desktop" : "web-only"}</span>
           </span>
@@ -978,8 +993,8 @@
             <button class="ghost" disabled>仅网页版</button>
           {/if}
         </div>
-        {#if item.description}
-          <div class="preset-issues">{item.description}</div>
+        {#if marketDescriptionText(item.description)}
+          <div class="preset-issues">{marketDescriptionText(item.description)}</div>
         {/if}
       {/each}
     {:else}
@@ -1112,8 +1127,8 @@
   <div class="modal-backdrop">
     <div class="modal" role="dialog" aria-modal="true" aria-label="插件详情">
       <div class="modal-title">{marketDetail.name}</div>
-      <div class="modal-name">{marketDetail.npm ?? marketDetail.slug}</div>
-      <div class="modal-meta">{marketDetail.description}</div>
+      <div class="modal-name">{marketPackageName(marketDetail)}</div>
+      <div class="modal-meta">{marketDescriptionText(marketDetail.description)}</div>
       {#if marketImages.length > 0}
         <div class="market-shots">
           {#each marketImages as src, i (i)}
@@ -1132,7 +1147,7 @@
   <div class="modal-backdrop">
     <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
       <div class="modal-title">安装 Cordis 插件？</div>
-      <div class="modal-name">{marketConfirm.npm ?? marketConfirm.name}</div>
+      <div class="modal-name">{marketPackageName(marketConfirm)}</div>
       <div class="modal-meta">
         来源：<button class="inline-link" onclick={() => openSite(`https://cordis.run/plugins/${marketConfirm!.slug}`)}>
           https://cordis.run/plugins/{marketConfirm.slug}

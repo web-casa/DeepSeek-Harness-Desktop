@@ -83,6 +83,16 @@ pnpm test:scripts                                 # node:test 单测（零依赖
 pnpm tauri dev                                    # 桌面开发模式
 ```
 
+### cordis.run 本地 fixture（市场联调）
+
+真 API 上线前，可用仓库内置 fixture 联调市场功能（数据契约与真实 API 一致：嵌套 `source`、`{zh,en}` 描述、cursor 分页字段 `page.cursor/hasMore/limit` + `count`）：
+
+```bash
+node tools/cordis-fixture/fixture-server.mjs
+# 输出端口后，在另一个终端设置后启动桌面调试构建：
+CORDIS_RUN_API=http://127.0.0.1:<port>/api/v1 pnpm tauri dev
+```
+
 > `~/.cargo` 不可写时：`export CARGO_HOME=<repo>/.tmp/cargo-home`。
 
 ### 质量门
