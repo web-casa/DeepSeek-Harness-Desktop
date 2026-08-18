@@ -125,8 +125,10 @@ async function main(): Promise<void> {
   if (typeof deps["dsh-sideload-fixture"] !== "string") {
     fail(`sideload fixture missing from profile dependencies: ${JSON.stringify(deps)}`);
   }
-  if (deps["dsh-sideload-fixture"] !== `file:${tarball}`) {
-    fail(`dependency spec mismatch: ${deps["dsh-sideload-fixture"]} !== file:${tarball}`);
+  // pnpm normalizes file: specs to forward slashes on Windows.
+  const expectedFileSpec = `file:${tarball.replace(/\\/g, "/")}`;
+  if (deps["dsh-sideload-fixture"] !== expectedFileSpec) {
+    fail(`dependency spec mismatch: ${deps["dsh-sideload-fixture"]} !== ${expectedFileSpec}`);
   }
   ok(`profile dependency recorded exactly as ${deps["dsh-sideload-fixture"]}`);
 
