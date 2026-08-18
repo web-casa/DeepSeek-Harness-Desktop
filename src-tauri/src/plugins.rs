@@ -133,7 +133,7 @@ pub fn stage_sideload(dsh_home: &Path, src: &Path) -> Result<PathBuf, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let dest = dir.join(format!("sideload-{millis}.tgz"));
+    let dest = dir.join(format!("sideload-{millis}-{}.tgz", std::process::id()));
     std::fs::copy(src, &dest).map_err(|e| format!("cannot stage sideload file: {e}"))?;
     Ok(dest)
 }

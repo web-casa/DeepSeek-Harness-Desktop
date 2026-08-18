@@ -101,7 +101,6 @@
   let marketDetailBusy = $state(false);
   let marketImages = $state<string[]>([]);
   let sideloadPath = $state<string | null>(null);
-  let sideloadBusy = $state(false);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -215,16 +214,16 @@
       const detail = await marketPlugin(slug);
       marketDetail = detail;
       const shots = (detail.screenshots ?? []).slice(0, 4);
-      const loaded: string[] = [];
-      for (const url of shots) {
-        try {
-          const image = await marketImage(url);
-          loaded.push(image.dataUrl);
-        } catch {
-          /* skip invalid/oversized screenshots */
-        }
-      }
-      marketImages = loaded;
+      const loaded = await Promise.all(
+        shots.map(async (url) => {
+          try {
+            return (await marketImage(url)).dataUrl;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      marketImages = loaded.filter((src): src is string => src !== null);
     } catch (e) {
       marketError = `插件详情加载失败：${e}`;
     }
@@ -1155,7 +1154,7 @@
       <div class="modal-name">{sideloadPath}</div>
       <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将通过 `dsh plugin add` 安装该 .tgz。</div>
       <div class="modal-actions">
-        <button class="primary" onclick={confirmSideloadInstall} disabled={pluginBusy || sideloadBusy}>确认安装</button>
+        <button class="primary" onclick={confirmSideloadInstall} disabled={pluginBusy}>确认安装</button>
         <button class="ghost" onclick={() => (sideloadPath = null)}>取消</button>
       </div>
     </div>

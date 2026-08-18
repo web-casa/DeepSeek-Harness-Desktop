@@ -125,7 +125,10 @@ async function main(): Promise<void> {
   if (typeof deps["dsh-sideload-fixture"] !== "string") {
     fail(`sideload fixture missing from profile dependencies: ${JSON.stringify(deps)}`);
   }
-  ok(`profile dependency recorded as ${deps["dsh-sideload-fixture"]}`);
+  if (deps["dsh-sideload-fixture"] !== `file:${tarball}`) {
+    fail(`dependency spec mismatch: ${deps["dsh-sideload-fixture"]} !== file:${tarball}`);
+  }
+  ok(`profile dependency recorded exactly as ${deps["dsh-sideload-fixture"]}`);
 
   // The desktop keeps a successfully installed file: tarball around because
   // the profile dependency still references it. Prove a later pnpm operation

@@ -336,14 +336,17 @@ pub fn quit_app(app: AppHandle) {
 #[tauri::command]
 pub async fn pick_sideload_file(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    let (tx, mut rx) = tauri::async_runtime::channel::<Option<std::path::PathBuf>>(1);
     app.dialog()
         .file()
         .add_filter("dsh plugin package", &["tgz"])
         .pick_file(move |p| {
-            let _ = tx.send(p.map(|f| f.into_path().unwrap_or_default()));
+            let _ = tx.try_send(p.map(|f| f.into_path().unwrap_or_default()));
         });
-    let path = rx.recv().map_err(|e| e.to_string())?;
+    let path = rx
+        .recv()
+        .await
+        .ok_or_else(|| "file dialog closed".to_string())?;
     Ok(path.map(|p| p.to_string_lossy().to_string()))
 }
 

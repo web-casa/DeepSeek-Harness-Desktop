@@ -71,6 +71,16 @@ const IMAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const JSON_MAX_BYTES: usize = 1024 * 1024;
 const CACHE_MAX_ENTRIES: usize = 64;
 
+pub fn is_valid_market_slug(slug: &str) -> bool {
+    let bytes = slug.as_bytes();
+    !slug.is_empty()
+        && slug.len() <= 128
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 #[derive(Debug, Clone)]
 struct Cached {
     at: Instant,
@@ -160,12 +170,14 @@ impl MarketClient {
         platform: &str,
     ) -> Result<Value, String> {
         let cache_key = format!(
-            "{}|{}|{}|{}|{}",
-            query,
-            category.unwrap_or(""),
-            page.unwrap_or(1),
-            per_page.unwrap_or(20),
-            platform
+            "{:?}",
+            (
+                query,
+                category.unwrap_or(""),
+                page.unwrap_or(1),
+                per_page.unwrap_or(20),
+                platform
+            )
         );
         if let Some(fresh) = Self::cache_get(&self.search_cache, &cache_key, SEARCH_TTL) {
             return Ok(fresh);
@@ -198,6 +210,7 @@ impl MarketClient {
             parsed
                 .items
                 .retain(|item| item.platforms.iter().any(|p| p == platform));
+            parsed.total = parsed.items.len() as u32;
             let json = serde_json::to_value(parsed)
                 .map_err(|e| format!("market search response serialization failed: {e}"))?;
             MarketClient::cache_put(&self.search_cache, &cache_key, json.clone());
@@ -221,6 +234,9 @@ impl MarketClient {
     }
 
     pub async fn detail(&self, slug: &str) -> Result<Value, String> {
+        if !is_valid_market_slug(slug) {
+            return Err("invalid market slug".to_string());
+        }
         let cache_key = slug.to_string();
         if let Some(fresh) = Self::cache_get(&self.detail_cache, &cache_key, DETAIL_TTL) {
             return Ok(fresh);
@@ -385,6 +401,16 @@ mod tests {
                 .expect("detail fixture should parse");
         assert!(detail.screenshots.is_empty());
         assert_eq!(detail.platforms, vec!["desktop".to_string()]);
+    }
+
+    #[test]
+    fn slug_validator_rejects_path_and_query_chars() {
+        assert!(is_valid_market_slug("is-odd"));
+        assert!(is_valid_market_slug("code"));
+        assert!(!is_valid_market_slug("../other"));
+        assert!(!is_valid_market_slug("a?b"));
+        assert!(!is_valid_market_slug("a#b"));
+        assert!(!is_valid_market_slug("A"));
     }
 
     #[test]
