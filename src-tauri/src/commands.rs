@@ -1019,7 +1019,10 @@ pub fn sideload_plugin(
     let spec = format!("file:{}", staged.display());
     if !crate::plugins::is_shell_safe_spec(&spec) {
         let _ = std::fs::remove_file(&staged);
-        return Err("staged sideload path is not shell-safe on this platform".to_string());
+        return Err(
+            "当前用户目录路径包含空格或特殊字符，离线安装暂不可用；请使用插件市场在线安装"
+                .to_string(),
+        );
     }
     if let Err(error) = spawn_plugin_spec(app, &runtime, plugins.inner().clone(), spec, "add") {
         let _ = std::fs::remove_file(&staged);

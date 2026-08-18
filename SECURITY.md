@@ -77,7 +77,9 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
   `image/*`、2 MiB 上限；搜索/详情响应 1 MiB 上限并走内存缓存。
 - **离线侧载**：`.tgz` 必须绝对路径、非常规文件/符号链接拒绝、≤64 MiB；
   确认后复制到 `<dshHome>/.desktop-tools/sideload/` 的应用生成 ASCII 文件名，
-  再以 `file:` spec 交给插件执行器，用户文件名不进入 shell。
+  再以 `file:` spec 交给插件执行器，用户文件名不进入 shell。已知限制：
+  Windows 上若 `DSH_HOME` 路径含空格或 cmd 元字符，侧载会 fail-closed 拒绝，
+  请改用市场在线安装。
 
 ## 报告漏洞
 

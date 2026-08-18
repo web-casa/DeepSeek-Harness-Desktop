@@ -162,6 +162,9 @@ jobs:
       - name: Runtime smoke (pre-bundle)
         run: node scripts/verify-runtime.ts
 
+      - name: Sideload plugin smoke (pre-bundle)
+        run: node scripts/verify-sideload.ts
+
       # Code signing & updater (P3) — wire these secrets when available:
       #   TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)  updater signature keypair
       #   WINDOWS_CERTIFICATE(_PASSWORD)        Authenticode PFX (OV; EV needs HSM)
