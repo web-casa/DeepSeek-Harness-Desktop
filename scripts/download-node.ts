@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readManifest, runtimeDir, nodePath, tmpDir, fail, ok, info } from "./lib/common.ts";
+import { nodeRelease } from "./lib/node-distribution.ts";
 
 interface Dist {
   file: string;
@@ -26,21 +27,13 @@ function skipProbeArg(): boolean {
   return process.argv.includes("--skip-probe");
 }
 
-function distFor(v: string): Dist {
-  const base = `node-v${v}`;
-  const map: Record<string, Dist> = {
-    "win32-x64": { file: `${base}-win-x64.zip`, bin: `${base}-win-x64/node.exe` },
-    "win32-arm64": { file: `${base}-win-arm64.zip`, bin: `${base}-win-arm64/node.exe` },
-    "darwin-arm64": { file: `${base}-darwin-arm64.tar.gz`, bin: `${base}-darwin-arm64/bin/node` },
-    "darwin-x64": { file: `${base}-darwin-x64.tar.gz`, bin: `${base}-darwin-x64/bin/node` },
-    "linux-x64": { file: `${base}-linux-x64.tar.xz`, bin: `${base}-linux-x64/bin/node` },
-    "linux-arm64": { file: `${base}-linux-arm64.tar.xz`, bin: `${base}-linux-arm64/bin/node` },
-  };
+function distFor(): Dist {
   const arch = archArg() ?? process.arch;
   const key = `${process.platform}-${arch}`;
-  const dist = map[key];
-  if (!dist) fail(`unsupported platform/arch: ${key} (targets: win32-x64, win32-arm64, darwin-arm64, darwin-x64, linux-x64, linux-arm64)`);
-  return dist;
+  if (!Object.hasOwn(nodeRelease.distributions, key)) {
+    fail(`unsupported platform/arch: ${key} (targets: ${Object.keys(nodeRelease.distributions).join(", ")})`);
+  }
+  return nodeRelease.distributions[key as keyof typeof nodeRelease.distributions];
 }
 
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
@@ -107,12 +100,12 @@ async function downloadOnce(url: URL, dest: string): Promise<void> {
   process.stdout.write("\r");
 }
 
-function nodeDownloadUrl(version: string, dist: Dist): URL {
-  // The origin is intentionally a literal. The manifest is allowed to select
-  // only a validated release pathname; it must never influence the protocol,
-  // hostname, port, query, or fragment of an outbound request.
+function nodeDownloadUrl(dist: Dist): URL {
+  // Both the origin and release pathname come from generated source-code
+  // literals. The manifest is checked against that reviewed release below,
+  // but can never affect protocol, host, port, query, fragment, or pathname.
   const url = new URL("https://nodejs.org");
-  url.pathname = `/dist/v${version}/${dist.file}`;
+  url.pathname = `/dist/${nodeRelease.directory}/${dist.file}`;
   return url;
 }
 
@@ -125,14 +118,15 @@ const manifest = readManifest();
 const platformKey = `${process.platform}-${archArg() ?? process.arch}`;
 const skipProbe = skipProbeArg() || archArg() !== undefined && archArg() !== process.arch;
 const v = manifest.nodeVersion;
-// The URL below is built from manifest data (CodeQL js/file-access-to-http):
-// constrain it to a strict semver triple before it can reach fetch(). The
-// SHA-256 pin below is the primary integrity anchor; this just prevents a
-// tampered manifest from redirecting the download to an arbitrary path.
+// The manifest remains authoritative, but it must agree with the generated,
+// reviewed release data before any archive can be fetched or staged.
 if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(v)) {
-  fail(`runtime-manifest.json nodeVersion "${v}" is not a semver triple like 24.18.0`);
+  fail(`runtime-manifest.json nodeVersion "${v}" is not a semver triple like 24.19.0`);
 }
-const dist = distFor(v);
+if (v !== nodeRelease.version) {
+  fail(`generated node release ${nodeRelease.version} does not match manifest ${v}; run pnpm runtime:node:generate`);
+}
+const dist = distFor();
 // Scratch stays OUTSIDE src-tauri/resources/runtime — everything in there
 // gets bundled into the app. Only the final binary is copied in.
 const scratch = join(tmpDir, "node-dist");
@@ -149,7 +143,7 @@ mkdirSync(extractDir, { recursive: true });
 const partFile = `${archive}.part`;
 rmSync(partFile, { force: true });
 if (!existsSync(archive)) {
-  await download(nodeDownloadUrl(v, dist), partFile);
+  await download(nodeDownloadUrl(dist), partFile);
   renameSync(partFile, archive);
 } else {
   info(`reusing cached archive ${dist.file}`);
@@ -186,7 +180,7 @@ if (process.platform !== "win32") chmodSync(nodePath(), 0o755);
 // Verify the binary actually runs when it targets the current host.
 if (!skipProbe) {
   const probe = spawnSync(nodePath(), ["--version"], { encoding: "utf8" });
-  if (probe.status !== 0 || !probe.stdout.includes(`v${v}`)) {
+  if (probe.status !== 0 || !probe.stdout.includes(`v${nodeRelease.version}`)) {
     fail(`bundled node failed verification: ${probe.stderr ?? probe.stdout}`);
   }
 } else {
@@ -194,4 +188,4 @@ if (!skipProbe) {
 }
 
 rmSync(extractDir, { recursive: true, force: true });
-ok(`node v${v} ready at ${nodePath()}`);
+ok(`node v${nodeRelease.version} ready at ${nodePath()}`);

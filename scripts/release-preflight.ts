@@ -126,6 +126,22 @@ if (extraKeys.length > 0) {
 }
 ok(`node checksum table covers exactly ${PLATFORM_KEYS.length} platforms (64-hex each)`);
 
+// Generated source literals define the outbound Node-download boundary. They
+// must be regenerated from the manifest on every Node bump; do this check
+// before any CI job downloads a runtime archive.
+const generatedNodeRelease = spawnSync(
+  process.execPath,
+  ["scripts/generate-node-distribution.ts", "--check"],
+  { cwd: repoRoot, encoding: "utf8" },
+);
+if (generatedNodeRelease.status !== 0) {
+  fail(
+    `generated node distribution check failed: ` +
+      `${(generatedNodeRelease.stderr || generatedNodeRelease.stdout || "unknown error").trim()}`,
+  );
+}
+ok("generated node distribution aligned with manifest");
+
 // --- deny: npm version (allowlist precondition, both bounds) ---------------
 // Shared with prepare-harness so the two pipelines cannot diverge (a local
 // `pnpm runtime:all` on an unaudited npm major would otherwise silently run

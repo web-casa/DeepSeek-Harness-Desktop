@@ -7,6 +7,22 @@ import { expectedSigned, parseAuthenticode, toolRan } from "./signing.ts";
 import { quarantinePresent, parseSltListing } from "./bundle-checks.ts";
 import { isParseableReadyLine } from "./heartbeat-sim.ts";
 import { isPackageRoot } from "./licenses.ts";
+import { nodeRelease } from "./node-distribution.ts";
+import { readManifest } from "./common.ts";
+
+test("node release allowlist stays aligned with the runtime manifest", () => {
+  const manifest = readManifest();
+  assert.equal(nodeRelease.version, manifest.nodeVersion);
+  assert.equal(nodeRelease.directory, `v${manifest.nodeVersion}`);
+  assert.deepEqual(Object.keys(nodeRelease.distributions).sort(), [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64",
+    "win32-arm64",
+    "win32-x64",
+  ]);
+});
 
 test("expectedSigned: platform secret presence decides", () => {
   assert.equal(expectedSigned("dmg", {}), false);

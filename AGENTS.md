@@ -35,6 +35,10 @@ Tauri 管窗口/托盘，sidecar 管 Harness 进程树，Harness Web UI 原样�
 | `runtime/package.json` + `package-lock.json` | harness pin（`npm install` 刷新锁） |
 | `.nvmrc` | CI 脚本 Node（== manifest.nodeVersion） |
 
+`scripts/lib/node-distribution.ts` 是由 manifest 生成的下载路径白名单，不是第二
+个版本事实源；Node bump 时执行 `pnpm runtime:node:generate` 并提交结果。
+`release:preflight` 会拒绝未同步的生成文件。
+
 发布前必跑 `pnpm release:preflight`（tag 推送时 CI 亦跑并做 tag 绑定）。
 
 ## Harness 升级启动契约（bump pin 前必读）

@@ -11,6 +11,7 @@
     "check:scripts": "tsc -p tsconfig.scripts.json",
     "tauri": "tauri",
     "runtime:node": "node scripts/download-node.ts",
+    "runtime:node:generate": "node scripts/generate-node-distribution.ts",
     "runtime:harness": "node scripts/prepare-harness.ts",
     "runtime:sidecar": "node scripts/build-sidecar.ts",
     "runtime:all": "node scripts/download-node.ts && node scripts/prepare-harness.ts && node scripts/build-sidecar.ts",
