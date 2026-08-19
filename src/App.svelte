@@ -37,12 +37,16 @@
     onPresetInstallRequest,
     marketSearch,
     marketPlugin,
+    marketPrepareInstall,
+    marketInstallPlugin,
+    activateMarketPlugin,
     marketImage,
     sideloadPlugin,
     pickSideloadFile,
     type MarketPluginSummary,
     type MarketPluginDetail,
     type MarketDescription,
+    type MarketInstallPreview,
     type RemotePresetRequest,
     type RemotePresetPreview,
     type Status,
@@ -91,15 +95,21 @@
   let pluginLogs = $state<string[]>([]);
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
+  let pluginOperation = $state<"generic" | "market-install" | "sideload" | null>(null);
   let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
   let remotePresetRequest = $state<RemotePresetRequest | null>(null);
   let remotePresetPreview = $state<RemotePresetPreview | null>(null);
   let remotePresetDownloading = $state(false);
   let marketQuery = $state("");
+  let marketCategory = $state("");
   let marketItems = $state<MarketPluginSummary[]>([]);
+  let marketCount = $state<number | null>(null);
+  let marketNextCursor = $state<string | null>(null);
+  let marketHasMore = $state(false);
   let marketBusy = $state(false);
   let marketError = $state<string | null>(null);
-  let marketConfirm = $state<MarketPluginSummary | null>(null);
+  let marketPreparing = $state(false);
+  let marketConfirm = $state<MarketInstallPreview | null>(null);
   let marketDetail = $state<MarketPluginDetail | null>(null);
   let marketDetailBusy = $state(false);
   let marketImages = $state<string[]>([]);
@@ -151,10 +161,16 @@
     if (pluginInstallRequest) {
       if (
         pluginInstallRequest.name !== request.name ||
-        pluginInstallRequest.source !== request.source
+        pluginInstallRequest.source !== request.source ||
+        pluginInstallRequest.slug !== request.slug
       ) {
         showToast("已有待确认的安装请求，新请求已忽略");
       }
+      return;
+    }
+    if (marketConfirm || marketPreparing) {
+      showToast("已有市场安装确认正在进行，插件安装请求已忽略");
+      void dismissPendingPluginInstall().catch(() => {});
       return;
     }
     if (remotePresetRequest || presetPreview) {
@@ -165,7 +181,7 @@
   }
 
   function presentRemotePresetRequest(request: RemotePresetRequest) {
-    if (pluginInstallRequest || presetPreview) {
+    if (pluginInstallRequest || presetPreview || marketConfirm || marketPreparing) {
       showToast("已有待处理的安装请求，预设请求已忽略");
       void dismissRemotePreset(request.requestId).catch(() => {});
       return;
@@ -201,7 +217,7 @@
   }
 
   function marketPackageName(item: MarketPluginSummary | MarketPluginDetail): string {
-    return item.source?.packageName?.trim() || item.name.trim();
+    return item.source?.packageName?.trim() || "（未提供可安装 npm 来源）";
   }
 
   function marketDescriptionText(desc: MarketDescription | null | undefined): string {
@@ -210,15 +226,39 @@
     return desc.zh ?? desc.en ?? "";
   }
 
-  async function doMarketSearch() {
+  function pluginStateText(state: PluginEntry["state"]): string {
+    if (state === "pending") return "待激活";
+    if (state === "active") return "已激活";
+    return "已安装";
+  }
+
+  async function doMarketSearch(reset = true) {
     if (marketBusy) return;
+    if (!reset && (!marketHasMore || marketNextCursor === null)) return;
     marketBusy = true;
     marketError = null;
     try {
-      const res = await marketSearch(marketQuery.trim(), undefined, 30, undefined, "desktop");
-      marketItems = res.items ?? [];
+      const res = await marketSearch(
+        marketQuery.trim(),
+        marketCategory || undefined,
+        30,
+        reset ? undefined : marketNextCursor ?? undefined,
+        "desktop",
+      );
+      const received = res.items ?? [];
+      if (reset) {
+        marketItems = received;
+      } else {
+        const known = new Set(marketItems.map((item) => item.slug));
+        marketItems = [...marketItems, ...received.filter((item) => !known.has(item.slug))];
+      }
+      // count and hasMore are catalog facts. Cursor values are opaque and are
+      // stored exactly as returned rather than interpreted as a page number.
+      marketCount = res.count;
+      marketNextCursor = res.page?.cursor ?? null;
+      marketHasMore = res.page?.hasMore === true;
     } catch (e) {
-      marketError = `市场搜索失败：${e}`;
+      marketError = "市场搜索失败：" + e;
     }
     marketBusy = false;
   }
@@ -247,17 +287,63 @@
     marketDetailBusy = false;
   }
 
-  function doMarketInstall(item: MarketPluginSummary) {
-    if (pluginBusy) return;
-    marketConfirm = item;
+  async function prepareMarketInstall(slug: string) {
+    if (pluginBusy || marketPreparing) return;
+    marketPreparing = true;
+    marketError = null;
+    try {
+      // This refetches the detail with ETag revalidation. The modal then
+      // presents its current entryRevision for an explicit user confirmation.
+      marketConfirm = await marketPrepareInstall(slug);
+    } catch (e) {
+      marketError = "无法准备安装：" + e;
+    }
+    marketPreparing = false;
+  }
+
+  async function doMarketInstall(item: MarketPluginSummary) {
+    if (item.installable !== true) return;
+    await prepareMarketInstall(item.slug);
   }
 
   function confirmMarketInstall() {
-    const item = marketConfirm;
-    if (!item || pluginBusy) return;
-    const name = item.source?.packageName?.trim() || item.name.trim();
+    const preview = marketConfirm;
+    if (!preview || pluginBusy) return;
     marketConfirm = null;
-    startPluginOp(name, "install");
+    pluginBusy = true;
+    pluginOperation = "market-install";
+    pluginError = null;
+    pluginLogs = [];
+    pluginLogsOpen = true;
+    void marketInstallPlugin(preview.slug, preview.entryRevision).catch((e) => {
+      pluginBusy = false;
+      pluginOperation = null;
+      pluginError = "市场安装失败：" + e;
+      pluginLogsOpen = true;
+      void refreshPlugins();
+    });
+    showToast("正在校验并安装 " + preview.packageName + "；完成后仍需显式激活");
+  }
+
+  async function doActivateMarketPlugin(plugin: PluginEntry) {
+    if (
+      pluginBusy ||
+      plugin.state !== "pending" ||
+      !plugin.slug ||
+      !plugin.entryRevision
+    ) {
+      return;
+    }
+    pluginBusy = true;
+    pluginError = null;
+    try {
+      await activateMarketPlugin(plugin.slug, plugin.entryRevision);
+      showToast("已激活 " + plugin.name + "；请重启 Harness 后加载");
+      await refreshPlugins();
+    } catch (e) {
+      pluginError = "激活失败：" + e;
+    }
+    pluginBusy = false;
   }
 
   async function doPickSideload() {
@@ -274,6 +360,7 @@
     const path = sideloadPath;
     sideloadPath = null;
     pluginBusy = true;
+    pluginOperation = "sideload";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
@@ -282,6 +369,7 @@
       await sideloadPlugin(path);
     } catch (e) {
       pluginBusy = false;
+      pluginOperation = null;
       pluginError = `离线安装失败：${e}`;
       pluginLogsOpen = true;
       void refreshPlugins();
@@ -422,9 +510,21 @@
   }
 
   async function reportContent() {
-    const url = new URL("mailto:contact@dsharness.app");
-    url.searchParams.set("subject", "DSH Desktop: report AI content");
-    await openUrl(url.toString()).catch(() => {});
+    try {
+      const url = new URL("https://github.com/web-casa/DeepSeek-Harness-Desktop/issues/new");
+      url.searchParams.set("title", "[Content] 报告 AI 生成内容");
+      url.searchParams.set(
+        "body",
+        [
+          "请说明需要报告的 AI 生成内容、使用的模型服务以及期望的处理方式。",
+          "",
+          "请勿粘贴 API key、个人数据、私密文件内容或其他敏感信息。",
+        ].join("\n"),
+      );
+      await openUrl(url.toString());
+    } catch (e) {
+      showToast(`打开失败：${e}`);
+    }
   }
 
   async function reportIssue() {
@@ -543,6 +643,7 @@
   function startPluginOp(name: string, op: "install" | "uninstall") {
     if (pluginBusy || !name.trim()) return;
     pluginBusy = true;
+    pluginOperation = "generic";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
@@ -550,6 +651,7 @@
     const call = op === "install" ? installPlugin(name.trim()) : uninstallPlugin(name.trim());
     void call.catch((e) => {
       pluginBusy = false;
+      pluginOperation = null;
       pluginError = `${op === "install" ? "安装" : "卸载"}失败：${e}`;
       pluginLogsOpen = true;
       // Resync busy: "an operation is already running" means another
@@ -577,12 +679,18 @@
     }
   }
 
-  function confirmPluginInstallRequest() {
+  async function confirmPluginInstallRequest() {
     const request = pluginInstallRequest;
-    if (!request || pluginBusy) return;
+    if (!request || pluginBusy || marketPreparing) return;
     pluginInstallRequest = null;
-    void dismissPendingPluginInstall().catch(() => {});
-    startPluginOp(request.name, "install");
+    try {
+      await dismissPendingPluginInstall();
+    } catch {
+      // The request was already removed from the UI. The market command still
+      // validates the Rust-derived slug and freshly revalidates the entry
+      // before any profile mutation.
+    }
+    await prepareMarketInstall(request.slug);
   }
 
   // Initial data load (async onMount is fine here — no cleanup needed).
@@ -673,9 +781,15 @@
     let unlistenFn: (() => void) | null = null;
     onPluginDone((p) => {
       pluginBusy = false;
+      const completedOperation = pluginOperation;
+      pluginOperation = null;
       if (p.exit === 0) {
         pluginName = "";
-        showToast("插件操作完成");
+        showToast(
+          completedOperation === "market-install"
+            ? "插件已校验完成，正在等待你的显式激活"
+            : "插件操作完成",
+        );
       } else {
         pluginError = `插件操作失败（exit ${p.exit ?? "被终止"}），详情见安装日志`;
         pluginLogsOpen = true;
@@ -985,7 +1099,12 @@
           if (e.key === "Enter") doMarketSearch();
         }}
       />
-      <button class="primary" onclick={doMarketSearch} disabled={marketBusy || !marketQuery.trim()}>
+      <select class="plugin-input" bind:value={marketCategory} disabled={marketBusy} aria-label="插件类别">
+        <option value="">全部类别</option>
+        <option value="agent">Agent</option>
+        <option value="market">市场</option>
+      </select>
+      <button class="primary" onclick={() => doMarketSearch(true)} disabled={marketBusy}>
         {marketBusy ? "搜索中…" : "搜索"}
       </button>
     </div>
@@ -993,6 +1112,9 @@
       <div class="notice-box">{marketError}</div>
     {/if}
     {#if marketItems.length > 0}
+      {#if marketCount !== null}
+        <div class="preset-issues">当前筛选共 {marketCount} 个条目；按 cursor 顺序加载。</div>
+      {/if}
       {#each marketItems as item (item.slug)}
         <div class="preset-row">
           <span class="preset-id">
@@ -1003,16 +1125,33 @@
             <span class="badge">{item.platforms.includes("desktop") ? "desktop" : "web-only"}</span>
           </span>
           <button class="ghost" onclick={() => doMarketDetail(item.slug)} disabled={marketDetailBusy}>详情</button>
-          {#if item.platforms.includes("desktop")}
-            <button class="primary" onclick={() => doMarketInstall(item)} disabled={pluginBusy}>安装</button>
+          {#if item.installable === true}
+            <button
+              class="primary"
+              onclick={() => doMarketInstall(item)}
+              disabled={pluginBusy || marketPreparing}
+            >{marketPreparing ? "校验中…" : "安装"}</button>
           {:else}
-            <button class="ghost" disabled>仅网页版</button>
+            <button class="ghost" disabled title={item.installReason ?? "该条目不可安装"}>
+              {item.blocked ? "已封禁" : item.deprecated ? "已弃用" : "不可安装"}
+            </button>
           {/if}
         </div>
         {#if marketDescriptionText(item.description)}
           <div class="preset-issues">{marketDescriptionText(item.description)}</div>
         {/if}
       {/each}
+      {#if marketHasMore}
+        <div class="plugin-row">
+          <button
+            class="ghost"
+            onclick={() => doMarketSearch(false)}
+            disabled={marketBusy || marketNextCursor === null}
+          >
+            {marketBusy ? "加载中…" : "加载更多"}
+          </button>
+        </div>
+      {/if}
     {:else}
       <div class="preset-row"><span class="l-empty">（输入关键词搜索插件市场）</span></div>
     {/if}
@@ -1064,7 +1203,15 @@
     {#if plugins.length > 0}
       {#each plugins as p (p.name)}
         <div class="preset-row">
-          <span>{p.name} <span class="badge">v{p.version}</span></span>
+          <span>
+            {p.name} <span class="badge">v{p.version}</span>
+            <span class="badge">{pluginStateText(p.state)}</span>
+          </span>
+          {#if p.state === "pending" && p.slug && p.entryRevision}
+            <button class="primary" onclick={() => doActivateMarketPlugin(p)} disabled={pluginBusy}>
+              Activate
+            </button>
+          {/if}
           <button class="ghost" onclick={() => startPluginOp(p.name, "uninstall")} disabled={pluginBusy}>卸载</button>
         </div>
       {/each}
@@ -1158,7 +1305,12 @@
       {#if marketImages.length > 0}
         <div class="market-shots">
           {#each marketImages as src, i (i)}
-            <img src={src} alt="{marketDetail.name} screenshot {i + 1}" class="market-shot" />
+            <img
+              src={src}
+              alt="{marketDetail.name} screenshot {i + 1}"
+              class="market-shot"
+              referrerpolicy="no-referrer"
+            />
           {/each}
         </div>
       {/if}
@@ -1173,13 +1325,18 @@
   <div class="modal-backdrop">
     <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
       <div class="modal-title">安装 Cordis 插件？</div>
-      <div class="modal-name">{marketPackageName(marketConfirm)}</div>
+      <div class="modal-name">{marketConfirm.packageName} v{marketConfirm.version}</div>
       <div class="modal-meta">
-        来源：<button class="inline-link" onclick={() => openSite(`https://cordis.run/plugins/${marketConfirm!.slug}`)}>
+        当前条目修订：{marketConfirm.entryRevision}
+      </div>
+      <div class="modal-meta">
+        来源：<button class="inline-link" onclick={() => openSite("https://cordis.run/plugins/" + marketConfirm!.slug)}>
           https://cordis.run/plugins/{marketConfirm.slug}
         </button>
       </div>
-      <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将立即开始安装。</div>
+      <div class="modal-warn">
+        将校验此修订的 tarball 与 lockfile integrity，禁用构建脚本，并保持为待激活状态。安装完成后不会自动启用，需你再次点击 Activate。
+      </div>
       <div class="modal-actions">
         <button class="primary" onclick={confirmMarketInstall} disabled={pluginBusy}>确认安装</button>
         <button class="ghost" onclick={() => (marketConfirm = null)}>取消</button>
@@ -1206,7 +1363,7 @@
   <div class="modal-backdrop">
     <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
       <div class="modal-title">安装 Cordis 插件？</div>
-      <div class="modal-name">{pluginInstallRequest.name}</div>
+      <div class="modal-name">链接声明的包：{pluginInstallRequest.name}</div>
       <div class="modal-meta">
         关联页面（未验证与插件包的对应关系）：<button
           class="inline-link"
@@ -1217,14 +1374,14 @@
         </button>
       </div>
       <div class="modal-warn">
-        该链接可由任意网页或程序构造，只能确认关联页面格式来自 cordis.run，无法证明插件包由该页面提供。插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将立即开始安装，完成后需重新启动 Harness 生效。
+        该链接可由任意网页或程序构造。下一步只会使用 Rust 已校验的 Cordis slug 重新拉取市场详情，并显示当前 entryRevision 供你再次确认；不会按链接中的包名直接安装。插件与 Agent 同权限运行工具和命令，仅安装可信插件。
       </div>
       {#if pluginBusy}
         <div class="notice-box">当前已有插件操作正在进行，请等待完成后再确认安装。</div>
       {/if}
       <div class="modal-actions">
         <button class="primary" onclick={confirmPluginInstallRequest} disabled={pluginBusy}>
-          {pluginBusy ? "已有操作进行中…" : "确认安装"}
+          {pluginBusy ? "已有操作进行中…" : "继续核验"}
         </button>
         <button class="ghost" onclick={dismissPluginInstallRequest}>取消</button>
       </div>

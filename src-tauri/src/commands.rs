@@ -365,16 +365,26 @@ pub async fn market_search(
     limit: Option<u32>,
     cursor: Option<String>,
     platform: Option<String>,
+    runtime: State<'_, Runtime>,
     market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
 ) -> Result<Value, String> {
-    let platform = platform.unwrap_or_else(|| "desktop".to_string());
+    if platform.as_deref().is_some_and(|value| value != "desktop") {
+        return Err("Desktop market requests must use platform=desktop".to_string());
+    }
+    let dsh_version = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .versions
+        .harness
+        .clone();
     market
         .search(
             &query,
             category.as_deref(),
             limit,
             cursor.as_deref(),
-            &platform,
+            &dsh_version,
         )
         .await
 }
@@ -382,9 +392,17 @@ pub async fn market_search(
 #[tauri::command]
 pub async fn market_plugin(
     slug: String,
+    runtime: State<'_, Runtime>,
     market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
 ) -> Result<Value, String> {
-    market.detail(&slug).await
+    let dsh_version = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .versions
+        .harness
+        .clone();
+    market.detail(&slug, &dsh_version).await
 }
 
 #[tauri::command]
@@ -395,10 +413,142 @@ pub async fn market_image(
     market.image(&url).await
 }
 
+/// Fetch an installable market entry again and expose the exact current
+/// entryRevision to the confirmation dialog. This command never mutates a
+/// profile; the following market_install_plugin call revalidates it once more
+/// so a stale dialog cannot install a changed entry.
+#[tauri::command]
+pub async fn market_prepare_install(
+    slug: String,
+    runtime: State<'_, Runtime>,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<Value, String> {
+    let dsh_version = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .versions
+        .harness
+        .clone();
+    let candidate = market.prepare_install(&slug, &dsh_version).await?;
+    serde_json::to_value(candidate)
+        .map_err(|error| format!("cannot serialize market install preview: {error}"))
+}
+
+/// Begin the reviewed market installation lifecycle:
+/// integrity metadata validation -> pre-disable -> pnpm with scripts disabled
+/// -> local verification -> pending activation. The actual pnpm work runs in
+/// the same cancellable process group/Job Object as normal plugin operations.
+#[tauri::command]
+pub async fn market_install_plugin(
+    app: AppHandle,
+    slug: String,
+    entry_revision: String,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<(), String> {
+    let plugins = plugins.inner().clone();
+    if plugins.busy.swap(true, Ordering::SeqCst) {
+        return Err("an operation is already running".to_string());
+    }
+    let dsh_version = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .versions
+        .harness
+        .clone();
+    let candidate = match market.prepare_install(&slug, &dsh_version).await {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            plugins.busy.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+    };
+    if crate::build_info::STORE_BUILD
+        && !crate::curated_plugins::is_allowed(&candidate.package_name)
+    {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err("仅允许安装 cordis.run 已审核插件".to_string());
+    }
+    if candidate.entry_revision != entry_revision {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err(
+            "market entry changed; review the latest entryRevision before installing".to_string(),
+        );
+    }
+    let Some(paths) = runtime.paths() else {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err("runtime paths are not resolved yet".to_string());
+    };
+    if let Err(error) = crate::plugins::pre_disable_market_plugin(&paths.dsh_home, &candidate) {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err(error);
+    }
+    std::thread::spawn(move || {
+        run_market_pnpm(app, paths, plugins, candidate);
+    });
+    Ok(())
+}
+
+/// Activate a previously verified pending market package. It refetches and
+/// checks the catalog entry first, so a newly blocked/deprecated/incompatible
+/// package cannot be re-enabled by stale local pending state.
+#[tauri::command]
+pub async fn activate_market_plugin(
+    slug: String,
+    entry_revision: String,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<(), String> {
+    let plugins = plugins.inner().clone();
+    if plugins.busy.swap(true, Ordering::SeqCst) {
+        return Err("an operation is already running".to_string());
+    }
+    let dsh_version = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .versions
+        .harness
+        .clone();
+    let candidate = match market.prepare_install(&slug, &dsh_version).await {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            plugins.busy.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+    };
+    if crate::build_info::STORE_BUILD
+        && !crate::curated_plugins::is_allowed(&candidate.package_name)
+    {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err("仅允许激活 cordis.run 已审核插件".to_string());
+    }
+    if candidate.entry_revision != entry_revision {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err(
+            "market entry changed; install and review the latest revision before activation"
+                .to_string(),
+        );
+    }
+    let result = runtime
+        .paths()
+        .ok_or_else(|| "runtime paths are not resolved yet".to_string())
+        .and_then(|paths| crate::plugins::activate_market_plugin(&paths.dsh_home, &candidate));
+    plugins.busy.store(false, Ordering::SeqCst);
+    result
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{read_installed_plugins, redact, sweep_sideload_dir, sweep_sideloads_root};
+    use super::{
+        is_zip_content_type, read_installed_plugins, redact, sweep_sideload_dir,
+        sweep_sideloads_root,
+    };
 
     #[test]
     fn sideload_sweep_does_not_follow_symlinked_tools_parent() {
@@ -481,6 +631,15 @@ mod tests {
         assert_eq!(redact("Bearer ab-cd_ef", ""), "Bearer ***");
         // 5 chars: below threshold, left untouched.
         assert_eq!(redact("Bearer short", ""), "Bearer short");
+    }
+
+    #[test]
+    fn remote_preset_requires_zip_content_type() {
+        let zip = reqwest::header::HeaderValue::from_static("application/zip; charset=binary");
+        let json = reqwest::header::HeaderValue::from_static("application/json");
+        assert!(is_zip_content_type(Some(&zip)));
+        assert!(!is_zip_content_type(Some(&json)));
+        assert!(!is_zip_content_type(None));
     }
 
     #[test]
@@ -759,6 +918,7 @@ pub async fn export_preset(
 /// node_modules/<pkg>/package.json ("—" when the tree entry is missing).
 /// In-box bundles are not dependencies here, so they never appear — the UI
 /// can therefore offer uninstall on every listed row (plan §P1.4).
+#[cfg(test)]
 fn read_installed_plugins(profile_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Ok(text) = std::fs::read_to_string(profile_dir.join("package.json")) {
@@ -795,13 +955,10 @@ pub fn list_plugins(
 ) -> Value {
     let entries = runtime
         .paths()
-        .map(|p| read_installed_plugins(&p.dsh_home.join("profiles").join("web")))
+        .map(|paths| crate::plugins::installed_plugins(&paths.dsh_home))
         .unwrap_or_default();
     serde_json::json!({
-        "plugins": entries
-            .into_iter()
-            .map(|(name, version)| serde_json::json!({ "name": name, "version": version }))
-            .collect::<Vec<_>>(),
+        "plugins": entries,
         // The backend busy flag survives webview reloads; the UI must be
         // able to resync instead of showing a stale idle state while an op
         // is still running (single-flight is app-wide).
@@ -1032,6 +1189,212 @@ fn run_plugin_spec(
     );
 }
 
+/// Run the market-only direct pnpm path. The official dsh plugin command
+/// cannot be used here because it reconciles installed bundles into the
+/// active profile automatically. This keeps the same PlatformChild process
+/// tree and logging guarantees as the normal plugin operation, but runs only
+/// pnpm add with lifecycle scripts disabled.
+fn run_market_pnpm(
+    app: AppHandle,
+    paths: crate::paths::RuntimePaths,
+    plugins: Arc<crate::plugins::PluginRunner>,
+    candidate: crate::market::MarketInstallCandidate,
+) {
+    use std::io::{BufRead, BufReader};
+
+    let profile = match crate::plugins::market_profile_dir(&paths.dsh_home) {
+        Ok(profile) => profile,
+        Err(error) => {
+            let _ = app.emit(
+                "plugin-done",
+                serde_json::json!({ "exit": 1, "tail": error }),
+            );
+            plugins.busy.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    let pnpm = paths
+        .harness_dir
+        .join("node_modules")
+        .join("pnpm")
+        .join("bin")
+        .join("pnpm.cjs");
+    let spawn_spec = SpawnSpec {
+        node: paths.node.to_string_lossy().to_string(),
+        script: pnpm.to_string_lossy().to_string(),
+        args: vec![
+            "add".to_string(),
+            candidate.tarball.clone(),
+            "--ignore-scripts".to_string(),
+            "--save-exact".to_string(),
+            "--yes".to_string(),
+            "--reporter=append-only".to_string(),
+            format!("--registry={}", candidate.registry),
+        ],
+        cwd: profile.to_string_lossy().to_string(),
+        env: vec![(
+            "DSH_HOME".to_string(),
+            paths.dsh_home.to_string_lossy().to_string(),
+        )],
+    };
+    let inherited = std::env::vars_os().collect::<Vec<_>>();
+    let child = match PlatformChild::spawn(&spawn_spec, &inherited) {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = app.emit(
+                "plugin-done",
+                serde_json::json!({ "exit": 1, "tail": format!("market pnpm spawn failed: {error}") }),
+            );
+            plugins.busy.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    if plugins.exiting.load(Ordering::SeqCst) {
+        let _ = child.graceful();
+        child.force();
+        plugins.busy.store(false, Ordering::SeqCst);
+        return;
+    }
+
+    let mut tail: Vec<String> = Vec::new();
+    let mut pending: Vec<(String, String)> = Vec::new();
+    let app_c = app.clone();
+    let mut flush = move |lines: &mut Vec<(String, String)>| {
+        if lines.is_empty() {
+            return;
+        }
+        let payload: Vec<serde_json::Value> = lines
+            .drain(..)
+            .map(|(stream, line)| serde_json::json!({ "stream": stream, "line": line }))
+            .collect();
+        let _ = app_c.emit("plugin-log", serde_json::json!(payload));
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
+    let child = {
+        let mut child = child;
+        for (stream, pipe) in [
+            (
+                "stdout",
+                child
+                    .child
+                    .stdout
+                    .take()
+                    .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+            ),
+            (
+                "stderr",
+                child
+                    .child
+                    .stderr
+                    .take()
+                    .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+            ),
+        ] {
+            if let Some(pipe) = pipe {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                        if tx.send((stream.to_string(), line)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+        child
+    };
+    drop(tx);
+    *plugins
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(child);
+    if plugins.exiting.load(Ordering::SeqCst) {
+        if let Some(child) = plugins
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = child.graceful();
+            child.force();
+        }
+        plugins.busy.store(false, Ordering::SeqCst);
+        return;
+    }
+    fn handle_line(
+        tail: &mut Vec<String>,
+        pending: &mut Vec<(String, String)>,
+        flush: &mut impl FnMut(&mut Vec<(String, String)>),
+        stream: String,
+        line: String,
+    ) {
+        tail.push(format!("[{stream}] {line}"));
+        if tail.len() > 300 {
+            tail.remove(0);
+        }
+        pending.push((stream, line));
+        if pending.len() >= 64 {
+            flush(pending);
+        }
+    }
+    let mut exit = loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => flush(&mut pending),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                flush(&mut pending);
+                let handle = plugins
+                    .child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                break handle
+                    .and_then(|mut child| child.child.wait().ok())
+                    .and_then(|status| status.code());
+            }
+        }
+        if let Some(child) = plugins
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+        {
+            if let Some(status) = child.child.try_wait().ok().flatten() {
+                while let Ok((stream, line)) = rx.recv_timeout(std::time::Duration::from_millis(50))
+                {
+                    handle_line(&mut tail, &mut pending, &mut flush, stream, line);
+                }
+                flush(&mut pending);
+                break status.code();
+            }
+        }
+    };
+    *plugins
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    if exit == Some(0) {
+        if let Err(error) =
+            crate::plugins::verify_and_mark_market_pending(&paths.dsh_home, &candidate)
+        {
+            handle_line(
+                &mut tail,
+                &mut pending,
+                &mut flush,
+                "verify".to_string(),
+                error,
+            );
+            flush(&mut pending);
+            exit = Some(1);
+        }
+    }
+    plugins.busy.store(false, Ordering::SeqCst);
+    let _ = app.emit(
+        "plugin-done",
+        serde_json::json!({ "exit": exit, "tail": tail.join("\n") }),
+    );
+}
+
 fn spawn_plugin_spec(
     app: AppHandle,
     runtime: &Runtime,
@@ -1183,6 +1546,13 @@ fn valid_request_id(request_id: &str) -> bool {
         && request_id
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn is_zip_content_type(value: Option<&reqwest::header::HeaderValue>) -> bool {
+    value
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/zip"))
 }
 
 fn ensure_remote_tools_dir(dsh_home: &std::path::Path) -> Result<std::path::PathBuf, String> {
@@ -1481,9 +1851,15 @@ pub async fn confirm_remote_preset_download(
         fail(&pending, &arbiter, &request_id, None);
         format!("download failed: {e}")
     })?;
-    if !resp.status().is_success() {
+    if resp.status() != reqwest::StatusCode::OK {
         fail(&pending, &arbiter, &request_id, None);
         return Err(format!("download failed: HTTP {}", resp.status()));
+    }
+    if !is_zip_content_type(resp.headers().get(reqwest::header::CONTENT_TYPE)) {
+        fail(&pending, &arbiter, &request_id, None);
+        return Err(
+            "preset download must return application/zip directly from cordis.run".to_string(),
+        );
     }
     let max = crate::deep_link::MAX_REMOTE_PRESET_BYTES as usize;
     if resp.content_length().is_some_and(|n| n > max as u64) {

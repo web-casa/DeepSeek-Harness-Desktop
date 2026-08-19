@@ -48,10 +48,11 @@ pnpm bundled (**no system pnpm needed**), live install logs, and cancel
 
 On a cordis.run plugin page, "Install in desktop app" opens
 `dsharness://plugin/install?v=1&name=<package>&source=<plugin-page>`. The
-desktop shell validates the URL strictly in Rust, asks for confirmation, and
-only then starts the install. Older desktop builds and market pages without
-the deep-link button can still use copy-paste package names. Command-line
-equivalent (for power users):
+desktop shell validates the URL strictly in Rust, uses it only to locate the
+canonical marketplace slug, refetches the detail and current `entryRevision`,
+and then asks for installation confirmation. Older desktop builds and market
+pages without the deep-link button can still use copy-paste package names.
+Command-line equivalent (for power users):
 
 ```bash
 # macOS

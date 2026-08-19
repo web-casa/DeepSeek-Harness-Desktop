@@ -40,6 +40,9 @@ fn main() {
         "market_search",
         "market_plugin",
         "market_image",
+        "market_prepare_install",
+        "market_install_plugin",
+        "activate_market_plugin",
         "sideload_plugin",
     ]);
     let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));

@@ -30,6 +30,7 @@ getrandom = "0.2"
 dsh-sidecar = { path = "../crates/dsh-sidecar", version = "0.2.4" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 url = "2"
 
 [lints.clippy]
@@ -42,3 +43,9 @@ dbg_macro = "deny"
 
 [dev-dependencies]
 proptest = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Needed for atomic replacement of Desktop-owned pending state. This is
+# already pinned by dsh-sidecar; declare it directly because Rust crates may
+# not rely on transitive dependencies.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

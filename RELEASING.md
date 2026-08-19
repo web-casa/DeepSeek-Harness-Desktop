@@ -13,6 +13,7 @@
 ```bash
 pnpm release:preflight     # 版本对齐 + lock + checksum 表 + npm 边界 + tag 绑定演练
 pnpm check && pnpm check:scripts
+CORDIS_PRESET_SLUG=code pnpm verify:cordis-preset
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace  # 或按 crate 分别跑
 cargo vet --locked && cargo deny check
@@ -45,6 +46,19 @@ git push origin v0.2.1
 4. `release`：tag 绑定 preflight（`--expect-tag`）→ 下载制品 →
    **draft** GitHub Release（`files: artifacts/**/*`）。
 
+### 3a. cordis.run preset 直返 ZIP 契约
+
+`preset-download-contract` 在每次 tag 发布和手动演练时，对
+`https://cordis.run/api/presets/<slug>/download` 发起不跟随重定向的请求。
+它只接受 **HTTP 200**、无 `Location`、且 `Content-Type` 为
+`application/zip`（允许 MIME 参数）；3xx/CDN 跳转、HTML 错页或其他内容类型
+都会失败。该 job 是 tag 发布门禁，但刻意不作为原生构建的依赖：后端回归时仍可
+用 `workflow_dispatch` 留存 Windows/MSIX 的构建和安装验证证据。
+
+探针不写入或安装任何归档；真正的 Desktop 下载仍需经过 Rust 侧的无重定向、大小、
+归档检查与用户确认。默认公开样本是 `code`；在手动演练中可通过
+`preset_slug` 输入（或本地 `CORDIS_PRESET_SLUG`）选择另一个合法 slug。
+
 ### 3b. Microsoft Store MSIX 构建
 
 `build-msix` job 与双平台 build 并行，仅发布/演练时运行：
@@ -60,6 +74,21 @@ git push origin v0.2.1
 - Store 产品身份固定在
   `src-tauri/gen/windows/AppxManifest.xml.template` 与 `bundle.config.json`；
   如 Partner Center 重建产品，必须同步这两处。
+
+### 3c. npm 发布所有权边界
+
+根 `package.json` 必须保持 `private: true`，它是 Desktop 构建工作区，不是 npm
+发布通道；`release:preflight` 会拒绝移除此保护。已确认的组织决策是：若将来确有
+独立的公开 npm 制品，所有权必须归 `web-casa`，并使用一个经单独评审的
+`@web-casa/<package>` 名称。
+
+首次发布前，负责人必须完成并记录以下事项：确认准确的 scoped 名称与 npm 组织
+成员关系；为发布者启用 npm 2FA；将 GitHub 仓库配置为 npm Trusted Publishing
+（OIDC，优先）或使用仅限该包、短期且最小权限的 granular token；以实际发布身份
+复核 `npm owner ls`/包访问权限。Trusted Publishing 的专用发布 workflow 必须在
+GitHub-hosted runner 上运行、申请 `id-token: write`，且其仓库和 workflow 文件名
+与 npm 设置精确一致。不得假定当前未 scoped 的根包名可用或可转移，更不得把本
+Desktop 工作区直接改为公开发布。
 
 ## 4. 签名状态（verify-signing 语义）
 

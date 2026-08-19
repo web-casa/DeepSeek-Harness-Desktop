@@ -1,14 +1,19 @@
-//! cordis.run plugin-market client. The bootstrap webview cannot fetch
-//! external hosts under the app CSP, so every market request is made here.
-//! Results are cached in memory; a failed refresh returns the stale cache
-//! entry (when one exists) instead of dropping an otherwise usable catalog.
+//! cordis.run plugin-market client.
+//!
+//! The bootstrap webview cannot fetch external hosts under the app CSP, so
+//! every catalog request is made here. The wire DTO deliberately remains more
+//! permissive than the installation DTO: incomplete, blocked, deprecated, or
+//! non-npm entries can be displayed, but only a fully validated nested source
+//! can cross the installation boundary.
 
-use reqwest::header::CONTENT_TYPE;
+use reqwest::header::{CONTENT_TYPE, ETAG, IF_NONE_MATCH};
+use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use url::Url;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Source {
@@ -29,6 +34,8 @@ struct Source {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 enum Description {
+    // Transitional display-only compatibility. Never use this variant (or
+    // any old flat npm/version field) as an installation source.
     Text(String),
     Localized {
         #[serde(default)]
@@ -39,9 +46,11 @@ enum Description {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct MarketItem {
+struct MarketEntry {
     slug: String,
     name: String,
+    #[serde(rename = "entryRevision", default)]
+    entry_revision: Option<String>,
     #[serde(default)]
     source: Option<Source>,
     #[serde(default)]
@@ -51,6 +60,8 @@ struct MarketItem {
     #[serde(default)]
     platforms: Vec<String>,
     #[serde(default)]
+    engines: Option<BTreeMap<String, String>>,
+    #[serde(default)]
     stars: Option<u32>,
     #[serde(default)]
     homepage: Option<String>,
@@ -58,6 +69,12 @@ struct MarketItem {
     blocked: Option<bool>,
     #[serde(default)]
     deprecated: Option<bool>,
+    // These two fields are Desktop-derived. They are deliberately skipped
+    // while deserializing so a server cannot advertise an item as installable.
+    #[serde(default, skip_deserializing)]
+    installable: bool,
+    #[serde(rename = "installReason", default, skip_deserializing)]
+    install_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -69,7 +86,7 @@ struct MarketVersion {
     #[serde(default)]
     platforms: Vec<String>,
     #[serde(default)]
-    engines: Option<serde_json::Value>,
+    engines: Option<BTreeMap<String, String>>,
     #[serde(default)]
     blocked: Option<bool>,
     #[serde(default)]
@@ -80,24 +97,8 @@ struct MarketVersion {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct MarketDetail {
-    slug: String,
-    name: String,
-    #[serde(default)]
-    source: Option<Source>,
-    #[serde(default)]
-    description: Option<Description>,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    platforms: Vec<String>,
-    #[serde(default)]
-    stars: Option<u32>,
-    #[serde(default)]
-    homepage: Option<String>,
-    #[serde(default)]
-    blocked: Option<bool>,
-    #[serde(default)]
-    deprecated: Option<bool>,
+    #[serde(flatten)]
+    entry: MarketEntry,
     #[serde(default)]
     screenshots: Vec<String>,
     #[serde(default)]
@@ -116,20 +117,53 @@ struct MarketPage {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct MarketSearchResponse {
+    #[serde(rename = "schemaVersion", default)]
+    schema_version: Option<u32>,
+    #[serde(rename = "catalogRevision", default)]
+    catalog_revision: Option<String>,
     #[serde(default)]
-    items: Vec<MarketItem>,
+    items: Vec<MarketEntry>,
     #[serde(default)]
     count: u32,
     #[serde(default)]
     page: MarketPage,
 }
 
+#[derive(Debug, Deserialize)]
+struct ApiErrorBody {
+    error: ApiError,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiError {
+    code: String,
+    message: String,
+    request_id: Option<String>,
+}
+
+/// Fully validated, immutable nested source used by the Desktop installation
+/// flow. It intentionally has no legacy flat-field fallback.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketInstallCandidate {
+    pub slug: String,
+    pub entry_revision: String,
+    pub package_name: String,
+    pub version: String,
+    pub integrity: String,
+    pub registry: String,
+    pub tarball: String,
+}
+
 const DEFAULT_BASE_URL: &str = "https://cordis.run/api/v1";
 const SEARCH_TTL: Duration = Duration::from_secs(60);
 const DETAIL_TTL: Duration = Duration::from_secs(300);
+const STALE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const IMAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const JSON_MAX_BYTES: usize = 1024 * 1024;
 const CACHE_MAX_ENTRIES: usize = 64;
+const APPROVED_NPM_REGISTRY_HOSTS: &[&str] = &["registry.npmjs.org"];
 
 pub fn is_valid_market_slug(slug: &str) -> bool {
     let bytes = slug.as_bytes();
@@ -141,18 +175,42 @@ pub fn is_valid_market_slug(slug: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn base_url_allowed(url: &reqwest::Url) -> bool {
-    let https_cordis = url.scheme() == "https" && url.host_str() == Some("cordis.run");
+fn base_url_allowed(url: &Url) -> bool {
+    // CORDIS_RUN_API is a developer-only fixture override, not a general
+    // outbound proxy setting. Keep the production origin and API prefix
+    // exact so an inherited environment variable cannot silently widen the
+    // network trust boundary (for example with credentials, a custom port,
+    // or a same-host non-API route).
+    let structurally_canonical = url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(url.path(), "/api/v1" | "/api/v1/");
+    let https_cordis = structurally_canonical
+        && url.scheme() == "https"
+        && url.host_str() == Some("cordis.run")
+        && url.port().is_none();
     let debug_loopback = cfg!(debug_assertions)
+        && structurally_canonical
         && url.scheme() == "http"
         && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
     https_cordis || debug_loopback
+}
+
+fn image_url_allowed(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("cdn.cordis.run")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
 }
 
 #[derive(Debug, Clone)]
 struct Cached {
     at: Instant,
     value: Value,
+    etag: Option<String>,
 }
 
 /// Market client state. Managed once and shared across Tauri commands.
@@ -167,14 +225,18 @@ impl MarketClient {
     pub fn new() -> Result<Self, String> {
         let base_url =
             std::env::var("CORDIS_RUN_API").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let base_url = {
-            let parsed = reqwest::Url::parse(&base_url)
-                .map_err(|e| format!("invalid CORDIS_RUN_API URL: {e}"))?;
-            if !base_url_allowed(&parsed) {
-                return Err("CORDIS_RUN_API must be https://cordis.run (debug builds may use http://127.0.0.1)".to_string());
-            }
-            base_url
-        };
+        Self::with_base_url(base_url)
+    }
+
+    fn with_base_url(base_url: String) -> Result<Self, String> {
+        let parsed =
+            Url::parse(&base_url).map_err(|e| format!("invalid CORDIS_RUN_API URL: {e}"))?;
+        if !base_url_allowed(&parsed) {
+            return Err(
+                "CORDIS_RUN_API must be https://cordis.run/api/v1 (debug builds may use http://127.0.0.1:<port>/api/v1)"
+                    .to_string(),
+            );
+        }
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
@@ -189,7 +251,7 @@ impl MarketClient {
         })
     }
 
-    fn cache_get(
+    fn cache_fresh(
         cache: &Mutex<HashMap<String, Cached>>,
         key: &str,
         ttl: Duration,
@@ -206,12 +268,27 @@ impl MarketClient {
         })
     }
 
-    fn cache_put(cache: &Mutex<HashMap<String, Cached>>, key: &str, value: Value) {
+    fn cache_any(cache: &Mutex<HashMap<String, Cached>>, key: &str) -> Option<Cached> {
+        let cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache
+            .get(key)
+            .filter(|entry| entry.at.elapsed() < STALE_MAX_AGE)
+            .cloned()
+    }
+
+    fn cache_put(
+        cache: &Mutex<HashMap<String, Cached>>,
+        key: &str,
+        value: Value,
+        etag: Option<String>,
+    ) {
         let mut cache = cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.retain(|_, entry| entry.at.elapsed() < Duration::from_secs(24 * 60 * 60));
-        if cache.len() >= CACHE_MAX_ENTRIES {
+        cache.retain(|_, entry| entry.at.elapsed() < STALE_MAX_AGE);
+        if cache.len() >= CACHE_MAX_ENTRIES && !cache.contains_key(key) {
             let oldest = cache
                 .iter()
                 .min_by_key(|(_, entry)| entry.at)
@@ -225,8 +302,82 @@ impl MarketClient {
             Cached {
                 at: Instant::now(),
                 value,
+                etag,
             },
         );
+    }
+
+    fn cache_revalidated(cache: &Mutex<HashMap<String, Cached>>, key: &str) -> Option<Value> {
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = cache.get_mut(key)?;
+        if entry.at.elapsed() >= STALE_MAX_AGE {
+            return None;
+        }
+        entry.at = Instant::now();
+        Some(entry.value.clone())
+    }
+
+    /// Fetch JSON with a conditional request once a cached representation is
+    /// stale. 304 refreshes the cache timestamp without attempting to parse a
+    /// body. HTTP API errors deliberately never fall back to stale data:
+    /// otherwise a deleted detail could be mistaken for a live catalog entry.
+    async fn cached_json(
+        &self,
+        cache: &Mutex<HashMap<String, Cached>>,
+        key: &str,
+        ttl: Duration,
+        url: Url,
+        label: &str,
+        force_revalidate: bool,
+    ) -> Result<Value, String> {
+        if !force_revalidate {
+            if let Some(fresh) = Self::cache_fresh(cache, key, ttl) {
+                return Ok(fresh);
+            }
+        }
+
+        let previous = Self::cache_any(cache, key);
+        let mut request = self.http.get(url);
+        if let Some(etag) = previous.as_ref().and_then(|entry| entry.etag.as_deref()) {
+            request = request.header(IF_NONE_MATCH, etag);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                // Catalog browsing may remain available while offline, but an
+                // install/activation decision must be based on a live (or
+                // conditionally revalidated 304) detail response. Returning
+                // a stale candidate here would let a revoked revision cross
+                // the confirmation boundary after a network failure.
+                if !force_revalidate {
+                    if let Some(stale) = previous {
+                        return Ok(stale.value);
+                    }
+                }
+                return Err(format!("{label} request failed: {error}"));
+            }
+        };
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Self::cache_revalidated(cache, key)
+                .ok_or_else(|| format!("{label} returned HTTP 304 without a cached response"));
+        }
+
+        let status = response.status();
+        let etag = response
+            .headers()
+            .get(ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = read_limited_json_body(response).await?;
+        if !status.is_success() {
+            return Err(format_api_error(label, status, &body));
+        }
+        let json = serde_json::from_slice::<Value>(&body)
+            .map_err(|e| format!("{label} response was not JSON: {e}"))?;
+        Self::cache_put(cache, key, json.clone(), etag);
+        Ok(json)
     }
 
     pub async fn search(
@@ -235,9 +386,13 @@ impl MarketClient {
         category: Option<&str>,
         limit: Option<u32>,
         cursor: Option<&str>,
-        platform: &str,
+        dsh_version: &str,
     ) -> Result<Value, String> {
-        let limit = limit.unwrap_or(30);
+        // The Desktop catalog is intentionally never an all-platform endpoint.
+        // The backend command hardcodes this too; retaining it here prevents a
+        // future caller from accidentally widening the request.
+        let platform = "desktop";
+        let limit = limit.unwrap_or(50).clamp(1, 100);
         let cache_key = format!(
             "{:?}",
             (
@@ -245,125 +400,98 @@ impl MarketClient {
                 category.unwrap_or(""),
                 limit,
                 cursor.unwrap_or(""),
-                platform
+                platform,
+                dsh_version
             )
         );
-        if let Some(fresh) = Self::cache_get(&self.search_cache, &cache_key, SEARCH_TTL) {
-            return Ok(fresh);
-        }
-
         let url = format!("{}/plugins", self.base_url.trim_end_matches('/'));
-        let mut url = reqwest::Url::parse(&url).map_err(|e| format!("bad market base URL: {e}"))?;
+        let mut url = Url::parse(&url).map_err(|e| format!("bad market base URL: {e}"))?;
         url.query_pairs_mut()
             .append_pair("q", query)
             .append_pair("platform", platform)
             .append_pair("limit", &limit.to_string());
-        if let Some(cursor) = cursor {
-            if !cursor.is_empty() {
-                url.query_pairs_mut().append_pair("cursor", cursor);
-            }
+        if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
+            // Cursor values are opaque: only hand the exact server value back.
+            url.query_pairs_mut().append_pair("cursor", cursor);
         }
-        if let Some(category) = category {
+        if let Some(category) = category.filter(|category| !category.is_empty()) {
             url.query_pairs_mut().append_pair("category", category);
         }
 
-        let fetch = async {
-            let response = self
-                .http
-                .get(url)
-                .send()
-                .await
-                .map_err(|e| format!("market search request failed: {e}"))?;
-            if !response.status().is_success() {
-                return Err(format!("market search failed: HTTP {}", response.status()));
-            }
-            let body = read_limited_json_body(response).await?;
-            let mut parsed: MarketSearchResponse = serde_json::from_slice(&body)
-                .map_err(|e| format!("market search response was not JSON: {e}"))?;
-            // Defensive only: the server already filters by `platform`.
-            // Keep `count` and `page` exactly as sent — they are the server's
-            // cursor-pagination truth. If the server ignored the filter, the
-            // worst case is an item/count mismatch, not a wrong-platform
-            // install (the UI still checks platforms before installing).
-            parsed
-                .items
-                .retain(|item| item.platforms.iter().any(|p| p == platform));
-            let json = serde_json::to_value(parsed)
-                .map_err(|e| format!("market search response serialization failed: {e}"))?;
-            MarketClient::cache_put(&self.search_cache, &cache_key, json.clone());
-            Ok(json)
-        };
-
-        match fetch.await {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                if let Some(stale) = Self::cache_get(
-                    &self.search_cache,
-                    &cache_key,
-                    Duration::from_secs(24 * 60 * 60),
-                ) {
-                    Ok(stale)
-                } else {
-                    Err(error)
-                }
-            }
+        let raw = self
+            .cached_json(
+                &self.search_cache,
+                &cache_key,
+                SEARCH_TTL,
+                url,
+                "market search",
+                false,
+            )
+            .await?;
+        let mut parsed: MarketSearchResponse = serde_json::from_value(raw)
+            .map_err(|e| format!("market search response did not match the v4 DTO: {e}"))?;
+        for item in &mut parsed.items {
+            annotate_installability(item, dsh_version);
         }
+        // Defensive only: the server already filters by platform. Keep count
+        // and page untouched because they are the server's pagination truth.
+        parsed
+            .items
+            .retain(|item| item.platforms.iter().any(|value| value == platform));
+        serde_json::to_value(parsed)
+            .map_err(|e| format!("market search response serialization failed: {e}"))
     }
 
-    pub async fn detail(&self, slug: &str) -> Result<Value, String> {
+    async fn fetch_detail(
+        &self,
+        slug: &str,
+        force_revalidate: bool,
+    ) -> Result<MarketDetail, String> {
         if !is_valid_market_slug(slug) {
             return Err("invalid market slug".to_string());
         }
-        let cache_key = slug.to_string();
-        if let Some(fresh) = Self::cache_get(&self.detail_cache, &cache_key, DETAIL_TTL) {
-            return Ok(fresh);
-        }
-
         let url = format!("{}/plugins/{slug}", self.base_url.trim_end_matches('/'));
+        let url = Url::parse(&url).map_err(|e| format!("bad market base URL: {e}"))?;
+        let raw = self
+            .cached_json(
+                &self.detail_cache,
+                slug,
+                DETAIL_TTL,
+                url,
+                "market detail",
+                force_revalidate,
+            )
+            .await?;
+        serde_json::from_value(raw)
+            .map_err(|e| format!("market detail response did not match the v4 DTO: {e}"))
+    }
 
-        let fetch = async {
-            let response = self
-                .http
-                .get(url)
-                .send()
-                .await
-                .map_err(|e| format!("market detail request failed: {e}"))?;
-            if !response.status().is_success() {
-                return Err(format!("market detail failed: HTTP {}", response.status()));
-            }
-            let body = read_limited_json_body(response).await?;
-            let detail: MarketDetail = serde_json::from_slice(&body)
-                .map_err(|e| format!("market detail response was not JSON: {e}"))?;
-            let json = serde_json::to_value(detail)
-                .map_err(|e| format!("market detail response serialization failed: {e}"))?;
-            MarketClient::cache_put(&self.detail_cache, &cache_key, json.clone());
-            Ok(json)
-        };
+    pub async fn detail(&self, slug: &str, dsh_version: &str) -> Result<Value, String> {
+        let mut detail = self.fetch_detail(slug, false).await?;
+        annotate_installability(&mut detail.entry, dsh_version);
+        serde_json::to_value(detail)
+            .map_err(|e| format!("market detail response serialization failed: {e}"))
+    }
 
-        match fetch.await {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                if let Some(stale) = Self::cache_get(
-                    &self.detail_cache,
-                    &cache_key,
-                    Duration::from_secs(24 * 60 * 60),
-                ) {
-                    Ok(stale)
-                } else {
-                    Err(error)
-                }
-            }
-        }
+    /// Revalidate the detail even if its normal cache TTL has not elapsed.
+    /// A 304 still proves the previously cached entry is the current revision.
+    pub async fn prepare_install(
+        &self,
+        slug: &str,
+        dsh_version: &str,
+    ) -> Result<MarketInstallCandidate, String> {
+        let detail = self.fetch_detail(slug, true).await?;
+        candidate_from_entry(&detail.entry, dsh_version)
     }
 
     pub async fn image(&self, url: &str) -> Result<Value, String> {
-        let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid image URL: {e}"))?;
-        if !base_url_allowed(&parsed) {
-            return Err("market images must use an allowed market host".to_string());
+        let parsed = Url::parse(url).map_err(|e| format!("invalid image URL: {e}"))?;
+        if !image_url_allowed(&parsed) {
+            return Err("market images must use https://cdn.cordis.run".to_string());
         }
         let response = self
             .http
-            .get(url)
+            .get(parsed)
             .send()
             .await
             .map_err(|e| format!("image request failed: {e}"))?;
@@ -373,7 +501,7 @@ impl MarketClient {
         let content_type = response
             .headers()
             .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
+            .and_then(|value| value.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_string();
         if !content_type.starts_with("image/") {
@@ -382,6 +510,194 @@ impl MarketClient {
         let bytes = read_limited_image_body(response).await?;
         let data_url = format!("data:{content_type};base64,{}", base64_encode(&bytes));
         Ok(serde_json::json!({ "dataUrl": data_url }))
+    }
+}
+
+fn format_api_error(label: &str, status: reqwest::StatusCode, body: &[u8]) -> String {
+    match serde_json::from_slice::<ApiErrorBody>(body) {
+        Ok(parsed) => {
+            let request = parsed
+                .error
+                .request_id
+                .filter(|id| !id.is_empty())
+                .map(|id| format!(" (requestId: {id})"))
+                .unwrap_or_default();
+            format!(
+                "{label} failed: {} {}: {}{request}",
+                status, parsed.error.code, parsed.error.message
+            )
+        }
+        Err(_) => format!("{label} failed: HTTP {status}"),
+    }
+}
+
+fn required_wire_string<'a>(value: &'a Option<String>, field: &str) -> Result<&'a str, String> {
+    let value = value
+        .as_deref()
+        .ok_or_else(|| format!("market entry is missing {field}"))?;
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err(format!("market entry has invalid {field}"));
+    }
+    Ok(value)
+}
+
+fn secure_https_url(raw: &str, field: &str) -> Result<Url, String> {
+    let url = Url::parse(raw).map_err(|e| format!("market entry has invalid {field}: {e}"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!("market entry has unsafe {field} URL"));
+    }
+    Ok(url)
+}
+
+fn is_valid_sha512_integrity(value: &str) -> bool {
+    let Some(encoded) = value.strip_prefix("sha512-") else {
+        return false;
+    };
+    if encoded.len() != 88 || !encoded.is_ascii() {
+        return false;
+    }
+    let bytes = encoded.as_bytes();
+    let padding = if bytes.ends_with(b"==") {
+        2
+    } else if bytes.ends_with(b"=") {
+        1
+    } else {
+        0
+    };
+    if padding > 2 || bytes[..bytes.len() - padding].contains(&b'=') {
+        return false;
+    }
+    if !bytes[..bytes.len() - padding]
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+    {
+        return false;
+    }
+    // SHA-512 output is 64 bytes, which always has two trailing "=" in
+    // canonical standard base64. Reject unusual encodings rather than trying
+    // to normalize them before they reach the lockfile verifier.
+    padding == 2 && (encoded.len() / 4) * 3 - padding == 64
+}
+
+fn parse_dsh_requirement(raw: &str) -> Result<VersionReq, String> {
+    VersionReq::parse(raw)
+        .or_else(|_| {
+            let normalized = raw.split_whitespace().collect::<Vec<_>>().join(", ");
+            VersionReq::parse(&normalized)
+        })
+        .map_err(|e| format!("market entry has invalid engines.dsh: {e}"))
+}
+
+/// Store distributions have an additional, locally pinned review boundary.
+/// Keep it in the candidate gate so the catalog UI, the confirmation preview,
+/// and the mutation command all agree that an unreviewed package is not
+/// installable. The command repeats this check as defense in depth because
+/// IPC callers must never rely on UI-derived state.
+fn distribution_allows_package(package_name: &str, store_build: bool) -> bool {
+    !store_build || crate::curated_plugins::is_allowed(package_name)
+}
+
+fn candidate_from_entry(
+    entry: &MarketEntry,
+    dsh_version: &str,
+) -> Result<MarketInstallCandidate, String> {
+    if !is_valid_market_slug(&entry.slug) {
+        return Err("market entry has invalid slug".to_string());
+    }
+    if entry.blocked != Some(false) {
+        return Err("this market entry is blocked and cannot be installed".to_string());
+    }
+    if entry.deprecated != Some(false) {
+        return Err("this market entry is deprecated and cannot be installed".to_string());
+    }
+    if !entry.platforms.iter().any(|platform| platform == "desktop") {
+        return Err("this market entry does not support desktop".to_string());
+    }
+
+    let entry_revision = required_wire_string(&entry.entry_revision, "entryRevision")?.to_owned();
+    let source = entry
+        .source
+        .as_ref()
+        .ok_or_else(|| "market entry is missing nested source".to_string())?;
+    if source.source_type.as_deref() != Some("npm") {
+        return Err("this market entry is not an npm source".to_string());
+    }
+    let package_name = required_wire_string(&source.package_name, "source.packageName")?;
+    if !crate::plugins::is_valid_package_name(package_name) {
+        return Err("market entry has invalid source.packageName".to_string());
+    }
+    if !distribution_allows_package(package_name, crate::build_info::STORE_BUILD) {
+        return Err(
+            "this market entry is not on the Microsoft Store reviewed plugin list".to_string(),
+        );
+    }
+    let version = required_wire_string(&source.version, "source.version")?;
+    Version::parse(version).map_err(|e| format!("market entry has invalid source.version: {e}"))?;
+    let integrity = required_wire_string(&source.integrity, "source.integrity")?;
+    if !is_valid_sha512_integrity(integrity) {
+        return Err("market entry has invalid source.integrity".to_string());
+    }
+    let registry_raw = required_wire_string(&source.registry, "source.registry")?;
+    let registry = secure_https_url(registry_raw, "source.registry")?;
+    let registry_host = registry
+        .host_str()
+        .ok_or_else(|| "market entry has invalid source.registry host".to_string())?;
+    if registry.path() != "/" || registry.query().is_some() {
+        return Err("market entry has unsafe source.registry URL".to_string());
+    }
+    if !APPROVED_NPM_REGISTRY_HOSTS.contains(&registry_host) {
+        return Err("market entry uses an unapproved npm registry host".to_string());
+    }
+    let tarball = required_wire_string(&source.tarball, "source.tarball")?;
+    let tarball_url = secure_https_url(tarball, "source.tarball")?;
+    if tarball_url.host_str() != Some(registry_host) {
+        return Err("market entry tarball host does not match its registry".to_string());
+    }
+    if tarball_url.query().is_some() {
+        return Err("market entry has unsafe source.tarball URL".to_string());
+    }
+
+    let dsh_range = entry
+        .engines
+        .as_ref()
+        .and_then(|engines| engines.get("dsh"))
+        .ok_or_else(|| "market entry is missing engines.dsh".to_string())?;
+    let requirement = parse_dsh_requirement(dsh_range)?;
+    let current = Version::parse(dsh_version)
+        .map_err(|e| format!("Desktop DSH version is unavailable or invalid: {e}"))?;
+    if !requirement.matches(&current) {
+        return Err(format!(
+            "this market entry requires DSH {dsh_range}, but Desktop runs {dsh_version}"
+        ));
+    }
+
+    Ok(MarketInstallCandidate {
+        slug: entry.slug.clone(),
+        entry_revision,
+        package_name: package_name.to_owned(),
+        version: version.to_owned(),
+        integrity: integrity.to_owned(),
+        registry: registry_raw.to_owned(),
+        tarball: tarball.to_owned(),
+    })
+}
+
+fn annotate_installability(entry: &mut MarketEntry, dsh_version: &str) {
+    match candidate_from_entry(entry, dsh_version) {
+        Ok(_) => {
+            entry.installable = true;
+            entry.install_reason = None;
+        }
+        Err(error) => {
+            entry.installable = false;
+            entry.install_reason = Some(error);
+        }
     }
 }
 
@@ -441,104 +757,330 @@ async fn read_limited_image_body(response: reqwest::Response) -> Result<Vec<u8>,
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
-    #[test]
-    fn base_url_defaults_to_cordis_run() {
-        // Constructor reads env; the default path is covered by base_url builder.
-        let base = std::env::var("CORDIS_RUN_API").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        assert_eq!(base, DEFAULT_BASE_URL);
+    const VALID_INTEGRITY: &str =
+        "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==";
+
+    fn valid_entry() -> MarketEntry {
+        serde_json::from_value(serde_json::json!({
+            "slug": "fixture-plugin",
+            "name": "Fixture Plugin",
+            "entryRevision": "revision-1",
+            "description": {"zh": "中文说明", "en": "English description"},
+            "source": {
+                "type": "npm",
+                "packageName": "dsh-cc-tui",
+                "version": "1.0.0",
+                "integrity": VALID_INTEGRITY,
+                "registry": "https://registry.npmjs.org",
+                "tarball": "https://registry.npmjs.org/dsh-cc-tui/-/dsh-cc-tui-1.0.0.tgz"
+            },
+            "platforms": ["desktop"],
+            "engines": {"dsh": ">=0.1.0-rc.6 <0.2.0"},
+            "blocked": false,
+            "deprecated": false
+        }))
+        .expect("valid fixture entry")
     }
 
-    #[test]
-    fn parses_cursor_page_and_defensively_filters_items() {
-        let body = r#"{
-            "items": [
-                {
-                    "slug":"a",
-                    "name":"A",
-                    "source":{"type":"npm","packageName":"a-pkg","version":"1.0.0"},
-                    "description":{"zh":"甲","en":"A"},
-                    "platforms":["web","desktop"]
-                },
-                {
-                    "slug":"b",
-                    "name":"B",
-                    "source":{"type":"npm","packageName":"b-pkg","version":"2.0.0"},
-                    "platforms":["web"]
-                },
-                {
-                    "slug":"c",
-                    "name":"C",
-                    "source":{"type":"npm","packageName":"c-pkg","version":"3.0.0"},
-                    "platforms":["desktop"]
+    fn response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let mut out = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n", body.len());
+        for (name, value) in headers {
+            out.push_str(&format!("{name}: {value}\r\n"));
+        }
+        out.push_str("\r\n");
+        out.push_str(body);
+        out
+    }
+
+    fn test_server(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let port = listener.local_addr().expect("fixture address").port();
+        let worker = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let count = stream.read(&mut chunk).expect("read request");
+                    if count == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
                 }
-            ],
-            "count": 3,
-            "page": {"cursor":"opaque","hasMore":true,"limit":50}
-        }"#;
-        let mut parsed: MarketSearchResponse =
-            serde_json::from_str(body).expect("fixture should parse");
-        assert_eq!(parsed.page.limit, 50);
-        assert!(parsed.page.has_more);
-        assert_eq!(parsed.page.cursor.as_deref(), Some("opaque"));
-        parsed
-            .items
-            .retain(|item| item.platforms.iter().any(|p| p == "desktop"));
-        assert_eq!(parsed.items.len(), 2);
-        assert_eq!(parsed.items[0].slug, "a");
-        assert_eq!(
-            parsed.items[0]
-                .source
-                .as_ref()
-                .and_then(|s| s.package_name.as_deref()),
-            Some("a-pkg")
-        );
-        assert_eq!(parsed.items[1].slug, "c");
-        // Server pagination fields are preserved untouched.
-        assert_eq!(parsed.count, 3);
-        assert_eq!(parsed.page.limit, 50);
-        assert!(parsed.page.has_more);
-        assert_eq!(parsed.page.cursor.as_deref(), Some("opaque"));
-        match parsed.items[0].description.as_ref() {
-            Some(Description::Localized { zh, en }) => {
-                assert_eq!(zh.as_deref(), Some("甲"));
-                assert_eq!(en.as_deref(), Some("A"));
+                requests.push(String::from_utf8(bytes).expect("request is UTF-8"));
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
             }
-            _ => panic!("description should parse as localized text"),
-        }
+            requests
+        });
+        (format!("http://127.0.0.1:{port}/api/v1"), worker)
+    }
+
+    fn test_server_disconnects_after_first_response(
+        first_response: String,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let port = listener.local_addr().expect("fixture address").port();
+        let worker = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first request");
+            let mut bytes = [0_u8; 1024];
+            let _ = first.read(&mut bytes).expect("read first request");
+            first
+                .write_all(first_response.as_bytes())
+                .expect("write first response");
+            drop(first);
+
+            // Accept the conditional revalidation request and close the
+            // socket without a response. This models an interrupted network
+            // path, not an HTTP API error (which already must not be stale).
+            let (mut second, _) = listener.accept().expect("accept second request");
+            let _ = second.read(&mut bytes).expect("read second request");
+        });
+        (format!("http://127.0.0.1:{port}/api/v1"), worker)
     }
 
     #[test]
-    fn detail_defaults_screenshots_to_empty_and_parses_source() {
-        let detail: MarketDetail = serde_json::from_str(
-            r#"{"slug":"x","name":"X","platforms":["desktop"],"source":{"type":"npm","packageName":"x-pkg","version":"1.0.0"}}"#,
-        )
-        .expect("detail fixture should parse");
-        assert!(detail.screenshots.is_empty());
-        assert_eq!(detail.platforms, vec!["desktop".to_string()]);
+    fn parses_nested_source_and_bilingual_description() {
+        let entry = valid_entry();
         assert_eq!(
-            detail
+            entry
                 .source
                 .as_ref()
-                .and_then(|s| s.package_name.as_deref()),
-            Some("x-pkg")
+                .and_then(|source| source.package_name.as_deref()),
+            Some("dsh-cc-tui")
         );
+        match entry.description.as_ref() {
+            Some(Description::Localized { zh, en }) => {
+                assert_eq!(zh.as_deref(), Some("中文说明"));
+                assert_eq!(en.as_deref(), Some("English description"));
+            }
+            _ => panic!("localized description should deserialize"),
+        }
     }
 
     #[test]
-    fn loopback_allowed_only_in_debug_builds() {
-        let release_cordis =
-            base_url_allowed(&reqwest::Url::parse("https://cordis.run/api/v1").expect("url"));
-        assert!(release_cordis);
-        if cfg!(debug_assertions) {
-            let loopback = base_url_allowed(
-                &reqwest::Url::parse("http://127.0.0.1:8787/api/v1").expect("url"),
-            );
-            assert!(loopback);
+    fn candidate_accepts_only_complete_nested_npm_source() {
+        let entry = valid_entry();
+        let candidate =
+            candidate_from_entry(&entry, "0.1.0-rc.7").expect("fixture should be installable");
+        assert_eq!(candidate.entry_revision, "revision-1");
+        assert_eq!(candidate.package_name, "dsh-cc-tui");
+
+        let mut blocked = valid_entry();
+        blocked.blocked = Some(true);
+        assert!(candidate_from_entry(&blocked, "0.1.0-rc.7").is_err());
+
+        let mut deprecated = valid_entry();
+        deprecated.deprecated = Some(true);
+        assert!(candidate_from_entry(&deprecated, "0.1.0-rc.7").is_err());
+
+        let legacy: MarketEntry = serde_json::from_value(serde_json::json!({
+            "slug": "legacy",
+            "name": "Legacy",
+            "npm": "legacy-package",
+            "version": "1.0.0",
+            "platforms": ["desktop"],
+            "blocked": false,
+            "deprecated": false
+        }))
+        .expect("legacy display shape can deserialize");
+        assert!(candidate_from_entry(&legacy, "0.1.0-rc.7").is_err());
+    }
+
+    #[test]
+    fn blocked_entry_is_displayable_but_never_produces_install_candidate() {
+        let mut blocked = valid_entry();
+        blocked.blocked = Some(true);
+        annotate_installability(&mut blocked, "0.1.0-rc.7");
+        assert!(!blocked.installable);
+        assert!(blocked
+            .install_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("blocked")));
+        assert!(candidate_from_entry(&blocked, "0.1.0-rc.7").is_err());
+    }
+
+    #[test]
+    fn candidate_rejects_bad_source_host_or_engine() {
+        let mut entry = valid_entry();
+        entry.source.as_mut().expect("source").tarball =
+            Some("https://evil.example/fixture-plugin.tgz".to_string());
+        assert!(candidate_from_entry(&entry, "0.1.0-rc.7").is_err());
+
+        let mut incompatible = valid_entry();
+        incompatible.engines = Some(BTreeMap::from([("dsh".to_string(), ">=0.2.0".to_string())]));
+        assert!(candidate_from_entry(&incompatible, "0.1.0-rc.7").is_err());
+        assert!(is_valid_sha512_integrity(VALID_INTEGRITY));
+        assert!(!is_valid_sha512_integrity("sha512-AAAA"));
+    }
+
+    #[test]
+    fn store_distribution_only_allows_the_reviewed_snapshot() {
+        assert!(distribution_allows_package("dsh-cc-tui", true));
+        assert!(!distribution_allows_package("fixture-plugin", true));
+        assert!(distribution_allows_package("fixture-plugin", false));
+    }
+
+    #[test]
+    fn search_uses_desktop_cursor_category_and_etag_revalidation() {
+        let body = serde_json::json!({
+            "items": [serde_json::to_value(valid_entry()).expect("serialize entry")],
+            "count": 1,
+            "page": {"cursor": "fixture:next", "hasMore": true, "limit": 1}
+        })
+        .to_string();
+        let (base, worker) = test_server(vec![
+            response(
+                "200 OK",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("ETag", "\"fixture-v1\""),
+                ],
+                &body,
+            ),
+            response("304 Not Modified", &[("ETag", "\"fixture-v1\"")], ""),
+        ]);
+        let client = MarketClient::with_base_url(base).expect("client");
+        let first = tauri::async_runtime::block_on(client.search(
+            "",
+            Some("agent"),
+            Some(1),
+            Some("fixture:0"),
+            "0.1.0-rc.7",
+        ))
+        .expect("first search");
+        assert_eq!(first["count"], 1);
+        assert_eq!(first["page"]["cursor"], "fixture:next");
+        assert_eq!(first["items"][0]["installable"], true);
+        {
+            let mut cache = client.search_cache.lock().expect("cache");
+            for entry in cache.values_mut() {
+                entry.at = Instant::now() - SEARCH_TTL;
+            }
         }
-        assert!(!base_url_allowed(
-            &reqwest::Url::parse("https://evil.example/api/v1").expect("url")
+        let second = tauri::async_runtime::block_on(client.search(
+            "",
+            Some("agent"),
+            Some(1),
+            Some("fixture:0"),
+            "0.1.0-rc.7",
+        ))
+        .expect("304 should reuse cache");
+        assert_eq!(second["items"][0]["slug"], "fixture-plugin");
+        let requests = worker.join().expect("fixture worker");
+        let first_request = requests[0].to_ascii_lowercase();
+        assert!(first_request.contains("platform=desktop"));
+        assert!(first_request.contains("category=agent"));
+        assert!(first_request.contains("cursor=fixture%3a0"));
+        assert!(requests[1]
+            .to_ascii_lowercase()
+            .contains("if-none-match: \"fixture-v1\""));
+    }
+
+    #[test]
+    fn detail_404_is_reported_as_json_api_error() {
+        let (base, worker) = test_server(vec![response(
+            "404 Not Found",
+            &[("Content-Type", "application/json")],
+            r#"{"error":{"code":"NOT_FOUND","message":"no such slug","requestId":"req-1"}}"#,
+        )]);
+        let client = MarketClient::with_base_url(base).expect("client");
+        let error = tauri::async_runtime::block_on(client.detail("missing", "0.1.0-rc.7"))
+            .expect_err("detail should fail");
+        assert!(error.contains("NOT_FOUND: no such slug"));
+        assert!(error.contains("requestId: req-1"));
+        let _ = worker.join().expect("fixture worker");
+    }
+
+    #[test]
+    fn install_prepare_does_not_fall_back_to_stale_detail_after_network_failure() {
+        let body = serde_json::json!({
+            "slug": "fixture-plugin",
+            "name": "Fixture Plugin",
+            "entryRevision": "revision-1",
+            "source": {
+                "type": "npm",
+                "packageName": "fixture-plugin",
+                "version": "1.0.0",
+                "integrity": VALID_INTEGRITY,
+                "registry": "https://registry.npmjs.org",
+                "tarball": "https://registry.npmjs.org/fixture-plugin/-/fixture-plugin-1.0.0.tgz"
+            },
+            "platforms": ["desktop"],
+            "engines": {"dsh": ">=0.1.0-rc.6 <0.2.0"},
+            "blocked": false,
+            "deprecated": false
+        })
+        .to_string();
+        let (base, worker) = test_server_disconnects_after_first_response(response(
+            "200 OK",
+            &[
+                ("Content-Type", "application/json"),
+                ("ETag", "\"fixture-v1\""),
+            ],
+            &body,
         ));
+        let client = MarketClient::with_base_url(base).expect("client");
+        let detail = tauri::async_runtime::block_on(client.detail("fixture-plugin", "0.1.0-rc.7"));
+        assert!(detail.is_ok(), "first detail request should populate cache");
+        let error =
+            tauri::async_runtime::block_on(client.prepare_install("fixture-plugin", "0.1.0-rc.7"))
+                .expect_err("install preparation must require live revalidation");
+        assert!(error.contains("market detail request failed"));
+        worker.join().expect("fixture worker");
+    }
+
+    #[test]
+    fn image_urls_are_cdn_only() {
+        assert!(image_url_allowed(
+            &Url::parse("https://cdn.cordis.run/screenshots/x/1.webp").expect("url")
+        ));
+        assert!(!image_url_allowed(
+            &Url::parse("https://cordis.run/screenshots/x/1.webp").expect("url")
+        ));
+        assert!(!image_url_allowed(
+            &Url::parse("http://127.0.0.1/fixture.png").expect("url")
+        ));
+    }
+
+    #[test]
+    fn base_url_is_limited_to_the_canonical_api_boundary() {
+        assert!(base_url_allowed(
+            &Url::parse("https://cordis.run/api/v1").expect("production API URL")
+        ));
+        assert!(base_url_allowed(
+            &Url::parse("https://cordis.run/api/v1/").expect("production API URL")
+        ));
+        assert!(base_url_allowed(
+            &Url::parse("http://127.0.0.1:3210/api/v1").expect("fixture API URL")
+        ));
+        assert!(base_url_allowed(
+            &Url::parse("http://localhost:3210/api/v1/").expect("fixture API URL")
+        ));
+
+        for raw in [
+            "https://cordis.run/",
+            "https://cordis.run/api/v1?fixture=1",
+            "https://cordis.run/api/v1#fragment",
+            "https://user:pass@cordis.run/api/v1",
+            "https://cordis.run:8443/api/v1",
+            "https://evil.example/api/v1",
+            "http://cordis.run/api/v1",
+            "http://127.0.0.1:3210/not-api",
+        ] {
+            assert!(
+                !base_url_allowed(&Url::parse(raw).expect("test URL")),
+                "should reject {raw}"
+            );
+        }
     }
 
     #[test]

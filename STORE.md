@@ -47,9 +47,9 @@ installed in the Store build are restricted to the reviewed cordis.run list.
 
 **Search terms:** deepseek harness, dsh, cordis, ai agent, desktop harness
 
-**Support contact:** contact@dsharness.app
-**Website:** https://dsharness.app
-**Privacy policy:** https://dsharness.app/privacy
+**Support contact:** https://dsharness.app/support/
+**Website:** https://dsharness.app/windows/
+**Privacy policy:** https://dsharness.app/privacy/
 
 ### 简体中文
 
@@ -96,12 +96,16 @@ Microsoft Store 版通过 Microsoft Store 更新；插件安装仅允许 cordis.
 
 ## Package upload
 
-1. Run the `Release` workflow (`workflow_dispatch` or `v*` tag).
-2. Download artifacts:
+1. Verify the public Store URLs return HTML successfully:
+   - `https://dsharness.app/windows/`
+   - `https://dsharness.app/privacy/`
+   - `https://dsharness.app/support/`
+2. Run the `Release` workflow (`workflow_dispatch` or `v*` tag).
+3. Download artifacts:
    - `dsh-desktop-store-msix-x64`
    - `dsh-desktop-store-msix-arm64`
-3. Extract and upload the two `.msix` packages on the Packages page.
-4. Do **not** upload the MSIX files to GitHub Releases; they are Store-only.
+4. Extract and upload the two `.msix` packages on the Packages page.
+5. Do **not** upload the MSIX files to GitHub Releases; they are Store-only.
 
 ## Post-publish updates
 
