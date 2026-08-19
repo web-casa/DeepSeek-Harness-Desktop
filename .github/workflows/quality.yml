@@ -16,6 +16,9 @@ jobs:
   quality:
     name: Quality gates (Linux)
     runs-on: ubuntu-latest
+    # A healthy full gate has historically completed well below this bound.
+    # Keep a wedged hosted runner from holding a PR/release indefinitely.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
 
@@ -32,6 +35,9 @@ jobs:
 
       # Tauri shell system deps (compiling src-tauri requires webkit2gtk-4.1).
       - name: Install Tauri system dependencies
+        # Hosted apt mirrors occasionally stall; fail with a specific step
+        # rather than consuming the full job timeout.
+        timeout-minutes: 15
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
@@ -68,6 +74,9 @@ jobs:
           cargo clippy --target aarch64-apple-darwin --manifest-path crates/dsh-sidecar/Cargo.toml --all-targets -- -D warnings
 
       - name: "Tauri shell tests (nextest: state machine + proptests)"
+        # Unit/property tests are normally short after the preceding builds.
+        # A step bound makes a wedged test process diagnosable from the log.
+        timeout-minutes: 15
         run: |
           # tauri-build asserts the bundle resources path exists; the smoke
           # job stages the real runtime — the unit job only needs the dir.
