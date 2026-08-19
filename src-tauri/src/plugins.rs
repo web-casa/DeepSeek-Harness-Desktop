@@ -561,6 +561,50 @@ fn lockfile_package_key(line: &str) -> Option<&str> {
     Some(raw)
 }
 
+/// pnpm writes the package key as `name@version` when no peer context is
+/// involved, but appends one or more parenthesized peer contexts when it is
+/// (for example `name@1.2.3(react@18.3.1)`).  The peer context is not part of
+/// the reviewed package identity, so accept it only after an exact
+/// `name@version` prefix and only when its delimiters are well-formed.  Do not
+/// use a loose prefix match here: `name@1.2.30(...)` must never satisfy a
+/// candidate for `name@1.2.3`.
+fn lockfile_package_key_matches(key: &str, expected: &str) -> bool {
+    if key == expected {
+        return true;
+    }
+    let Some(suffix) = key.strip_prefix(expected) else {
+        return false;
+    };
+    if !suffix.starts_with('(') {
+        return false;
+    }
+
+    let mut depth = 0_usize;
+    let mut group_has_content = false;
+    for character in suffix.chars() {
+        if character.is_control() || character.is_whitespace() {
+            return false;
+        }
+        match character {
+            '(' => {
+                if depth == 0 {
+                    group_has_content = false;
+                }
+                depth += 1;
+            }
+            ')' => {
+                if depth == 0 || !group_has_content {
+                    return false;
+                }
+                depth -= 1;
+            }
+            _ if depth == 0 => return false,
+            _ => group_has_content = true,
+        }
+    }
+    depth == 0 && group_has_content
+}
+
 fn yaml_scalar(raw: &str) -> &str {
     let raw = raw.trim();
     if raw.len() >= 2
@@ -612,7 +656,7 @@ fn lockfile_integrity(profile: &Path, package_name: &str, version: &str) -> Resu
             break;
         }
         if let Some(key) = lockfile_package_key(line) {
-            in_target = key == expected_key;
+            in_target = lockfile_package_key_matches(key, &expected_key);
             in_resolution = false;
             continue;
         }
@@ -1089,6 +1133,44 @@ mod tests {
                 .expect("quoted scoped package key should resolve"),
             candidate.integrity
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn market_lockfile_reads_exact_version_with_pnpm_peer_context() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-market-peer-context-lock-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let profile = home.join("profiles").join("web");
+        std::fs::create_dir_all(&profile).unwrap();
+        let candidate = crate::market::MarketInstallCandidate {
+            package_name: "@scope/demo".to_string(),
+            version: "1.0.0".to_string(),
+            ..market_candidate()
+        };
+        std::fs::write(
+            profile.join("pnpm-lock.yaml"),
+            format!(
+                "lockfileVersion: '9.0'\n\npackages:\n\n  '{}@{}(react@18.3.1)(typescript@5.7.3)':\n    resolution:\n      integrity: {}\n\nsnapshots:\n",
+                candidate.package_name, candidate.version, candidate.integrity
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            lockfile_integrity(&profile, &candidate.package_name, &candidate.version)
+                .expect("exact package version with peer context should resolve"),
+            candidate.integrity
+        );
+        assert!(!lockfile_package_key_matches(
+            "@scope/demo@1.0.00(react@18.3.1)",
+            "@scope/demo@1.0.0"
+        ));
+        assert!(!lockfile_package_key_matches(
+            "@scope/demo@1.0.0(peer context)",
+            "@scope/demo@1.0.0"
+        ));
         let _ = std::fs::remove_dir_all(&home);
     }
 
