@@ -46,7 +46,7 @@ function distFor(v: string): Dist {
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const DOWNLOAD_RETRIES = 3;
 
-async function download(url: string, dest: string): Promise<void> {
+async function download(url: URL, dest: string): Promise<void> {
   info(`downloading ${url}`);
   let lastError: unknown;
   for (let attempt = 1; attempt <= DOWNLOAD_RETRIES; attempt++) {
@@ -64,7 +64,7 @@ async function download(url: string, dest: string): Promise<void> {
   fail(`download failed after ${DOWNLOAD_RETRIES} attempts: ${(lastError as Error).message}`);
 }
 
-async function downloadOnce(url: string, dest: string): Promise<void> {
+async function downloadOnce(url: URL, dest: string): Promise<void> {
   const res = await fetch(url, {
     redirect: "follow",
     signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
@@ -107,6 +107,15 @@ async function downloadOnce(url: string, dest: string): Promise<void> {
   process.stdout.write("\r");
 }
 
+function nodeDownloadUrl(version: string, dist: Dist): URL {
+  // The origin is intentionally a literal. The manifest is allowed to select
+  // only a validated release pathname; it must never influence the protocol,
+  // hostname, port, query, or fragment of an outbound request.
+  const url = new URL("https://nodejs.org");
+  url.pathname = `/dist/v${version}/${dist.file}`;
+  return url;
+}
+
 function run(cmd: string, args: string[]): void {
   const res = spawnSync(cmd, args, { stdio: "inherit" });
   if (res.status !== 0) fail(`${cmd} ${args.join(" ")} exited with ${res.status}`);
@@ -140,7 +149,7 @@ mkdirSync(extractDir, { recursive: true });
 const partFile = `${archive}.part`;
 rmSync(partFile, { force: true });
 if (!existsSync(archive)) {
-  await download(`https://nodejs.org/dist/v${v}/${dist.file}`, partFile);
+  await download(nodeDownloadUrl(v, dist), partFile);
   renameSync(partFile, archive);
 } else {
   info(`reusing cached archive ${dist.file}`);
