@@ -8,7 +8,7 @@ import { quarantinePresent, parseSltListing } from "./bundle-checks.ts";
 import { isParseableReadyLine } from "./heartbeat-sim.ts";
 import { isPackageRoot } from "./licenses.ts";
 import { nodeRelease } from "./node-distribution.ts";
-import { readManifest } from "./common.ts";
+import { normalizeLineEndings, readManifest } from "./common.ts";
 
 test("node release allowlist stays aligned with the runtime manifest", () => {
   const manifest = readManifest();
@@ -22,6 +22,12 @@ test("node release allowlist stays aligned with the runtime manifest", () => {
     "win32-arm64",
     "win32-x64",
   ]);
+});
+
+test("normalizeLineEndings: generated-file comparisons tolerate Windows checkout CRLF", () => {
+  assert.equal(normalizeLineEndings("one\r\ntwo\r\n"), "one\ntwo\n");
+  assert.equal(normalizeLineEndings("one\ntwo\n"), "one\ntwo\n");
+  assert.equal(normalizeLineEndings("one\rtwo"), "one\rtwo");
 });
 
 test("expectedSigned: platform secret presence decides", () => {
