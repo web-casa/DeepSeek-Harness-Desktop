@@ -51,7 +51,7 @@ const manifest = readManifest();
 
 // --- deny: version alignment ---------------------------------------------
 const desktopVersion = manifest.desktopVersion;
-const rootPkg = readJson("package.json") as { version?: string };
+const rootPkg = readJson("package.json") as { private?: boolean; version?: string };
 const tauriConf = readJson("src-tauri/tauri.conf.json") as { version?: string };
 const tauriCargo = cargoVersion("src-tauri/Cargo.toml");
 const sidecarCargo = cargoVersion("crates/dsh-sidecar/Cargo.toml");
@@ -71,6 +71,14 @@ for (const [file, version] of versionFiles) {
   }
 }
 ok(`desktop version aligned: ${desktopVersion} (manifest/package.json/Cargo.toml/tauri.conf.json)`);
+
+// The root package is the Desktop build workspace, not an npm distribution.
+// Public npm artifacts, if approved later, must use a separately reviewed
+// @web-casa scoped package rather than accidentally publishing this workspace.
+if (rootPkg.private !== true) {
+  fail("package.json must remain private; do not publish the Desktop workspace to npm");
+}
+ok("root npm workspace remains private (public npm artifacts require @web-casa review)");
 
 if (sidecarCargo !== manifest.sidecarVersion) {
   fail(`sidecar version drift: Cargo.toml ${sidecarCargo} != manifest ${manifest.sidecarVersion}`);

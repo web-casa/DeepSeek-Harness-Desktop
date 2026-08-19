@@ -9,6 +9,11 @@ on:
         type: string
         required: false
         description: "Tag/branch to build & verify (defaults to the default branch). Does not publish."
+      preset_slug:
+        type: string
+        required: false
+        default: code
+        description: "Public Cordis preset slug that must return a direct ZIP response."
 
 # Least privilege baseline for every job; only the `release` job escalates
 # (contents: write) to publish the GitHub Release. Also covers the new
@@ -17,6 +22,28 @@ permissions:
   contents: read
 
 jobs:
+  # The desktop deliberately refuses CDN redirects for remote preset archives.
+  # Keep this independent of native builds: a backend contract regression must
+  # block tag publication, while workflow_dispatch can still collect Windows
+  # build and installer evidence for diagnosis.
+  preset-download-contract:
+    name: Cordis preset direct ZIP contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4 (SHA-pinned)
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+
+      - name: Require direct HTTP 200 application/zip
+        run: node scripts/verify-cordis-preset-download.ts
+        env:
+          CORDIS_PRESET_SLUG: ${{ github.event.inputs.preset_slug || 'code' }}
+
   quality:
     name: Quality gates
     uses: ./.github/workflows/quality.yml
@@ -477,7 +504,7 @@ jobs:
     # soak is a publish gate: a heartbeat regression must surface before
     # release, and the 5-minute soak overlaps the (much longer) platform
     # builds, so waiting on it adds no wall time.
-    needs: [build, soak, tag-gate, windows-deep-link-smoke, macos-deep-link-smoke]
+    needs: [build, soak, tag-gate, windows-deep-link-smoke, macos-deep-link-smoke, preset-download-contract]
     runs-on: ubuntu-latest
     permissions:
       contents: write
