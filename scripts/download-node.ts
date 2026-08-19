@@ -17,18 +17,29 @@ interface Dist {
   bin: string; // path of the binary inside the archive
 }
 
+function archArg(): string | undefined {
+  const i = process.argv.indexOf("--arch");
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
+function skipProbeArg(): boolean {
+  return process.argv.includes("--skip-probe");
+}
+
 function distFor(v: string): Dist {
   const base = `node-v${v}`;
   const map: Record<string, Dist> = {
     "win32-x64": { file: `${base}-win-x64.zip`, bin: `${base}-win-x64/node.exe` },
+    "win32-arm64": { file: `${base}-win-arm64.zip`, bin: `${base}-win-arm64/node.exe` },
     "darwin-arm64": { file: `${base}-darwin-arm64.tar.gz`, bin: `${base}-darwin-arm64/bin/node` },
     "darwin-x64": { file: `${base}-darwin-x64.tar.gz`, bin: `${base}-darwin-x64/bin/node` },
     "linux-x64": { file: `${base}-linux-x64.tar.xz`, bin: `${base}-linux-x64/bin/node` },
     "linux-arm64": { file: `${base}-linux-arm64.tar.xz`, bin: `${base}-linux-arm64/bin/node` },
   };
-  const key = `${process.platform}-${process.arch}`;
+  const arch = archArg() ?? process.arch;
+  const key = `${process.platform}-${arch}`;
   const dist = map[key];
-  if (!dist) fail(`unsupported platform/arch: ${key} (targets: win32-x64, darwin-arm64, darwin-x64, linux-x64, linux-arm64)`);
+  if (!dist) fail(`unsupported platform/arch: ${key} (targets: win32-x64, win32-arm64, darwin-arm64, darwin-x64, linux-x64, linux-arm64)`);
   return dist;
 }
 
@@ -111,7 +122,8 @@ function run(cmd: string, args: string[]): void {
 }
 
 const manifest = readManifest();
-const platformKey = `${process.platform}-${process.arch}`;
+const platformKey = `${process.platform}-${archArg() ?? process.arch}`;
+const skipProbe = skipProbeArg() || archArg() !== undefined && archArg() !== process.arch;
 const v = manifest.nodeVersion;
 // The URL below is built from manifest data (CodeQL js/file-access-to-http):
 // constrain it to a strict semver triple before it can reach fetch(). The
@@ -171,10 +183,14 @@ if (!existsSync(extracted)) fail(`binary not found in archive at ${dist.bin}`);
 copyFileSync(extracted, nodePath());
 if (process.platform !== "win32") chmodSync(nodePath(), 0o755);
 
-// Verify the binary actually runs.
-const probe = spawnSync(nodePath(), ["--version"], { encoding: "utf8" });
-if (probe.status !== 0 || !probe.stdout.includes(`v${v}`)) {
-  fail(`bundled node failed verification: ${probe.stderr ?? probe.stdout}`);
+// Verify the binary actually runs when it targets the current host.
+if (!skipProbe) {
+  const probe = spawnSync(nodePath(), ["--version"], { encoding: "utf8" });
+  if (probe.status !== 0 || !probe.stdout.includes(`v${v}`)) {
+    fail(`bundled node failed verification: ${probe.stderr ?? probe.stdout}`);
+  }
+} else {
+  info(`skipping node probe for foreign arch ${archArg() ?? process.arch}`);
 }
 
 rmSync(extractDir, { recursive: true, force: true });

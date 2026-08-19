@@ -49,12 +49,12 @@ test("parseSltListing: header block excluded, paths normalized", () => {
     "--",
     "Path = D:\\a\\repo\\installer.exe",
     "----------",
-    "Path = DeepSeek Harness Desktop.exe",
+    "Path = DSH Desktop.exe",
     "Path = runtime\\node.exe",
     "Path = runtime/harness/a b/bin.js",
   ].join("\n");
   assert.deepEqual(parseSltListing(fixture), [
-    "DeepSeek Harness Desktop.exe",
+    "DSH Desktop.exe",
     "runtime/node.exe",
     "runtime/harness/a b/bin.js",
   ]);

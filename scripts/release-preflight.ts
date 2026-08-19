@@ -2,7 +2,7 @@
 //
 // Deny-level checks: version alignment across the version files (including the
 // runtime lockfile's resolved dsh version), the sidecar/harness pins, the node
-// checksum table (exact 5-platform set, 64-hex each), .nvmrc consistency,
+// checksum table (exact 6-platform set, 64-hex each), .nvmrc consistency,
 // npm 11.17..11.x (script allowlist precondition, both bounds).
 // Tag binding: --expect-tag vX.Y.Z requires ref_name == "v${desktopVersion}".
 // Warn-level (skipped in CI): dirty worktree, wrong branch, existing tag.
@@ -19,7 +19,7 @@ import {
   assertNpmInAuditedRange,
 } from "./lib/common.ts";
 
-const PLATFORM_KEYS = ["win32-x64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
+const PLATFORM_KEYS = ["win32-x64", "win32-arm64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
 // Case-insensitive: the checksums we publish are lowercase, but a manual edit
 // must not slip through just because it used uppercase hex.
 const SHA256_RE = /^[0-9a-fA-F]{64}$/;

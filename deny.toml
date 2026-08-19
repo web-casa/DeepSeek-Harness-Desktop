@@ -1,4 +1,4 @@
-# cargo-deny policy for the DeepSeek Harness Desktop supply chain.
+# cargo-deny policy for the DSH Desktop supply chain.
 # `cargo deny check` runs in CI as a release gate.
 
 [advisories]

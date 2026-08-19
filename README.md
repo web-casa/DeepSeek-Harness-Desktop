@@ -1,4 +1,4 @@
-# DeepSeek Harness Desktop
+# DSH Desktop
 
 把官方 DeepSeek Harness 打包成 Windows / macOS 原生应用，让 Harness 及其**插件生态**开箱即用。
 不是 fork：Harness 原样随包携带，桌面层只负责生命周期与安全边界。
@@ -13,7 +13,7 @@
 > ⚠️ **macOS 用户**：Apple 开发者证书仍在申请中，应用尚未签名。首次打开若被
 > Gatekeeper 拦截，请执行：
 > ```bash
-> xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness Desktop.app"
+> xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 > ```
 > （如提示权限不足，在命令前加 `sudo`。）预计下一版本完成签名+公证后不再需要此步骤。
 
@@ -41,7 +41,7 @@ Harness 的技能、工具、模型路由、MCP、预设——**全部是 Cordis
 
 ```bash
 # macOS
-DSH_HOME="<诊断页 dshHome>" node "/Applications/DeepSeek Harness Desktop.app/Contents/Resources/runtime/harness/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add <包名>
+DSH_HOME="<诊断页 dshHome>" node "/Applications/DSH Desktop.app/Contents/Resources/runtime/harness/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add <包名>
 # Windows PowerShell
 $env:DSH_HOME="<诊断页 dshHome>"; node "<安装目录>\runtime\harness\node_modules\@deepseek-ai\dsh\lib\bin.js" plugin --profile web add <包名>
 ```
@@ -118,6 +118,7 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 ## 发布与版本
 
 - CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发完整发布（质量门 → soak → 打包 → 内容/签名断言 → draft release + `latest.json`）。
+- Microsoft Store：`v*` tag 同时构建 x64/arm64 MSIX（`build-msix` job，Store 模式关闭应用内更新并限制插件为 cordis.run 审核列表）。MSIX 产物作为 workflow artifact 下载后上传 Partner Center，不发布到 GitHub Release。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
 - 当前状态：v0.2.8 开发中（新增 cordis.run deep-link 一键安装确认；v0.2.4 为当前发布，v0.2.3 draft 作废不发布）。
 - 已知边界：未签名（SmartScreen/Gatekeeper 手动放行）；macOS 更新器待签名；Linux 仅开发用。

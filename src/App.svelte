@@ -65,7 +65,9 @@
     harness: "…",
     node: "…",
     sidecar: "…",
+    distribution: "web",
   });
+  let storeBuild = $state(false);
   let logs = $state<[string, string][]>([]);
   let inTauri = $state(true);
   let busy = $state(false);
@@ -419,6 +421,12 @@
     }
   }
 
+  async function reportContent() {
+    const url = new URL("mailto:contact@dsharness.app");
+    url.searchParams.set("subject", "DSH Desktop: report AI content");
+    await openUrl(url.toString()).catch(() => {});
+  }
+
   async function reportIssue() {
     try {
       const d = await getDiagnostics();
@@ -583,6 +591,7 @@
       const [st, ver, lg] = await Promise.all([getStatus(), getVersions(), getLogs()]);
       apply(st);
       versions = ver;
+      storeBuild = ver.distribution === "store";
       logs = lg;
     } catch {
       inTauri = false;
@@ -590,11 +599,13 @@
     refreshPresets();
     refreshPlugins();
     // Silent boot-time update check: only inform, never prompt.
-    try {
-      const info = await checkUpdate();
-      if (info.available) updateInfo = info;
-    } catch {
-      /* offline / draft release: stay silent */
+    if (!storeBuild) {
+      try {
+        const info = await checkUpdate();
+        if (info.available) updateInfo = info;
+      } catch {
+        /* offline / draft release: stay silent */
+      }
     }
   });
 
@@ -766,7 +777,7 @@
       </svg>
     </div>
     <div class="title-wrap">
-      <h1>DeepSeek Harness</h1>
+      <h1>DSH Desktop</h1>
       <span class="subtitle">桌面发行层 · 原版 Harness Web UI · 内置 Node Runtime</span>
     </div>
     <div class="spacer"></div>
@@ -868,7 +879,9 @@
   <div class="card update-card">
     <div class="update-row">
       <span class="update-title">软件更新</span>
-      {#if updateInfo?.available}
+      {#if storeBuild}
+        <span class="update-info">Microsoft Store 管理更新</span>
+      {:else if updateInfo?.available}
         <span class="update-info">发现新版本 v{updateInfo.version}</span>
         <button class="primary" onclick={doInstallUpdate} disabled={updateBusy}>
           {updateBusy
@@ -887,6 +900,7 @@
       <span class="update-title">资源</span>
       <button class="ghost" onclick={() => openSite("https://dsharness.app")}>官网</button>
       <button class="ghost" onclick={() => openSite("https://cordis.run")}>插件市场</button>
+      <button class="ghost" onclick={reportContent}>报告 AI 内容</button>
       <button class="ghost" onclick={reportIssue}>报告问题</button>
     </div>
     {#if updateError}
@@ -955,7 +969,9 @@
   <div class="card plugin-card">
     <div class="update-row">
       <span class="update-title">插件市场</span>
-      <button class="ghost" onclick={doPickSideload}>离线安装 .tgz</button>
+      {#if !storeBuild}
+        <button class="ghost" onclick={doPickSideload}>离线安装 .tgz</button>
+      {/if}
     </div>
     <div class="plugin-row">
       <input
@@ -1006,32 +1022,42 @@
     <div class="update-row">
       <span class="update-title">插件（用户安装）</span>
     </div>
-    <div class="plugin-row">
-      <input
-        class="plugin-input"
-        type="text"
-        placeholder="npm 包名，如 @cordisjs/plugin-example"
-        bind:value={pluginName}
-        disabled={pluginBusy}
-        spellcheck="false"
-        onkeydown={(e) => {
-          if (e.key === "Enter") startPluginOp(pluginName, "install");
-        }}
-      />
-      {#if pluginBusy}
-        <span class="plugin-busy"><span class="spinner"></span> 操作中…</span>
-        <button class="danger-ghost" onclick={doCancelPluginOp}>取消</button>
-      {:else}
-        <button class="primary" onclick={() => startPluginOp(pluginName, "install")} disabled={!pluginName.trim()}>
-          安装
-        </button>
-      {/if}
-    </div>
-    <div class="trust-note">
-      插件与 Agent 同权限运行工具和命令——仅安装可信来源；可在
-      <button class="inline-link" onclick={() => openSite("https://cordis.run")}>cordis.run 插件市场</button>
-      查找包名。
-    </div>
+    {#if storeBuild}
+      <div class="plugin-row">
+        <span class="update-info">仅允许安装 cordis.run 已审核插件</span>
+        <button class="ghost" onclick={() => openSite("https://cordis.run")}>打开插件市场</button>
+      </div>
+      <div class="trust-note">
+        插件与 Agent 同权限运行工具和命令；Store 版仅安装已审核插件。
+      </div>
+    {:else}
+      <div class="plugin-row">
+        <input
+          class="plugin-input"
+          type="text"
+          placeholder="npm 包名，如 @cordisjs/plugin-example"
+          bind:value={pluginName}
+          disabled={pluginBusy}
+          spellcheck="false"
+          onkeydown={(e) => {
+            if (e.key === "Enter") startPluginOp(pluginName, "install");
+          }}
+        />
+        {#if pluginBusy}
+          <span class="plugin-busy"><span class="spinner"></span> 操作中…</span>
+          <button class="danger-ghost" onclick={doCancelPluginOp}>取消</button>
+        {:else}
+          <button class="primary" onclick={() => startPluginOp(pluginName, "install")} disabled={!pluginName.trim()}>
+            安装
+          </button>
+        {/if}
+      </div>
+      <div class="trust-note">
+        插件与 Agent 同权限运行工具和命令——仅安装可信来源；可在
+        <button class="inline-link" onclick={() => openSite("https://cordis.run")}>cordis.run 插件市场</button>
+        查找包名。
+      </div>
+    {/if}
     {#if pluginError}
       <div class="notice-box">{pluginError}</div>
     {/if}
@@ -1162,7 +1188,7 @@
   </div>
 {/if}
 
-{#if sideloadPath}
+{#if sideloadPath && !storeBuild}
   <div class="modal-backdrop">
     <div class="modal" role="dialog" aria-modal="true" aria-label="离线插件安装确认">
       <div class="modal-title">离线安装插件？</div>

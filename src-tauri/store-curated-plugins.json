@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "source": "https://cordis.run/plugins",
+  "reviewedAt": "2026-08-17",
+  "allowlist": [
+    "@liustack/modlens",
+    "dsh-better-sidebar",
+    "dsh-cc-tui",
+    "@dsh-external/dsh-vision-toolkit",
+    "@dsh-external/dsh-ads",
+    "@nanmicoder/dsh-agent-teams",
+    "dsh-at-file",
+    "@oh-dsh/desktop",
+    "whale-girl",
+    "@huiliyi37/dsh-tianshu-tui",
+    "@dsh-external/dsh-visualize",
+    "@omdsh-dev/dsh-genui"
+  ]
+}

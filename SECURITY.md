@@ -1,6 +1,6 @@
 # Security Policy
 
-DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
+DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
 监督器 + 内置 Node 24，运行官方 `@deepseek-ai/dsh`（pin 版本，Web UI 原样
 加载、不做任何修改）。本文记录威胁模型、默认安全姿态与报告渠道。
 
@@ -38,10 +38,11 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
 - **供应链**：Node 下载 SHA-256 钉死（官方 SHASUMS256 核对）；npm 安装脚本
   白名单（strict-allow-scripts）；cargo-vet（社区审计集 + 本仓库审计）与
   cargo-deny 为发布闸门。
-- **Deep link 边界**：`dsharness://plugin/install` 是外部输入。Rust 侧对
-  scheme/host/path/协议版本/包名/来源页逐项重校验后才生成「待确认安装
-  请求」；未确认前不会 spawn 任何进程，非法链接直接丢弃且不会弹窗。
-- **CSP 与桌面 IPC**：`withGlobalTauri: false`；22 个桌面命令经 AppManifest
+- **Deep link 边界**：`dsharness://plugin/install` 与
+  `dsharness://preset/install` 都是外部输入。Rust 侧对
+  scheme/host/path/协议版本/包名或下载 URL/来源页逐项重校验后才生成「待确认
+  安装请求」；未确认前不会 spawn 任何进程或下载预设，非法链接直接丢弃且不会弹窗。
+- **CSP 与桌面 IPC**：`withGlobalTauri: false`；32 个桌面命令经 AppManifest
   ACL 仅授权 bootstrap 窗口。
 
 ## 已知边界（请如实预期）
@@ -80,6 +81,9 @@ DeepSeek Harness Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-side
   再以 `file:` spec 交给插件执行器，用户文件名不进入 shell。已知限制：
   Windows 上若 `DSH_HOME` 路径含空格或 cmd 元字符，侧载会 fail-closed 拒绝，
   请改用市场在线安装。
+- **Microsoft Store 版**：`STORE_BUILD=1` 编译。应用内更新关闭（由 Store
+  管理），插件安装在后端强制校验 `src-tauri/store-curated-plugins.json`
+  白名单；UI 不提供任意包名输入或离线侧载，deep link 亦不能绕过该校验。
 
 ## 报告漏洞
 

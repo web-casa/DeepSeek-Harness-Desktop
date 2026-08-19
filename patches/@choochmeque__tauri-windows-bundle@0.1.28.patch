@@ -1,0 +1,38 @@
+diff --git a/dist/cli.js b/dist/cli.js
+index cee555e3273dd65b271c79ecfaee65c4c6169856..7040396be404a5e0210531c4d60135f15393efaf 100755
+--- a/dist/cli.js
++++ b/dist/cli.js
+@@ -539,6 +539,14 @@ function generateManifestTemplate(windowsDir) {
+  * (e.g. `com:ExeServer`, `uap3:Extension Category="windows.appExecutionAlias"`).
+  */
+ function executableName(config) {
++    try {
++        const cargoPath = path.join(process.cwd(), "src-tauri", "Cargo.toml");
++        const cargo = fs.readFileSync(cargoPath, "utf8");
++        const name = /^name\s*=\s*"([^"]+)"/m.exec(cargo)?.[1];
++        if (name) return `${name}.exe`;
++    } catch {
++        // Fall through to the display-name heuristic.
++    }
+     return `${config.displayName.replace(/\s+/g, '')}.exe`;
+ }
+ function generateManifest(config, arch, minVersion, windowsDir) {
+diff --git a/dist/index.js b/dist/index.js
+index 6dae34ccc0a8d6aee8a7db206174f425ba7c191a..00dbcdf777f1f5e73c3a2c8b2aa7e5f65c0b020f 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -537,6 +537,14 @@ function generateManifestTemplate(windowsDir) {
+  * (e.g. `com:ExeServer`, `uap3:Extension Category="windows.appExecutionAlias"`).
+  */
+ function executableName(config) {
++    try {
++        const cargoPath = path.join(process.cwd(), "src-tauri", "Cargo.toml");
++        const cargo = fs.readFileSync(cargoPath, "utf8");
++        const name = /^name\s*=\s*"([^"]+)"/m.exec(cargo)?.[1];
++        if (name) return `${name}.exe`;
++    } catch {
++        // Fall through to the display-name heuristic.
++    }
+     return `${config.displayName.replace(/\s+/g, '')}.exe`;
+ }
+ function generateManifest(config, arch, minVersion, windowsDir) {

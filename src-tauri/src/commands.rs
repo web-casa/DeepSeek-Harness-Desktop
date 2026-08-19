@@ -132,6 +132,10 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
 /// Result of a silent update check, surfaced to the bootstrap UI.
 #[tauri::command]
 pub async fn check_update(app: AppHandle) -> Result<Value, String> {
+    if crate::build_info::STORE_BUILD {
+        let _ = app;
+        return Ok(serde_json::json!({ "available": false, "unsupported": true }));
+    }
     // macOS updater is deliberately OFF until signing + notarization land
     // (Gatekeeper rejects un-notarized updates) — report it as unsupported,
     // NOT as "already up to date".
@@ -159,6 +163,10 @@ pub async fn check_update(app: AppHandle) -> Result<Value, String> {
 /// Download and install the latest update, then restart the app.
 #[tauri::command]
 pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
+    if crate::build_info::STORE_BUILD {
+        let _ = app;
+        return Err("updates are managed by the Microsoft Store".to_string());
+    }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
@@ -1064,6 +1072,9 @@ pub fn install_plugin(
     plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
     name: String,
 ) -> Result<(), String> {
+    if crate::build_info::STORE_BUILD && !crate::curated_plugins::is_allowed(&name) {
+        return Err("仅允许安装 cordis.run 已审核插件".to_string());
+    }
     plugin_op(app, &runtime, plugins.inner().clone(), name, "add")
 }
 
@@ -1074,6 +1085,12 @@ pub fn sideload_plugin(
     plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
     path: String,
 ) -> Result<(), String> {
+    // A local archive cannot be tied to the reviewed immutable Store
+    // allowlist, so Store builds must reject sideloading server-side even if
+    // a compromised or stale bootstrap UI invokes this command directly.
+    if crate::build_info::STORE_BUILD {
+        return Err("Microsoft Store 版不支持离线侧载插件".to_string());
+    }
     let src = std::path::Path::new(&path);
     let Some(paths) = runtime.paths() else {
         return Err("runtime paths are not resolved yet".to_string());

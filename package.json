@@ -18,6 +18,7 @@
     "release:preflight": "node scripts/release-preflight.ts",
     "icons": "node scripts/gen-icon.ts && tauri icon src-tauri/icons/icon-source.png --output src-tauri/icons",
     "test:scripts": "node --test \"scripts/lib/*.test.ts\"",
+    "tauri:windows:build": "tauri-windows-bundle build --runner pnpm",
     "verify:sideload": "node scripts/verify-sideload.ts"
   },
   "dependencies": {
@@ -31,7 +32,8 @@
     "svelte": "^5.56.9",
     "svelte-check": "^4.7.6",
     "typescript": "^6.0.3",
-    "vite": "^8.2.1"
+    "vite": "^8.2.1",
+    "@choochmeque/tauri-windows-bundle": "^0.1.28"
   },
   "packageManager": "pnpm@11.21.0"
 }
