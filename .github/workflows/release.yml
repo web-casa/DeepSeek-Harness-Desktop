@@ -10,6 +10,11 @@ on:
         required: false
         description: "Tag/branch to build & verify (defaults to the default branch). Does not publish."
 
+# Least privilege baseline for every job; only the `release` job escalates
+# (contents: write) to publish the GitHub Release.
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Quality gates
@@ -347,7 +352,7 @@ jobs:
           "$lsregister" -dump > /tmp/lsregister-dump.txt
           grep -q 'claimed schemes:.*dsharness' /tmp/lsregister-dump.txt
           grep -q 'claim id:.*com.yeagoo.dsh-desktop dsharness' /tmp/lsregister-dump.txt
-          cat /tmp/lsregister-dump.txt | grep -A4 -B2 dsharness || true
+          grep -A4 -B2 dsharness /tmp/lsregister-dump.txt || true
           pkill -f "deepseek-harness-desktop" 2>/dev/null || true
           open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fplugins%2Fis-odd"
           sleep 20
@@ -358,7 +363,6 @@ jobs:
 
       - name: Warm open keeps single process
         run: |
-          app="$HOME/Applications/DeepSeek Harness Desktop.app"
           before=$(pgrep -f "DeepSeek Harness Desktop.app/Contents/MacOS/deepseek-harness-desktop" | head -1)
           [ -n "$before" ] || { echo "app not running before warm link"; exit 1; }
           open "dsharness://plugin/install?v=1&name=is-odd&source=https%3A%2F%2Fcordis.run%2Fen%2Fplugins%2Fis-odd"

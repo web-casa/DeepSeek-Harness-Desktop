@@ -25,7 +25,6 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   repoRoot,
-  runtimeDir,
   harnessDir,
   readManifest,
   fail,
