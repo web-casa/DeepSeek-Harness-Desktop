@@ -17,8 +17,7 @@ interface Dist {
   bin: string; // path of the binary inside the archive
 }
 
-function distFor(): Dist {
-  const v = readManifest().nodeVersion;
+function distFor(v: string): Dist {
   const base = `node-v${v}`;
   const map: Record<string, Dist> = {
     "win32-x64": { file: `${base}-win-x64.zip`, bin: `${base}-win-x64/node.exe` },
@@ -104,8 +103,15 @@ function run(cmd: string, args: string[]): void {
 
 const manifest = readManifest();
 const platformKey = `${process.platform}-${process.arch}`;
-const dist = distFor();
 const v = manifest.nodeVersion;
+// The URL below is built from manifest data (CodeQL js/file-access-to-http):
+// constrain it to a strict semver triple before it can reach fetch(). The
+// SHA-256 pin below is the primary integrity anchor; this just prevents a
+// tampered manifest from redirecting the download to an arbitrary path.
+if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(v)) {
+  fail(`runtime-manifest.json nodeVersion "${v}" is not a semver triple like 24.18.0`);
+}
+const dist = distFor(v);
 // Scratch stays OUTSIDE src-tauri/resources/runtime — everything in there
 // gets bundled into the app. Only the final binary is copied in.
 const scratch = join(tmpDir, "node-dist");

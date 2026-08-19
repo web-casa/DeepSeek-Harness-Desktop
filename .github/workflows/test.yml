@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
 
+# Least privilege: every job here only reads the checkout (quality.yml brings
+# its own block); nothing in this workflow needs write access to the repo.
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Quality gates

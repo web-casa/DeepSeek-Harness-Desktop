@@ -7,6 +7,11 @@ name: Quality
 on:
   workflow_call:
 
+# Reusable workflow: callers (test.yml / release.yml) do not escalate the
+# GITHUB_TOKEN, and the gate suite only ever reads the checkout.
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Quality gates (Linux)
