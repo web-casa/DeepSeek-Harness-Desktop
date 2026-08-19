@@ -37,7 +37,7 @@ Harness 的技能、工具、模型路由、MCP、预设——**全部是 Cordis
 
 **安装**：设置页「插件（用户安装）」输入 npm 包名即装即卸——桌面层调用官方 `dsh plugin --profile web add/remove`，pinned CLI 与 pnpm 均随包携带（**无需系统 pnpm**），带实时安装日志与取消（整棵 node → dsh → pnpm 进程树一并清理）。
 
-从 cordis.run 插件详情页点「安装到桌面版」会用 `dsharness://plugin/install?v=1&name=<包名>&source=<插件页>` 唤起桌面版；桌面版在 Rust 侧严格校验协议后弹出确认框，用户确认后才开始安装（旧版本桌面版或不支持的市场页仍可复制包名粘贴安装）。命令行等价路径（高级用法）：
+从 cordis.run 插件详情页点「安装到桌面版」会用 `dsharness://plugin/install?v=1&name=<包名>&source=<插件页>` 唤起桌面版；桌面版在 Rust 侧严格校验协议后，仅将链接定位到对应市场 slug，并重新拉取详情、核对当前 `entryRevision` 与嵌套 source，再由用户确认安装（旧版本桌面版或不支持的市场页仍可复制包名粘贴安装）。命令行等价路径（高级用法）：
 
 ```bash
 # macOS
@@ -85,13 +85,17 @@ pnpm tauri dev                                    # 桌面开发模式
 
 ### cordis.run 本地 fixture（市场联调）
 
-真 API 上线前，可用仓库内置 fixture 联调市场功能（数据契约与真实 API 一致：嵌套 `source`、`{zh,en}` 描述、cursor 分页字段 `page.cursor/hasMore/limit` + `count`）：
+真 API 上线前，可用仓库内置 fixture 联调市场功能（数据契约与真实 API 一致：嵌套 `source`、`{zh,en}` 描述、cursor 分页字段 `page.cursor/hasMore/limit` + `count`、ETag/304 与 JSON 404 错误）：
 
 ```bash
 node tools/cordis-fixture/fixture-server.mjs
 # 输出端口后，在另一个终端设置后启动桌面调试构建：
 CORDIS_RUN_API=http://127.0.0.1:<port>/api/v1 pnpm tauri dev
 ```
+
+市场安装只接受可验证的 npm 嵌套 source；Desktop 会重新核对详情修订、
+禁用构建脚本、校验 lockfile integrity，并将插件保持为“待激活”。安装不会自动
+启用，需在插件列表中显式点击 **Activate**，随后重启 Harness。
 
 > `~/.cargo` 不可写时：`export CARGO_HOME=<repo>/.tmp/cargo-home`。
 

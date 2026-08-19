@@ -160,6 +160,9 @@ fn main() {
             commands::market_search,
             commands::market_plugin,
             commands::market_image,
+            commands::market_prepare_install,
+            commands::market_install_plugin,
+            commands::activate_market_plugin,
             commands::sideload_plugin
         ]);
 

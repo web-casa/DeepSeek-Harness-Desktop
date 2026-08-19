@@ -98,6 +98,9 @@ export async function onUpdateProgress(
 export interface PluginEntry {
   name: string;
   version: string;
+  state: "active" | "pending" | "installed";
+  slug?: string | null;
+  entryRevision?: string | null;
 }
 
 export interface PluginList {
@@ -137,14 +140,18 @@ export type MarketDescription = string | { zh?: string; en?: string };
 export interface MarketPluginSummary {
   slug: string;
   name: string;
+  entryRevision?: string | null;
   source?: MarketPluginSource | null;
   description?: MarketDescription | null;
   category?: string | null;
   platforms: string[];
+  engines?: Record<string, string> | null;
   stars?: number | null;
   homepage?: string | null;
   blocked?: boolean | null;
   deprecated?: boolean | null;
+  installable?: boolean;
+  installReason?: string | null;
 }
 
 export interface MarketPluginVersion {
@@ -160,16 +167,30 @@ export interface MarketPluginVersion {
 export interface MarketPluginDetail {
   slug: string;
   name: string;
+  entryRevision?: string | null;
   source?: MarketPluginSource | null;
   description?: MarketDescription | null;
   category?: string | null;
   platforms: string[];
+  engines?: Record<string, string> | null;
   stars?: number | null;
   homepage?: string | null;
   blocked?: boolean | null;
   deprecated?: boolean | null;
+  installable?: boolean;
+  installReason?: string | null;
   screenshots?: string[];
   versions?: MarketPluginVersion[];
+}
+
+export interface MarketInstallPreview {
+  slug: string;
+  entryRevision: string;
+  packageName: string;
+  version: string;
+  integrity: string;
+  registry: string;
+  tarball: string;
 }
 
 export interface MarketSearchPage {
@@ -196,6 +217,19 @@ export const marketSearch = (
 export const marketPlugin = (slug: string): Promise<MarketPluginDetail> =>
   invoke("market_plugin", { slug });
 
+export const marketPrepareInstall = (slug: string): Promise<MarketInstallPreview> =>
+  invoke("market_prepare_install", { slug });
+
+export const marketInstallPlugin = (
+  slug: string,
+  entryRevision: string,
+): Promise<void> => invoke("market_install_plugin", { slug, entryRevision });
+
+export const activateMarketPlugin = (
+  slug: string,
+  entryRevision: string,
+): Promise<void> => invoke("activate_market_plugin", { slug, entryRevision });
+
 export const marketImage = (url: string): Promise<{ dataUrl: string }> =>
   invoke("market_image", { url });
 
@@ -208,6 +242,7 @@ export const pickSideloadFile = (): Promise<string | null> =>
 export interface PluginInstallRequest {
   name: string;
   source: string;
+  slug: string;
 }
 
 export const getPendingPluginInstall = (): Promise<PluginInstallRequest | null> =>

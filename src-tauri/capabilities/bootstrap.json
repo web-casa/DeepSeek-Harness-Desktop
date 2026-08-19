@@ -40,6 +40,9 @@
     "allow-market-search",
     "allow-market-plugin",
     "allow-market-image",
+    "allow-market-prepare-install",
+    "allow-market-install-plugin",
+    "allow-activate-market-plugin",
     "allow-sideload-plugin",
     "allow-pick-sideload-file"
   ]

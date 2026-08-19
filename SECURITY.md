@@ -41,8 +41,11 @@ DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
 - **Deep link 边界**：`dsharness://plugin/install` 与
   `dsharness://preset/install` 都是外部输入。Rust 侧对
   scheme/host/path/协议版本/包名或下载 URL/来源页逐项重校验后才生成「待确认
-  安装请求」；未确认前不会 spawn 任何进程或下载预设，非法链接直接丢弃且不会弹窗。
-- **CSP 与桌面 IPC**：`withGlobalTauri: false`；32 个桌面命令经 AppManifest
+  安装请求」；插件链接只定位经 Rust 校验的市场 slug，仍须重新拉取详情并确认
+  `entryRevision` 后才能进入受控安装；预设链接只接受直出
+  `https://cordis.run/api/presets/<slug>/download` 的 200 zip 响应且不跟随重定向。
+  未确认前不会 spawn 任何进程或下载预设，非法链接直接丢弃且不会弹窗。
+- **CSP 与桌面 IPC**：`withGlobalTauri: false`；35 个桌面命令经 AppManifest
   ACL 仅授权 bootstrap 窗口。
 
 ## 已知边界（请如实预期）

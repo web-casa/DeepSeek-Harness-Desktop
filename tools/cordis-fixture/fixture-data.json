@@ -2,6 +2,10 @@
   "schemaVersion": 1,
   "catalogRevision": "2026-08-18T00:00:00Z-8f3a",
   "updated": "2026-08-18T00:00:00Z",
+  "categories": {
+    "market": { "zh": "市场", "en": "Market" },
+    "agent": { "zh": "智能体", "en": "Agent" }
+  },
   "page": { "cursor": "opaque", "hasMore": false, "limit": 50 },
   "count": 2,
   "items": [
@@ -16,7 +20,7 @@
         "type": "npm",
         "packageName": "dshmarket",
         "version": "1.11.2",
-        "integrity": "sha512-CFx+GExHSBJVeF66kKBdGr+aQp7bbWF90fEEZpjW5REzmdpRC2gBnAt5BpkT9pcBSL7fkmW/2s4G2vFo7FD6Mw==",
+        "integrity": "sha512-dLKPe3Y7KOOHXtKFNzOLWqFiLu8ZSyLw74WlV0bElvIW9myc3Anm8VyUGH7LpORuutzWi9TKBBYw/PqziCKA8w==",
         "registry": "https://registry.npmjs.org",
         "tarball": "https://registry.npmjs.org/dshmarket/-/dshmarket-1.11.2.tgz"
       },
