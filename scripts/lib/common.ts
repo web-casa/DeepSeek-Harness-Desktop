@@ -47,6 +47,13 @@ export function info(message: string): void {
   console.log(`  ${message}`);
 }
 
+// Git for Windows may materialize a repository file with CRLF even when the
+// generated source is committed with LF. Use this only for content equality
+// checks; generators should continue emitting LF for a stable repository form.
+export function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
 // npm version gate shared by every script that runs `npm ci` in runtime/.
 // runtime/.npmrc relies on strict-allow-scripts/allow-scripts, an npm 11
 // feature: OLDER npm silently ignores unknown config keys (fail open — every

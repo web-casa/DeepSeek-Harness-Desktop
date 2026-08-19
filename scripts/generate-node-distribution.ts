@@ -7,7 +7,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fail, ok, readManifest, repoRoot } from "./lib/common.ts";
+import { fail, normalizeLineEndings, ok, readManifest, repoRoot } from "./lib/common.ts";
 
 const VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const outputPath = join(repoRoot, "scripts", "lib", "node-distribution.ts");
@@ -55,7 +55,7 @@ if (process.argv.includes("--check")) {
   } catch (error) {
     fail(`could not read generated node distribution: ${(error as Error).message}`);
   }
-  if (actual !== expected) {
+  if (normalizeLineEndings(actual) !== expected) {
     fail("generated node distribution is stale; run pnpm runtime:node:generate and commit the result");
   }
   ok(`generated node distribution aligned: ${version}`);
