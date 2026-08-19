@@ -10,7 +10,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { harnessDir, tmpDir, nodePath, fail, ok, info } from "./lib/common.ts";
+import { harnessDir, tmpDir, nodePath, fail, ok } from "./lib/common.ts";
 
 const dshHome = join(tmpDir, "preset-e2e-home");
 const id = "e2e-demo";

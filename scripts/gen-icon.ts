@@ -137,8 +137,6 @@ function genTrayTemplate(): void {
   const rgba = Buffer.alloc(S * S * 4);
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
-      const d = Math.hypot(x - cx, y - cy);
-      const hit = d <= CORE || (d >= R_IN && d <= R_OUT);
       const i = (y * S + x) * 4;
       // 2×2 supersample for smooth edges.
       let a = 0;
