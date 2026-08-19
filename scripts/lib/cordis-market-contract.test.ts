@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CORDIS_MARKET_API_ORIGIN,
-  DEFAULT_MISSING_MARKET_SLUG,
+  MISSING_MARKET_SLUG_PREFIX,
   desktopInstallWireProblem,
   directJsonErrorResponseProblem,
   directJsonResponseProblem,
@@ -41,7 +41,11 @@ function validDetail(): Record<string, unknown> {
 
 test("Cordis market URLs remain constrained to desktop production API", () => {
   assert.equal(isValidCordisMarketSlug("cordis-market"), true);
-  assert.equal(isValidCordisMarketSlug(DEFAULT_MISSING_MARKET_SLUG), true);
+  assert.equal(isValidCordisMarketSlug(MISSING_MARKET_SLUG_PREFIX), true);
+  assert.equal(
+    isValidCordisMarketSlug(`${MISSING_MARKET_SLUG_PREFIX}-00000000-0000-4000-8000-000000000000`),
+    true,
+  );
   assert.equal(isValidCordisMarketSlug("../escape"), false);
   assert.equal(isValidCordisMarketSlug("Cordis"), false);
   assert.equal(isValidCordisMarketSlug("a?b"), false);
@@ -83,7 +87,7 @@ test("Cordis market response headers reject redirects and non-JSON bodies", () =
   );
   assert.match(
     directJsonErrorResponseProblem({
-      endpoint: marketDetailUrl(DEFAULT_MISSING_MARKET_SLUG),
+      endpoint: marketDetailUrl(`${MISSING_MARKET_SLUG_PREFIX}-missing`),
       status: 404,
       statusText: "Not Found",
       contentType: "application/json",

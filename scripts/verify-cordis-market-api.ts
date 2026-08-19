@@ -5,8 +5,9 @@
 // Desktop Rust client consumes. Set CORDIS_MARKET_PROBE_SLUG only after a
 // reviewed public catalog entry exists to inspect its install wire shape.
 
+import { randomUUID } from "node:crypto";
 import {
-  DEFAULT_MISSING_MARKET_SLUG,
+  MISSING_MARKET_SLUG_PREFIX,
   desktopInstallWireProblem,
   directJsonErrorResponseProblem,
   directJsonResponseProblem,
@@ -82,7 +83,12 @@ async function assertNotModified(endpoint: URL, etag: string): Promise<void> {
 }
 
 async function assertJson404(): Promise<void> {
-  const endpoint = marketDetailUrl(DEFAULT_MISSING_MARKET_SLUG);
+  // A fixed sentinel can eventually collide with a real catalog entry and
+  // turn a healthy production API into a false release failure. Keep the
+  // request inside the validated slug grammar while making collision
+  // practically impossible for every probe run.
+  const missingSlug = `${MISSING_MARKET_SLUG_PREFIX}-${randomUUID()}`;
+  const endpoint = marketDetailUrl(missingSlug);
   const response = await fetch(endpoint, {
     redirect: "manual",
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),

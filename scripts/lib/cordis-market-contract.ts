@@ -5,7 +5,7 @@
 // Desktop gate for source, integrity, engine, and activation safety.
 
 export const CORDIS_MARKET_API_ORIGIN = "https://cordis.run/api/v1";
-export const DEFAULT_MISSING_MARKET_SLUG = "cordis-production-probe-missing";
+export const MISSING_MARKET_SLUG_PREFIX = "cordis-production-probe-missing";
 
 const MARKET_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,127}$/;
 const PACKAGE_NAME_RE = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
