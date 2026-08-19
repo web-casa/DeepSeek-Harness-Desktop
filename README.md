@@ -97,6 +97,26 @@ CORDIS_RUN_API=http://127.0.0.1:<port>/api/v1 pnpm tauri dev
 禁用构建脚本、校验 lockfile integrity，并将插件保持为“待激活”。安装不会自动
 启用，需在插件列表中显式点击 **Activate**，随后重启 Harness。
 
+### cordis.run 生产发布 smoke（只读）
+
+每次 Cordis 后端部署或 Desktop 发版前，运行以下无 mutation 的验证：
+
+```bash
+pnpm verify:cordis-preset
+pnpm verify:cordis-market
+```
+
+第二个命令固定请求 `platform=desktop`，要求直接 JSON、ETag/304 和 JSON 404。
+在有已审核公开条目后，可额外验证它的嵌套 source / integrity / engine wire
+shape（仍不安装）：
+
+```bash
+CORDIS_MARKET_PROBE_SLUG=<reviewed-public-slug> pnpm verify:cordis-market
+```
+
+Microsoft Store 构建仍只允许 `src-tauri/store-curated-plugins.json` 的审核快照；
+通过生产 probe 不等于获得 Store allowlist 权限。
+
 > `~/.cargo` 不可写时：`export CARGO_HOME=<repo>/.tmp/cargo-home`。
 
 ### 质量门
