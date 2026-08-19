@@ -4,7 +4,9 @@
 
 use tauri::Manager;
 
+mod build_info;
 mod commands;
+mod curated_plugins;
 mod deep_link;
 mod harness;
 mod market;
@@ -113,8 +115,17 @@ fn main() {
             app.manage(std::sync::Arc::new(market));
             deep_link::init(app.handle());
             Ok(())
-        })
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        });
+
+    // Store builds are updated by the Microsoft Store only: the updater
+    // plugin is not initialized and update commands return unsupported.
+    let builder = if build_info::STORE_BUILD {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    };
+
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -155,7 +166,7 @@ fn main() {
     let app = match builder.build(tauri::generate_context!()) {
         Ok(app) => app,
         Err(e) => {
-            eprintln!("error while building DeepSeek Harness Desktop: {e}");
+            eprintln!("error while building DSH Desktop: {e}");
             std::process::exit(1);
         }
     };

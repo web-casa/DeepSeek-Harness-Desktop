@@ -1,4 +1,4 @@
-# DeepSeek Harness Desktop
+# DSH Desktop
 
 Packages the official DeepSeek Harness as a native Windows / macOS app, with
 the Harness **plugin ecosystem** ready to go. Not a fork: the Harness ships
@@ -15,7 +15,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 > applied for, so the app is unsigned. If Gatekeeper blocks the first
 > launch, run:
 > ```bash
-> xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness Desktop.app"
+> xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 > ```
 > (prefix with `sudo` if it reports a permission error.) This step should
 > disappear in the next release once signing + notarization land.
@@ -55,7 +55,7 @@ equivalent (for power users):
 
 ```bash
 # macOS
-DSH_HOME="<dshHome from the diagnostics page>" node "/Applications/DeepSeek Harness Desktop.app/Contents/Resources/runtime/harness/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add <package-name>
+DSH_HOME="<dshHome from the diagnostics page>" node "/Applications/DSH Desktop.app/Contents/Resources/runtime/harness/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add <package-name>
 # Windows PowerShell
 $env:DSH_HOME="<dshHome from the diagnostics page>"; node "<install-dir>\runtime\harness\node_modules\@deepseek-ai\dsh\lib\bin.js" plugin --profile web add <package-name>
 ```
@@ -142,6 +142,10 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
 - CI: pushes/PRs run quality gates + three-platform smoke; a `v*` tag runs
   the full pipeline (gates → soak → bundle → content/signing assertions →
   draft release + `latest.json`).
+- Microsoft Store: `v*` tags also build x64/arm64 MSIX packages
+  (`build-msix` job; Store mode disables in-app updates and restricts plugins
+  to the cordis.run reviewed list). MSIX artifacts are workflow artifacts for
+  Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
 - Status: v0.2.8 in development (cordis.run deep-link install confirmation;

@@ -1,0 +1,28 @@
+{
+  "publisher": "CN=84AC3716-04E0-4D67-8951-0D3E51674CA0",
+  "publisherDisplayName": "AlanM.",
+  "capabilities": {
+    "general": [
+      "internetClient",
+      "privateNetworkClientServer"
+    ]
+  },
+  "extensions": {
+    "shareTarget": false,
+    "fileAssociations": [],
+    "protocolHandlers": [
+      {
+        "name": "dsharness",
+        "displayName": "DSH Desktop Plugin Install"
+      }
+    ]
+  },
+  "signing": {
+    "pfx": null,
+    "pfxPassword": null
+  },
+  "resourceIndex": {
+    "enabled": false,
+    "keepConfig": false
+  }
+}

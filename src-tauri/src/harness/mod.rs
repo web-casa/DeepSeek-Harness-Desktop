@@ -33,6 +33,7 @@ pub struct Versions {
     pub harness: String,
     pub node: String,
     pub sidecar: String,
+    pub distribution: String,
 }
 
 #[derive(Default)]
@@ -239,7 +240,7 @@ pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
             "harness",
             tauri::WebviewUrl::External(parsed),
         )
-        .title("DeepSeek Harness")
+        .title("DSH Desktop")
         .inner_size(1280.0, 800.0)
         .min_inner_size(960.0, 600.0)
         .on_navigation(move |candidate| same_origin(candidate, &origin_parsed))
@@ -511,6 +512,7 @@ fn read_versions(paths: &RuntimePaths) -> Versions {
         harness,
         node,
         sidecar: "unknown".to_string(),
+        distribution: crate::build_info::DISTRIBUTION.to_string(),
     }
 }
 

@@ -1094,6 +1094,11 @@ version = "0.8.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.reqwest]]
+version = "0.12.28"
+criteria = "safe-to-deploy"
+notes = "Direct dependency of the desktop shell, used for remote .dshpreset downloads in the dsharness://preset/install flow. Its source has five unsafe blocks: two documented hyper ReadBuf cursor operations and three in the optional blocking-body MaybeUninit/spare-capacity path (the blocking feature is disabled here). No build script."
+
+[[exemptions.reqwest]]
 version = "0.13.4"
 criteria = "safe-to-deploy"
 
@@ -1161,6 +1166,11 @@ criteria = "safe-to-deploy"
 [[exemptions.rusty-fork]]
 version = "0.3.1"
 criteria = "safe-to-run"
+
+[[exemptions.ryu]]
+version = "1.0.23"
+criteria = "safe-to-deploy"
+notes = "Float-to-string formatting (dtolnay), pulled in via serde_urlencoded -> reqwest (remote .dshpreset download client). Pure Rust, no build script, no I/O; its 27 code-level unsafe keyword uses are local bounds-check elisions, table access, initialization, and output-buffer helpers in parsing/formatting."
 
 [[exemptions.same-file]]
 version = "1.0.6"
@@ -1236,6 +1246,11 @@ criteria = "safe-to-deploy"
 [[exemptions.serde_spanned]]
 version = "0.6.9"
 criteria = "safe-to-deploy"
+
+[[exemptions.serde_urlencoded]]
+version = "0.7.1"
+criteria = "safe-to-deploy"
+notes = "URL-encoded form (de)serializer over serde, pulled in via reqwest 0.12.28 (remote .dshpreset download client). Pure Rust, no unsafe, no build script."
 
 [[exemptions.serde_with]]
 version = "3.22.0"
@@ -1650,6 +1665,11 @@ version = "0.2.127"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasm-streams]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+notes = "wasm-bindgen ReadableStream adapter: target-specific (wasm32) glue selected by reqwest 0.12.28's stream feature, present in Cargo.lock but never compiled for desktop targets. No unsafe, no build script."
+
+[[exemptions.wasm-streams]]
 version = "0.5.0"
 criteria = "safe-to-deploy"
 
@@ -1678,6 +1698,11 @@ criteria = "safe-to-deploy"
 version = "1.0.9"
 criteria = "safe-to-deploy"
 notes = "Bundled root-certificate data (CDLA-Permissive, already allow-listed in deny.toml) pulled in by the updater's TLS chain; data-only crate."
+
+[[exemptions.webpki-roots]]
+version = "1.0.9"
+criteria = "safe-to-deploy"
+notes = "Bundled Mozilla root-certificate data (CDLA-Permissive-2.0, already allow-listed in deny.toml) used by reqwest 0.12.28's rustls client for remote .dshpreset downloads and by hyper-rustls in the updater's reqwest 0.13.4 chain. Data-only crate, no unsafe, no build script."
 
 [[exemptions.webview2-com]]
 version = "0.38.2"

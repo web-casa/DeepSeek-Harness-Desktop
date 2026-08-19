@@ -1,4 +1,5 @@
-//! Strict parser and dispatcher for `dsharness://plugin/install` deep links.
+//! Strict parser and dispatcher for `dsharness://{plugin,preset}/install`
+//! deep links.
 //!
 //! The market page (cordis.run) is the only v1 producer. A deep link never
 //! installs anything by itself: parsing yields a validated request that is
@@ -7,10 +8,10 @@
 //!
 //! Trust boundary: the raw URL comes from the OS / browser, so it is treated
 //! as attacker-controlled input. Everything is re-validated here in Rust —
-//! scheme, host, path, protocol version, npm package name, and the
-//! `source` page URL (https + `cordis.run` plugin-page path only). Unknown
-//! query parameters are ignored so v1 links stay forward-compatible, but
-//! duplicate known parameters are rejected (they are ambiguous).
+//! scheme, host, path, protocol version, npm package name / preset download
+//! URL, and the `source` page URL (https + `cordis.run` page path only).
+//! Unknown query parameters are ignored so v1 links stay forward-compatible,
+//! but duplicate known parameters are rejected (they are ambiguous).
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -21,14 +22,15 @@ use url::Url;
 
 pub const SCHEME: &str = "dsharness";
 pub const HOST: &str = "plugin";
+pub const PRESET_HOST: &str = "preset";
 pub const PATH: &str = "/install";
+pub const PRESET_PATH: &str = "/install";
 pub const SOURCE_HOST: &str = "cordis.run";
 pub const EVENT: &str = "plugin-install-request";
-pub const PRESET_HOST: &str = "preset";
-pub const PRESET_PATH: &str = "/install";
 pub const PRESET_EVENT: &str = "preset-install-request";
-pub const MAX_REMOTE_PRESET_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_URL_LEN: usize = 2048;
+/// Remote preset download cap, mirroring preset.rs `MAX_COMPRESSED` (16 MiB).
+pub const MAX_REMOTE_PRESET_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Validated install request shown in the bootstrap confirmation dialog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -77,7 +79,9 @@ impl PendingPluginInstall {
     }
 }
 
-/// Validated preset install request shown before any download is attempted.
+/// Validated preset install request: the download URL is where the desktop
+/// fetches the .dshpreset from; `source` is the display-only preset page.
+/// It is shown before any download is attempted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PresetInstallRequest {
     pub url: String,
@@ -484,37 +488,48 @@ pub fn parse_install_url(raw: &str) -> Result<PluginInstallRequest, String> {
     })
 }
 
-/// Validate the `url` parameter for a preset install: the cordis.run
-/// direct-download endpoint. No query, no fragment, no credentials, no port.
-/// v1 supports only the latest approved download path.
+/// Validate the preset download URL: an https `cordis.run` endpoint with the
+/// canonical path `/api/presets/<slug>/download` and an optional single
+/// `?v=<versionId>` query. The remote-download state machine disables HTTP
+/// redirects, so this initial cordis.run endpoint remains the only host it
+/// contacts for a deep-link request.
 pub fn validate_preset_download_url(raw: &str) -> Result<String, String> {
-    let url = Url::parse(raw).map_err(|e| format!("invalid preset download URL: {e}"))?;
-    if url.scheme() != "https" {
-        return Err("preset download URL must use https".to_string());
+    let u = Url::parse(raw).map_err(|e| format!("invalid download URL: {e}"))?;
+    if u.scheme() != "https" {
+        return Err("download URL must use https".to_string());
     }
-    if url.host_str() != Some(SOURCE_HOST) {
-        return Err("preset download host must be cordis.run".to_string());
+    if u.host_str() != Some(SOURCE_HOST) {
+        return Err("download URL host must be cordis.run".to_string());
     }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("preset download URL must not contain credentials".to_string());
+    if !u.username().is_empty() || u.password().is_some() || u.port().is_some() {
+        return Err("download URL must not contain credentials or a port".to_string());
     }
-    if url.port().is_some() {
-        return Err("preset download URL must not specify a port".to_string());
+    if u.fragment().is_some() {
+        return Err("download URL must not contain a fragment".to_string());
     }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("preset download URL must not contain a query string or fragment".to_string());
-    }
-    let path = url.path();
+
+    let path = u.path();
     let slug = path
         .strip_prefix("/api/presets/")
         .and_then(|rest| rest.strip_suffix("/download"))
-        .ok_or_else(|| {
-            "preset download URL must be https://cordis.run/api/presets/<slug>/download".to_string()
-        })?;
-    if slug.is_empty() || slug.contains('/') {
-        return Err("preset download URL must contain exactly one preset slug".to_string());
+        .ok_or_else(|| "download URL must be /api/presets/<slug>/download".to_string())?;
+    if slug.is_empty() || slug.contains('/') || !crate::preset::is_valid_preset_id(slug) {
+        return Err("download URL must point to one preset slug".to_string());
     }
-    Ok(url.to_string())
+
+    // Query: absent, or exactly one `v=<non-empty>` (the version row id).
+    let mut q = u.query_pairs();
+    match q.next() {
+        None => {}
+        Some((key, value)) if key == "v" && !value.is_empty() => {
+            if q.next().is_some() {
+                return Err("download URL query must contain only v=".to_string());
+            }
+        }
+        Some(_) => return Err("download URL query must contain only v=".to_string()),
+    }
+
+    Ok(u.to_string())
 }
 
 fn preset_slug_of_download(url: &Url) -> Option<String> {
@@ -531,32 +546,33 @@ fn preset_slug_of_source(url: &Url) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Validate the `source` parameter for a preset install: a cordis.run
-/// preset page. The same strict shape as plugin sources, but for presets.
+/// Validate the preset `source` page URL (display-only): canonical
+/// `https://cordis.run/presets/<slug>` or `/en/presets/<slug>`.
 pub fn validate_preset_source(raw: &str) -> Result<String, String> {
-    let source = Url::parse(raw).map_err(|e| format!("invalid preset source URL: {e}"))?;
+    let source = Url::parse(raw).map_err(|e| format!("invalid source URL: {e}"))?;
     if source.scheme() != "https" {
-        return Err("preset source must use https".to_string());
+        return Err("source must use https".to_string());
     }
     if source.host_str() != Some(SOURCE_HOST) {
-        return Err("preset source host must be cordis.run".to_string());
+        return Err("source host must be cordis.run".to_string());
     }
     if !source.username().is_empty() || source.password().is_some() {
-        return Err("preset source must not contain credentials".to_string());
+        return Err("source must not contain credentials".to_string());
     }
     if source.port().is_some() {
-        return Err("preset source must not specify a port".to_string());
+        return Err("source must not specify a port".to_string());
     }
     if source.query().is_some() || source.fragment().is_some() {
-        return Err("preset source must not contain a query string or fragment".to_string());
+        return Err("source must not contain a query string or fragment".to_string());
     }
+
     let path = source.path();
     let slug = path
         .strip_prefix("/presets/")
         .or_else(|| path.strip_prefix("/en/presets/"))
-        .ok_or_else(|| "preset source must be a cordis.run preset page".to_string())?;
-    if slug.is_empty() || slug.contains('/') {
-        return Err("preset source must point to one preset slug".to_string());
+        .ok_or_else(|| "source must be a cordis.run preset page".to_string())?;
+    if slug.is_empty() || slug.contains('/') || !crate::preset::is_valid_preset_id(slug) {
+        return Err("source must point to one preset slug".to_string());
     }
     Ok(source.to_string())
 }
@@ -616,6 +632,9 @@ pub fn parse_preset_install_url(raw: &str) -> Result<PresetInstallRequest, Strin
     let source = source.ok_or_else(|| "missing query parameter 'source'".to_string())?;
     let source = validate_preset_source(source)?;
 
+    // The confirmation dialog shows `source`; it must be the SAME preset the
+    // download URL fetches, otherwise a crafted link shows one preset's page
+    // while installing another.
     let download = Url::parse(&dl_url).map_err(|e| format!("invalid download URL: {e}"))?;
     let source = Url::parse(&source).map_err(|e| format!("invalid source URL: {e}"))?;
     let slug = preset_slug_of_download(&download)
@@ -916,6 +935,48 @@ mod tests {
     }
 
     #[test]
+    fn preset_parses_latest_and_versioned_downloads() {
+        let latest = parse_preset(&preset_raw(
+            "https://cordis.run/api/presets/code/download",
+            "https://cordis.run/presets/code",
+        ));
+        assert_eq!(latest.url, "https://cordis.run/api/presets/code/download");
+        assert_eq!(latest.source, "https://cordis.run/presets/code");
+
+        let versioned = parse_preset(&preset_raw(
+            "https://cordis.run/api/presets/code/download?v=v1-official-code",
+            "https://cordis.run/presets/code",
+        ));
+        assert_eq!(
+            versioned.url,
+            "https://cordis.run/api/presets/code/download?v=v1-official-code"
+        );
+    }
+
+    #[test]
+    fn preset_accepts_english_source_and_normalizes_case() {
+        let request = parse_preset(
+            "dsharness://PRESET/install?v=1&\
+             url=https%3A%2F%2FCORDIS.RUN%2Fapi%2Fpresets%2Fcode%2Fdownload&\
+             source=https%3A%2F%2FCORDIS.RUN%2Fen%2Fpresets%2Fcode",
+        );
+        assert_eq!(request.url, "https://cordis.run/api/presets/code/download");
+        assert_eq!(request.source, "https://cordis.run/en/presets/code");
+    }
+
+    #[test]
+    fn preset_ignores_unknown_parameters() {
+        let raw = format!(
+            "dsharness://preset/install?v=1&\
+             url={}&\
+             source={}&future=1",
+            urlencoding("https://cordis.run/api/presets/code/download"),
+            urlencoding("https://cordis.run/presets/code"),
+        );
+        assert_eq!(parse_preset(&raw).source, "https://cordis.run/presets/code");
+    }
+
+    #[test]
     fn preset_parses_canonical_download_and_source() {
         let request = parse_preset(&preset_raw(
             "https://cordis.run/api/presets/code/download",
@@ -948,12 +1009,16 @@ mod tests {
     }
 
     #[test]
-    fn preset_rejects_download_query_fragment_and_slug_mismatch() {
+    fn preset_allows_versioned_download_and_rejects_fragment_and_slug_mismatch() {
+        let versioned = parse_preset(&preset_raw(
+            "https://cordis.run/api/presets/code/download?v=v1-official-code",
+            "https://cordis.run/presets/code",
+        ));
+        assert_eq!(
+            versioned.url,
+            "https://cordis.run/api/presets/code/download?v=v1-official-code"
+        );
         for raw in [
-            preset_raw(
-                "https://cordis.run/api/presets/code/download?v=v1-official-code",
-                "https://cordis.run/presets/code",
-            ),
             preset_raw(
                 "https://cordis.run/api/presets/code/download#frag",
                 "https://cordis.run/presets/code",
@@ -988,6 +1053,54 @@ mod tests {
             assert!(
                 parse_preset_install_url(&raw).is_err(),
                 "should reject {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn preset_rejects_non_canonical_download_urls() {
+        for download in [
+            "http://cordis.run/api/presets/code/download",
+            "https://evil.example/api/presets/code/download",
+            "https://cordis.run/",
+            "https://cordis.run/api/presets/code",
+            "https://cordis.run/api/presets/code/download/extra",
+            "https://cordis.run/api/presets/code/download?x=1",
+            "https://cordis.run/api/presets/code/download?v=",
+            "https://user:pass@cordis.run/api/presets/code/download",
+            "https://cordis.run:8443/api/presets/code/download",
+        ] {
+            let raw = preset_raw(download, "https://cordis.run/presets/code");
+            assert!(
+                parse_preset_install_url(&raw).is_err(),
+                "should reject {download}"
+            );
+        }
+    }
+
+    #[test]
+    fn preset_rejects_mismatched_download_and_source_slug() {
+        let raw = preset_raw(
+            "https://cordis.run/api/presets/code/download",
+            "https://cordis.run/presets/other",
+        );
+        assert!(parse_preset_install_url(&raw).is_err());
+    }
+
+    #[test]
+    fn preset_rejects_non_canonical_sources() {
+        for source in [
+            "https://cordis.run/plugins/code",
+            "https://cordis.run/presets/code?utm=1",
+            "https://cordis.run/presets/code#x",
+            "https://cordis.run/presets/code/",
+            "https://cordis.run/",
+            "https://user:pass@cordis.run/presets/code",
+        ] {
+            let raw = preset_raw("https://cordis.run/api/presets/code/download", source);
+            assert!(
+                parse_preset_install_url(&raw).is_err(),
+                "should reject {source}"
             );
         }
     }

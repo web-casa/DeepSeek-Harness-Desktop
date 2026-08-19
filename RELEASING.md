@@ -24,7 +24,7 @@ node scripts/verify-bundle.ts --self-test && node scripts/verify-signing.ts --se
 
 ```bash
 git checkout main && git pull
-git tag -a v0.2.1 -m "DeepSeek Harness Desktop 0.2.1"
+git tag -a v0.2.1 -m "DSH Desktop 0.2.1"
 git push origin v0.2.1
 ```
 
@@ -44,6 +44,22 @@ git push origin v0.2.1
    SHA-256 checksum → 上传制品。
 4. `release`：tag 绑定 preflight（`--expect-tag`）→ 下载制品 →
    **draft** GitHub Release（`files: artifacts/**/*`）。
+
+### 3b. Microsoft Store MSIX 构建
+
+`build-msix` job 与双平台 build 并行，仅发布/演练时运行：
+
+- `STORE_BUILD=1`：Store 版关闭应用内更新，插件安装只允许
+  `src-tauri/store-curated-plugins.json` 中的 cordis.run 审核列表。
+- x64（`windows-latest`）与 arm64（`windows-11-arm`）分别在原生宿主上下载
+  对应 Node、prepare-harness、构建 sidecar，再运行
+  `pnpm tauri:windows:build`；`scripts/verify-msix.ts` 校验包身份、协议与
+  运行时内容。
+- 产物上传为 workflow artifact `dsh-desktop-store-msix`，**不发布到 GitHub
+  Release**；维护者下载后在 Partner Center 上传 `.msix` 包提交 Store。
+- Store 产品身份固定在
+  `src-tauri/gen/windows/AppxManifest.xml.template` 与 `bundle.config.json`；
+  如 Partner Center 重建产品，必须同步这两处。
 
 ## 4. 签名状态（verify-signing 语义）
 
