@@ -81,6 +81,16 @@ criteria = "safe-to-deploy"
 version = "1.5.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.aws-lc-rs]]
+version = "1.18.0"
+criteria = "safe-to-deploy"
+suggest = false
+
+[[exemptions.aws-lc-sys]]
+version = "0.44.0"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.base64]]
 version = "0.21.7"
 criteria = "safe-to-deploy"
@@ -161,9 +171,24 @@ criteria = "safe-to-deploy"
 version = "1.0.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.cfg_aliases]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+suggest = false
+
+[[exemptions.chacha20]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.chrono]]
 version = "0.4.45"
 criteria = "safe-to-deploy"
+
+[[exemptions.cmake]]
+version = "0.1.58"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.combine]]
 version = "4.6.7"
@@ -198,6 +223,11 @@ criteria = "safe-to-deploy"
 [[exemptions.cpufeatures]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
+
+[[exemptions.cpufeatures]]
+version = "0.3.0"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.crc32fast]]
 version = "1.5.0"
@@ -389,6 +419,11 @@ criteria = "safe-to-deploy"
 [[exemptions.foreign-types-macros]]
 version = "0.2.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.fs_extra]]
+version = "1.3.0"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.futures-channel]]
 version = "0.3.34"
@@ -684,6 +719,11 @@ criteria = "safe-to-deploy"
 version = "0.4.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.jobserver]]
+version = "0.1.35"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.js-sys]]
 version = "0.3.104"
 criteria = "safe-to-deploy"
@@ -739,6 +779,11 @@ criteria = "safe-to-deploy"
 [[exemptions.log]]
 version = "0.4.33"
 criteria = "safe-to-deploy"
+
+[[exemptions.lru-slab]]
+version = "0.1.2"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.markup5ever]]
 version = "0.38.0"
@@ -966,6 +1011,21 @@ criteria = "safe-to-run"
 version = "0.41.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.quinn]]
+version = "0.11.11"
+criteria = "safe-to-deploy"
+suggest = false
+
+[[exemptions.quinn-proto]]
+version = "0.11.16"
+criteria = "safe-to-deploy"
+suggest = false
+
+[[exemptions.quinn-udp]]
+version = "0.5.15"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.r-efi]]
 version = "5.3.0"
 criteria = "safe-to-deploy"
@@ -978,6 +1038,11 @@ criteria = "safe-to-deploy"
 version = "0.9.5"
 criteria = "safe-to-run"
 
+[[exemptions.rand]]
+version = "0.10.2"
+criteria = "safe-to-deploy"
+suggest = false
+
 [[exemptions.rand_chacha]]
 version = "0.9.0"
 criteria = "safe-to-run"
@@ -985,6 +1050,16 @@ criteria = "safe-to-run"
 [[exemptions.rand_core]]
 version = "0.9.5"
 criteria = "safe-to-run"
+
+[[exemptions.rand_core]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+suggest = false
+
+[[exemptions.rand_pcg]]
+version = "0.10.2"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.rand_xorshift]]
 version = "0.4.0"
@@ -1017,6 +1092,11 @@ criteria = "safe-to-deploy"
 [[exemptions.regex-syntax]]
 version = "0.8.11"
 criteria = "safe-to-deploy"
+
+[[exemptions.reqwest]]
+version = "0.12.28"
+criteria = "safe-to-deploy"
+notes = "Direct dependency of the desktop shell, used for remote .dshpreset downloads in the dsharness://preset/install flow. Its source has five unsafe blocks: two documented hyper ReadBuf cursor operations and three in the optional blocking-body MaybeUninit/spare-capacity path (the blocking feature is disabled here). No build script."
 
 [[exemptions.reqwest]]
 version = "0.13.4"
@@ -1086,6 +1166,11 @@ criteria = "safe-to-deploy"
 [[exemptions.rusty-fork]]
 version = "0.3.1"
 criteria = "safe-to-run"
+
+[[exemptions.ryu]]
+version = "1.0.23"
+criteria = "safe-to-deploy"
+notes = "Float-to-string formatting (dtolnay), pulled in via serde_urlencoded -> reqwest (remote .dshpreset download client). Pure Rust, no build script, no I/O; its 27 code-level unsafe keyword uses are local bounds-check elisions, table access, initialization, and output-buffer helpers in parsing/formatting."
 
 [[exemptions.same-file]]
 version = "1.0.6"
@@ -1161,6 +1246,11 @@ criteria = "safe-to-deploy"
 [[exemptions.serde_spanned]]
 version = "0.6.9"
 criteria = "safe-to-deploy"
+
+[[exemptions.serde_urlencoded]]
+version = "0.7.1"
+criteria = "safe-to-deploy"
+notes = "URL-encoded form (de)serializer over serde, pulled in via reqwest 0.12.28 (remote .dshpreset download client). Pure Rust, no unsafe, no build script."
 
 [[exemptions.serde_with]]
 version = "3.22.0"
@@ -1575,12 +1665,22 @@ version = "0.2.127"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasm-streams]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+notes = "wasm-bindgen ReadableStream adapter: target-specific (wasm32) glue selected by reqwest 0.12.28's stream feature, present in Cargo.lock but never compiled for desktop targets. No unsafe, no build script."
+
+[[exemptions.wasm-streams]]
 version = "0.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.web-sys]]
 version = "0.3.104"
 criteria = "safe-to-deploy"
+
+[[exemptions.web-time]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+suggest = false
 
 [[exemptions.web_atoms]]
 version = "0.2.6"
@@ -1598,6 +1698,11 @@ criteria = "safe-to-deploy"
 version = "1.0.9"
 criteria = "safe-to-deploy"
 notes = "Bundled root-certificate data (CDLA-Permissive, already allow-listed in deny.toml) pulled in by the updater's TLS chain; data-only crate."
+
+[[exemptions.webpki-roots]]
+version = "1.0.9"
+criteria = "safe-to-deploy"
+notes = "Bundled Mozilla root-certificate data (CDLA-Permissive-2.0, already allow-listed in deny.toml) used by reqwest 0.12.28's rustls client for remote .dshpreset downloads and by hyper-rustls in the updater's reqwest 0.13.4 chain. Data-only crate, no unsafe, no build script."
 
 [[exemptions.webview2-com]]
 version = "0.38.2"

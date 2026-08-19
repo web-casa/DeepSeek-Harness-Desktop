@@ -10,6 +10,12 @@ on:
         required: false
         description: "Tag/branch to build & verify (defaults to the default branch). Does not publish."
 
+# Least privilege baseline for every job; only the `release` job escalates
+# (contents: write) to publish the GitHub Release. Also covers the new
+# build-msix job (CodeQL missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Quality gates
