@@ -176,8 +176,22 @@ pub fn is_valid_market_slug(slug: &str) -> bool {
 }
 
 fn base_url_allowed(url: &Url) -> bool {
-    let https_cordis = url.scheme() == "https" && url.host_str() == Some("cordis.run");
+    // CORDIS_RUN_API is a developer-only fixture override, not a general
+    // outbound proxy setting. Keep the production origin and API prefix
+    // exact so an inherited environment variable cannot silently widen the
+    // network trust boundary (for example with credentials, a custom port,
+    // or a same-host non-API route).
+    let structurally_canonical = url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(url.path(), "/api/v1" | "/api/v1/");
+    let https_cordis = structurally_canonical
+        && url.scheme() == "https"
+        && url.host_str() == Some("cordis.run")
+        && url.port().is_none();
     let debug_loopback = cfg!(debug_assertions)
+        && structurally_canonical
         && url.scheme() == "http"
         && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
     https_cordis || debug_loopback
@@ -219,7 +233,7 @@ impl MarketClient {
             Url::parse(&base_url).map_err(|e| format!("invalid CORDIS_RUN_API URL: {e}"))?;
         if !base_url_allowed(&parsed) {
             return Err(
-                "CORDIS_RUN_API must be https://cordis.run (debug builds may use http://127.0.0.1)"
+                "CORDIS_RUN_API must be https://cordis.run/api/v1 (debug builds may use http://127.0.0.1:<port>/api/v1)"
                     .to_string(),
             );
         }
@@ -1035,6 +1049,38 @@ mod tests {
         assert!(!image_url_allowed(
             &Url::parse("http://127.0.0.1/fixture.png").expect("url")
         ));
+    }
+
+    #[test]
+    fn base_url_is_limited_to_the_canonical_api_boundary() {
+        assert!(base_url_allowed(
+            &Url::parse("https://cordis.run/api/v1").expect("production API URL")
+        ));
+        assert!(base_url_allowed(
+            &Url::parse("https://cordis.run/api/v1/").expect("production API URL")
+        ));
+        assert!(base_url_allowed(
+            &Url::parse("http://127.0.0.1:3210/api/v1").expect("fixture API URL")
+        ));
+        assert!(base_url_allowed(
+            &Url::parse("http://localhost:3210/api/v1/").expect("fixture API URL")
+        ));
+
+        for raw in [
+            "https://cordis.run/",
+            "https://cordis.run/api/v1?fixture=1",
+            "https://cordis.run/api/v1#fragment",
+            "https://user:pass@cordis.run/api/v1",
+            "https://cordis.run:8443/api/v1",
+            "https://evil.example/api/v1",
+            "http://cordis.run/api/v1",
+            "http://127.0.0.1:3210/not-api",
+        ] {
+            assert!(
+                !base_url_allowed(&Url::parse(raw).expect("test URL")),
+                "should reject {raw}"
+            );
+        }
     }
 
     #[test]
