@@ -510,9 +510,21 @@
   }
 
   async function reportContent() {
-    const url = new URL("mailto:contact@dsharness.app");
-    url.searchParams.set("subject", "DSH Desktop: report AI content");
-    await openUrl(url.toString()).catch(() => {});
+    try {
+      const url = new URL("https://github.com/web-casa/DeepSeek-Harness-Desktop/issues/new");
+      url.searchParams.set("title", "[Content] 报告 AI 生成内容");
+      url.searchParams.set(
+        "body",
+        [
+          "请说明需要报告的 AI 生成内容、使用的模型服务以及期望的处理方式。",
+          "",
+          "请勿粘贴 API key、个人数据、私密文件内容或其他敏感信息。",
+        ].join("\n"),
+      );
+      await openUrl(url.toString());
+    } catch (e) {
+      showToast(`打开失败：${e}`);
+    }
   }
 
   async function reportIssue() {
