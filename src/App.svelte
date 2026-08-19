@@ -15,8 +15,8 @@
     quitApp,
     listUserPresets,
     previewPreset,
-    previewRemotePreset,
     importPreset,
+    cancelPresetPreview,
     exportPreset,
     deletePreset,
     listPlugins,
@@ -25,15 +25,26 @@
     cancelPluginOp,
     getPendingPluginInstall,
     dismissPendingPluginInstall,
-    getPendingPresetInstall,
-    dismissPendingPresetInstall,
-    cancelRemotePreset,
     onEvent,
     onUpdateProgress,
     onPluginLog,
     onPluginDone,
     onPluginInstallRequest,
+    getPendingRemotePreset,
+    dismissRemotePreset,
+    confirmRemotePresetDownload,
+    importRemotePreset,
     onPresetInstallRequest,
+    marketSearch,
+    marketPlugin,
+    marketImage,
+    sideloadPlugin,
+    pickSideloadFile,
+    type MarketPluginSummary,
+    type MarketPluginDetail,
+    type MarketDescription,
+    type RemotePresetRequest,
+    type RemotePresetPreview,
     type Status,
     type StatusPayload,
     type PresetPreview,
@@ -43,7 +54,6 @@
     type Versions,
     type PluginEntry,
     type PluginInstallRequest,
-    type PresetInstallRequest,
   } from "./lib/api";
 
   let status = $state<Status>("idle");
@@ -82,8 +92,18 @@
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
   let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
-  let presetInstallRequest = $state<PresetInstallRequest | null>(null);
-  let presetRemoteSource = $state<string | null>(null);
+  let remotePresetRequest = $state<RemotePresetRequest | null>(null);
+  let remotePresetPreview = $state<RemotePresetPreview | null>(null);
+  let remotePresetDownloading = $state(false);
+  let marketQuery = $state("");
+  let marketItems = $state<MarketPluginSummary[]>([]);
+  let marketBusy = $state(false);
+  let marketError = $state<string | null>(null);
+  let marketConfirm = $state<MarketPluginSummary | null>(null);
+  let marketDetail = $state<MarketPluginDetail | null>(null);
+  let marketDetailBusy = $state(false);
+  let marketImages = $state<string[]>([]);
+  let sideloadPath = $state<string | null>(null);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -137,7 +157,180 @@
       }
       return;
     }
+    if (remotePresetRequest || presetPreview) {
+      showToast("已有待处理的预设请求，插件安装请求已忽略");
+      return;
+    }
     pluginInstallRequest = request;
+  }
+
+  function presentRemotePresetRequest(request: RemotePresetRequest) {
+    if (pluginInstallRequest || presetPreview) {
+      showToast("已有待处理的安装请求，预设请求已忽略");
+      void dismissRemotePreset(request.requestId).catch(() => {});
+      return;
+    }
+    if (
+      remotePresetRequest &&
+      remotePresetRequest.requestId !== request.requestId
+    ) {
+      showToast("已有待处理的预设请求，新请求已忽略");
+      void dismissRemotePreset(request.requestId).catch(() => {});
+      return;
+    }
+    remotePresetRequest = request;
+    remotePresetPreview = null;
+    remotePresetDownloading = request.stage === "downloading";
+    if (
+      request.stage === "awaiting-install" &&
+      request.id &&
+      request.files &&
+      request.warnings
+    ) {
+      remotePresetPreview = {
+        requestId: request.requestId,
+        id: request.id,
+        files: request.files,
+        warnings: request.warnings,
+      };
+    }
+  }
+
+  function marketVersion(item: MarketPluginSummary | MarketPluginDetail): string | null {
+    return item.source?.version ?? null;
+  }
+
+  function marketPackageName(item: MarketPluginSummary | MarketPluginDetail): string {
+    return item.source?.packageName?.trim() || item.name.trim();
+  }
+
+  function marketDescriptionText(desc: MarketDescription | null | undefined): string {
+    if (!desc) return "";
+    if (typeof desc === "string") return desc;
+    return desc.zh ?? desc.en ?? "";
+  }
+
+  async function doMarketSearch() {
+    if (marketBusy) return;
+    marketBusy = true;
+    marketError = null;
+    try {
+      const res = await marketSearch(marketQuery.trim(), undefined, 30, undefined, "desktop");
+      marketItems = res.items ?? [];
+    } catch (e) {
+      marketError = `市场搜索失败：${e}`;
+    }
+    marketBusy = false;
+  }
+
+  async function doMarketDetail(slug: string) {
+    if (marketDetailBusy) return;
+    marketDetailBusy = true;
+    marketImages = [];
+    try {
+      const detail = await marketPlugin(slug);
+      marketDetail = detail;
+      const shots = (detail.screenshots ?? []).slice(0, 4);
+      const loaded = await Promise.all(
+        shots.map(async (url) => {
+          try {
+            return (await marketImage(url)).dataUrl;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      marketImages = loaded.filter((src): src is string => src !== null);
+    } catch (e) {
+      marketError = `插件详情加载失败：${e}`;
+    }
+    marketDetailBusy = false;
+  }
+
+  function doMarketInstall(item: MarketPluginSummary) {
+    if (pluginBusy) return;
+    marketConfirm = item;
+  }
+
+  function confirmMarketInstall() {
+    const item = marketConfirm;
+    if (!item || pluginBusy) return;
+    const name = item.source?.packageName?.trim() || item.name.trim();
+    marketConfirm = null;
+    startPluginOp(name, "install");
+  }
+
+  async function doPickSideload() {
+    try {
+      const path = await pickSideloadFile();
+      if (path) sideloadPath = path;
+    } catch (e) {
+      showToast(`选择文件失败：${e}`);
+    }
+  }
+
+  async function confirmSideloadInstall() {
+    if (!sideloadPath || pluginBusy) return;
+    const path = sideloadPath;
+    sideloadPath = null;
+    pluginBusy = true;
+    pluginError = null;
+    pluginLogs = [];
+    pluginLogsOpen = true;
+    showToast(`正在离线安装 ${path}…`);
+    try {
+      await sideloadPlugin(path);
+    } catch (e) {
+      pluginBusy = false;
+      pluginError = `离线安装失败：${e}`;
+      pluginLogsOpen = true;
+      void refreshPlugins();
+    }
+  }
+
+  async function doRemotePresetDownload() {
+    const request = remotePresetRequest;
+    if (!request || remotePresetPreview || remotePresetDownloading) return;
+    remotePresetDownloading = true;
+    try {
+      remotePresetPreview = await confirmRemotePresetDownload(request.requestId);
+    } catch (e) {
+      showToast(`预设下载失败：${e}`);
+      try {
+        const pending = await getPendingRemotePreset();
+        remotePresetRequest = pending;
+      } catch {
+        remotePresetRequest = null;
+      }
+    }
+    remotePresetDownloading = false;
+  }
+
+  async function doRemotePresetDismiss() {
+    const request = remotePresetRequest;
+    if (!request || remotePresetDownloading) return;
+    remotePresetRequest = null;
+    remotePresetPreview = null;
+    try {
+      await dismissRemotePreset(request.requestId);
+    } catch {
+      /* best effort */
+    }
+  }
+
+  async function doRemotePresetImport() {
+    const request = remotePresetRequest;
+    const preview = remotePresetPreview;
+    if (!request || !preview || preview.requestId !== request.requestId) return;
+    try {
+      const id = await importRemotePreset(request.requestId);
+      showToast(`预设 ${id} 已导入`);
+      remotePresetRequest = null;
+      remotePresetPreview = null;
+      await refreshPresets();
+    } catch (e) {
+      showToast(`预设导入失败：${e}`);
+    }
   }
 
   async function doRestart() {
@@ -281,13 +474,21 @@
     try {
       const id = await importPreset();
       presetPreview = null;
-      presetRemoteSource = null;
       showToast(`预设 ${id} 已导入（在 Harness 设置页可见）`);
       await refreshPresets();
     } catch (e) {
       presetError = `导入失败：${e}`;
     }
     presetBusy = false;
+  }
+
+  async function doCancelPresetPreview() {
+    presetPreview = null;
+    try {
+      await cancelPresetPreview();
+    } catch {
+      /* best effort */
+    }
   }
 
   async function doExportPreset(id: string) {
@@ -382,45 +583,6 @@
     pluginInstallRequest = null;
     void dismissPendingPluginInstall().catch(() => {});
     startPluginOp(request.name, "install");
-  }
-
-  // Preset deep link: unlike plugins (package name is installed directly),
-  // a preset deep link first downloads the .dshpreset and runs the read-only
-  // archive inspection, then reuses the existing preset confirm box. The
-  // request slot only gates concurrent handling; the confirm UI is
-  // `presetPreview` + `presetRemoteSource`.
-  async function handlePresetInstallRequest(request: PresetInstallRequest) {
-    if (presetPreview || presetInstallRequest) {
-      if (
-        presetInstallRequest &&
-        (presetInstallRequest.url !== request.url ||
-          presetInstallRequest.source !== request.source)
-      ) {
-        showToast("已有待确认的安装请求，新请求已忽略");
-      }
-      return;
-    }
-    presetInstallRequest = request;
-    presetBusy = true;
-    presetError = null;
-    try {
-      const preview = await previewRemotePreset(request.url);
-      presetPreview = preview;
-      presetRemoteSource = request.source;
-      void dismissPendingPresetInstall().catch(() => {});
-    } catch (e) {
-      presetError = `读取远程预设失败：${e}`;
-    } finally {
-      presetBusy = false;
-      presetInstallRequest = null;
-    }
-  }
-
-  function dismissPresetInstallRequest() {
-    presetPreview = null;
-    presetRemoteSource = null;
-    void dismissPendingPresetInstall().catch(() => {});
-    void cancelRemotePreset().catch(() => {});
   }
 
   // Initial data load (async onMount is fine here — no cleanup needed).
@@ -559,21 +721,20 @@
     };
   });
 
-  // Preset deep-link requests: same armed-then-drain pattern as plugins.
   $effect(() => {
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
     void (async () => {
-      const fn = await onPresetInstallRequest(handlePresetInstallRequest);
+      const fn = await onPresetInstallRequest(presentRemotePresetRequest);
       if (cancelled) {
         fn();
         return;
       }
       unlistenFn = fn;
       try {
-        const pending = await getPendingPresetInstall();
-        if (!cancelled && pending) void handlePresetInstallRequest(pending);
+        const pending = await getPendingRemotePreset();
+        if (!cancelled && pending) presentRemotePresetRequest(pending);
       } catch {
         /* non-fatal */
       }
@@ -761,20 +922,9 @@
         {#if presetPreview.warnings.includes("absolute-paths")}
           · <span class="warn">⚠ 含绝对路径</span>
         {/if}
-        {#if presetRemoteSource}
-          <div>
-            来源：<button
-              class="inline-link"
-              title={presetRemoteSource}
-              onclick={() => openSite(presetRemoteSource!)}
-            >
-              {presetRemoteSource}
-            </button>
-          </div>
-        {/if}
         <div>预设与 Agent 同权限运行工具和命令——仅导入可信来源。</div>
         <button class="primary" onclick={doImportPreset} disabled={presetBusy}>确认导入</button>
-        <button class="ghost" onclick={dismissPresetInstallRequest}>取消</button>
+        <button class="ghost" onclick={doCancelPresetPreview}>取消</button>
       </div>
     {/if}
     {#if presetError}
@@ -813,6 +963,58 @@
       {/each}
     {:else}
       <div class="preset-row"><span class="l-empty">（暂无用户预设）</span></div>
+    {/if}
+  </div>
+
+  <div class="card plugin-card">
+    <div class="update-row">
+      <span class="update-title">插件市场</span>
+      {#if !storeBuild}
+        <button class="ghost" onclick={doPickSideload}>离线安装 .tgz</button>
+      {/if}
+    </div>
+    <div class="plugin-row">
+      <input
+        class="plugin-input"
+        type="text"
+        placeholder="搜索 cordis.run 插件…"
+        bind:value={marketQuery}
+        disabled={marketBusy}
+        spellcheck="false"
+        onkeydown={(e) => {
+          if (e.key === "Enter") doMarketSearch();
+        }}
+      />
+      <button class="primary" onclick={doMarketSearch} disabled={marketBusy || !marketQuery.trim()}>
+        {marketBusy ? "搜索中…" : "搜索"}
+      </button>
+    </div>
+    {#if marketError}
+      <div class="notice-box">{marketError}</div>
+    {/if}
+    {#if marketItems.length > 0}
+      {#each marketItems as item (item.slug)}
+        <div class="preset-row">
+          <span class="preset-id">
+            <span class="preset-name">{item.name}</span>
+            {#if marketVersion(item)}<span class="badge">v{marketVersion(item)}</span>{/if}
+            {#if item.stars != null}<span class="badge">★ {item.stars}</span>{/if}
+            {#if item.category}<span class="badge">{item.category}</span>{/if}
+            <span class="badge">{item.platforms.includes("desktop") ? "desktop" : "web-only"}</span>
+          </span>
+          <button class="ghost" onclick={() => doMarketDetail(item.slug)} disabled={marketDetailBusy}>详情</button>
+          {#if item.platforms.includes("desktop")}
+            <button class="primary" onclick={() => doMarketInstall(item)} disabled={pluginBusy}>安装</button>
+          {:else}
+            <button class="ghost" disabled>仅网页版</button>
+          {/if}
+        </div>
+        {#if marketDescriptionText(item.description)}
+          <div class="preset-issues">{marketDescriptionText(item.description)}</div>
+        {/if}
+      {/each}
+    {:else}
+      <div class="preset-row"><span class="l-empty">（输入关键词搜索插件市场）</span></div>
     {/if}
   </div>
 
@@ -898,6 +1100,107 @@
     </div>
   </footer>
 </div>
+
+{#if remotePresetRequest}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="预设一键安装确认">
+      <div class="modal-title">安装 Cordis 预设？</div>
+      <div class="modal-meta">
+        关联页面（未验证与预设内容的对应关系）：<button
+          class="inline-link"
+          title={remotePresetRequest!.source}
+          onclick={() => openSite(remotePresetRequest!.source)}
+        >
+          {remotePresetRequest.source}
+        </button>
+      </div>
+      {#if remotePresetRequest.stage === "installing"}
+        <div class="modal-warn">正在安装预设…</div>
+      {:else if remotePresetPreview && remotePresetPreview.requestId === remotePresetRequest.requestId}
+        <div class="modal-name">{remotePresetPreview.id}</div>
+        <div class="modal-meta">
+          {remotePresetPreview.files.length} 个文件
+          {#if remotePresetPreview.warnings.includes("possible-secrets")}
+            · <span class="warn">⚠ 检测到疑似密钥</span>
+          {/if}
+          {#if remotePresetPreview.warnings.includes("absolute-paths")}
+            · <span class="warn">⚠ 含绝对路径</span>
+          {/if}
+        </div>
+        <div class="modal-warn">
+          预设与 Agent 同权限运行工具和命令——仅导入可信来源。确认后将安装到用户预设目录。
+        </div>
+        <div class="modal-actions">
+          <button class="primary" onclick={doRemotePresetImport}>确认安装</button>
+          <button class="ghost" onclick={doRemotePresetDismiss}>取消</button>
+        </div>
+      {:else}
+        <div class="modal-warn">
+          将先从 cordis.run 下载 .dshpreset 并做安全检查，确认内容后才会安装。
+        </div>
+        <div class="modal-actions">
+          <button class="primary" onclick={doRemotePresetDownload} disabled={remotePresetDownloading}>
+            {remotePresetDownloading ? "下载中…" : "下载并检查"}
+          </button>
+          <button class="ghost" onclick={doRemotePresetDismiss} disabled={remotePresetDownloading}>取消</button>
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
+
+{#if marketDetail}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="插件详情">
+      <div class="modal-title">{marketDetail.name}</div>
+      <div class="modal-name">{marketPackageName(marketDetail)}</div>
+      <div class="modal-meta">{marketDescriptionText(marketDetail.description)}</div>
+      {#if marketImages.length > 0}
+        <div class="market-shots">
+          {#each marketImages as src, i (i)}
+            <img src={src} alt="{marketDetail.name} screenshot {i + 1}" class="market-shot" />
+          {/each}
+        </div>
+      {/if}
+      <div class="modal-actions">
+        <button class="ghost" onclick={() => (marketDetail = null)}>关闭</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if marketConfirm}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
+      <div class="modal-title">安装 Cordis 插件？</div>
+      <div class="modal-name">{marketPackageName(marketConfirm)}</div>
+      <div class="modal-meta">
+        来源：<button class="inline-link" onclick={() => openSite(`https://cordis.run/plugins/${marketConfirm!.slug}`)}>
+          https://cordis.run/plugins/{marketConfirm.slug}
+        </button>
+      </div>
+      <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将立即开始安装。</div>
+      <div class="modal-actions">
+        <button class="primary" onclick={confirmMarketInstall} disabled={pluginBusy}>确认安装</button>
+        <button class="ghost" onclick={() => (marketConfirm = null)}>取消</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if sideloadPath && !storeBuild}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="离线插件安装确认">
+      <div class="modal-title">离线安装插件？</div>
+      <div class="modal-name">{sideloadPath}</div>
+      <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将通过 `dsh plugin add` 安装该 .tgz。</div>
+      <div class="modal-actions">
+        <button class="primary" onclick={confirmSideloadInstall} disabled={pluginBusy}>确认安装</button>
+        <button class="ghost" onclick={() => (sideloadPath = null)}>取消</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if pluginInstallRequest}
   <div class="modal-backdrop">

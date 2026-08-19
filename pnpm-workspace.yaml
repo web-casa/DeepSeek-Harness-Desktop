@@ -1,2 +1,4 @@
+allowBuilds:
+  skia-canvas: true
 patchedDependencies:
-  "@choochmeque/tauri-windows-bundle@0.1.28": patches/@choochmeque__tauri-windows-bundle@0.1.28.patch
+  '@choochmeque/tauri-windows-bundle@0.1.28': patches/@choochmeque__tauri-windows-bundle@0.1.28.patch

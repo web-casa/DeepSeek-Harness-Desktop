@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness-desktop"
-version = "0.2.6"
+version = "0.2.8"
 description = "DSH Desktop — community desktop packaging of DeepSeek Harness"
 edition = "2021"
 license = "MIT"
@@ -17,11 +17,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-deep-link = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-# Remote .dshpreset download for the preset deep-link (dsharness://preset/install).
-# rustls keeps the supply chain to a single TLS backend (already transitive via
+# Remote .dshpreset download and cordis.run market requests. rustls keeps the
+# supply chain to a single TLS backend (already transitive via
 # tauri-plugin-updater); no native-tls/OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
+getrandom = "0.2"
 # The sidecar's library surface: PlatformChild gives the plugin installer the
 # SAME process-tree guarantees (unix process group / Windows Job Object).
 # The version must stay in lockstep with crates/dsh-sidecar/Cargo.toml —

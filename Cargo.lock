@@ -724,10 +724,11 @@ dependencies = [
 
 [[package]]
 name = "deepseek-harness-desktop"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "dsh-sidecar",
  "futures-util",
+ "getrandom 0.2.17",
  "proptest",
  "reqwest 0.12.28",
  "serde",
@@ -2994,7 +2995,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@choochmeque/tauri-windows-bundle@0.1.28': 3fe7252de2f936df576f952898272ec0566ce8b1b48828c52e741b3fc65e6c95
+  '@choochmeque/tauri-windows-bundle@0.1.28': b2c40c60f1fad0357fbafa1f73a614beda8ea04a57a9355775c6112666a5719d
 
 importers:
 
@@ -20,7 +20,7 @@ importers:
     devDependencies:
       '@choochmeque/tauri-windows-bundle':
         specifier: ^0.1.28
-        version: 0.1.28(patch_hash=3fe7252de2f936df576f952898272ec0566ce8b1b48828c52e741b3fc65e6c95)(debug@4.4.3)
+        version: 0.1.28(patch_hash=b2c40c60f1fad0357fbafa1f73a614beda8ea04a57a9355775c6112666a5719d)(debug@4.4.3)
       '@sveltejs/vite-plugin-svelte':
         specifier: ^7.3.0
         version: 7.3.0(svelte@5.56.9)(vite@8.2.1(@types/node@26.2.0))
@@ -746,7 +746,7 @@ snapshots:
   '@choochmeque/msixbundle-cli-win32@1.1.11':
     optional: true
 
-  '@choochmeque/tauri-windows-bundle@0.1.28(patch_hash=3fe7252de2f936df576f952898272ec0566ce8b1b48828c52e741b3fc65e6c95)(debug@4.4.3)':
+  '@choochmeque/tauri-windows-bundle@0.1.28(patch_hash=b2c40c60f1fad0357fbafa1f73a614beda8ea04a57a9355775c6112666a5719d)(debug@4.4.3)':
     dependencies:
       commander: 15.0.0
       glob: 13.0.6

@@ -38,10 +38,11 @@ DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
 - **供应链**：Node 下载 SHA-256 钉死（官方 SHASUMS256 核对）；npm 安装脚本
   白名单（strict-allow-scripts）；cargo-vet（社区审计集 + 本仓库审计）与
   cargo-deny 为发布闸门。
-- **Deep link 边界**：`dsharness://plugin/install` 是外部输入。Rust 侧对
-  scheme/host/path/协议版本/包名/来源页逐项重校验后才生成「待确认安装
-  请求」；未确认前不会 spawn 任何进程，非法链接直接丢弃且不会弹窗。
-- **CSP 与桌面 IPC**：`withGlobalTauri: false`；22 个桌面命令经 AppManifest
+- **Deep link 边界**：`dsharness://plugin/install` 与
+  `dsharness://preset/install` 都是外部输入。Rust 侧对
+  scheme/host/path/协议版本/包名或下载 URL/来源页逐项重校验后才生成「待确认
+  安装请求」；未确认前不会 spawn 任何进程或下载预设，非法链接直接丢弃且不会弹窗。
+- **CSP 与桌面 IPC**：`withGlobalTauri: false`；32 个桌面命令经 AppManifest
   ACL 仅授权 bootstrap 窗口。
 
 ## 已知边界（请如实预期）
@@ -68,13 +69,21 @@ DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
   校验与密钥扫描，并强制确认；但**真正的安全边界是「仅导入可信来源」**——
   校验器拦截的是恶意构造的压缩包，拦不住一个「内容本身有害」的可信包。
 - **插件（dsh plugin）**：运行在 Harness 进程内，等同任意代码执行。桌面版
-  的安装入口（手动输入包名或 cordis.run 的 deep link）都只生成安装请求，
-  必须经用户显式确认后才调用 `dsh plugin add`；安全边界仍是「仅安装可信
-  插件」——包名/来源校验拦截的是恶意构造的请求，拦不住内容本身有害的
-  可信包。
+  的安装入口（手动输入包名、市场安装或 cordis.run 的 deep link）都只生成
+  安装请求，必须经用户显式确认后才调用 `dsh plugin add`；安全边界仍是
+  「仅安装可信插件」——包名/来源校验拦截的是恶意构造的请求，拦不住内容
+  本身有害的可信包。
+- **插件市场**：bootstrap 窗口 CSP 不放宽，市场网络请求全部由 Rust 侧
+  `market.rs` 发起，只允许 `https://cordis.run` 主机；图片仅 https、
+  `image/*`、2 MiB 上限；搜索/详情响应 1 MiB 上限并走内存缓存。
+- **离线侧载**：`.tgz` 必须绝对路径、非常规文件/符号链接拒绝、≤64 MiB；
+  确认后复制到 `<dshHome>/.desktop-tools/sideload/` 的应用生成 ASCII 文件名，
+  再以 `file:` spec 交给插件执行器，用户文件名不进入 shell。已知限制：
+  Windows 上若 `DSH_HOME` 路径含空格或 cmd 元字符，侧载会 fail-closed 拒绝，
+  请改用市场在线安装。
 - **Microsoft Store 版**：`STORE_BUILD=1` 编译。应用内更新关闭（由 Store
   管理），插件安装在后端强制校验 `src-tauri/store-curated-plugins.json`
-  白名单，UI 也不再提供任意包名输入；deep link 绕过 UI 也会被拒绝。
+  白名单；UI 不提供任意包名输入或离线侧载，deep link 亦不能绕过该校验。
 
 ## 报告漏洞
 
@@ -85,5 +94,5 @@ DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
 
 ## 支持版本
 
-仅支持最新发布版（当前 v0.2.6）。旧版本不提供安全修复；发现漏洞请先
+仅支持最新发布版（当前 v0.2.8）。旧版本不提供安全修复；发现漏洞请先
 升级到最新版再验证是否仍可复现。

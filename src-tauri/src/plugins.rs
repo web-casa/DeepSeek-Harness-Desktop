@@ -39,6 +39,105 @@ pub fn is_valid_package_name(name: &str) -> bool {
     }
 }
 
+pub const MAX_SIDELOAD_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Validate a sideload spec: `file:<absolute-path>` with a `.tgz` suffix,
+/// no NUL, existing regular file (not a symlink), size <= 64 MiB. This is
+/// only a pre-check; execution always copies to a safe tools-owned path.
+#[allow(dead_code)] // kept as a pure validator for tests and future callers
+pub fn is_valid_sideload_spec(spec: &str) -> bool {
+    let Some(path) = spec.strip_prefix("file:") else {
+        return false;
+    };
+    validate_sideload_path(Path::new(path)).is_ok()
+}
+
+fn validate_sideload_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("sideload path must be absolute".to_string());
+    }
+    if path.as_os_str().to_string_lossy().contains('\0') {
+        return Err("sideload path must not contain NUL".to_string());
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Err("sideload path must name a file".to_string());
+    };
+    if !name.to_ascii_lowercase().ends_with(".tgz") {
+        return Err("sideload file must end with .tgz".to_string());
+    }
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot inspect sideload file: {e}"))?;
+    if meta.file_type().is_symlink() {
+        return Err("sideload file must not be a symlink".to_string());
+    }
+    if !meta.is_file() {
+        return Err("sideload path is not a regular file".to_string());
+    }
+    if meta.len() > MAX_SIDELOAD_BYTES {
+        return Err("sideload file exceeds 64 MiB".to_string());
+    }
+    Ok(())
+}
+
+/// Copy a user-selected .tgz into `<dsh_home>/.desktop-tools/sideload/`
+/// under an application-generated ASCII filename. The returned path is safe
+/// to pass to the plugin runner: it contains no user-controlled shell
+/// metacharacters and sits in a directory we refuse to create through a
+/// symlink.
+/// Fail-closed shell-safety check for the FINAL spec string that will be
+/// forwarded to upstream `spawnSync("pnpm", { shell: win32 })`. Paths with
+/// spaces or cmd metacharacters are rejected instead of ever being parsed by
+/// the shell.
+#[cfg_attr(not(windows), allow(dead_code))] // Windows-only safety gate
+pub fn is_shell_safe_spec(spec: &str) -> bool {
+    !spec.is_empty()
+        && spec.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b':' | b'/' | b'\\' | b'.' | b'-' | b'_')
+        })
+}
+
+pub fn stage_sideload(dsh_home: &Path, src: &Path) -> Result<PathBuf, String> {
+    validate_sideload_path(src)?;
+    let tools = dsh_home.join(".desktop-tools");
+    match std::fs::symlink_metadata(&tools) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err("refusing to use symlinked .desktop-tools".to_string())
+        }
+        Ok(meta) if !meta.is_dir() => return Err(".desktop-tools is not a directory".to_string()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&tools).map_err(|e| format!("cannot create tools dir: {e}"))?;
+        }
+        Err(e) => return Err(format!("cannot inspect tools dir: {e}")),
+    }
+    let dir = tools.join("sideload");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err("refusing to use symlinked sideload dir".to_string())
+        }
+        Ok(meta) if !meta.is_dir() => return Err("sideload is not a directory".to_string()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("cannot create sideload dir: {e}"))?;
+        }
+        Err(e) => return Err(format!("cannot inspect sideload dir: {e}")),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot chmod sideload dir: {e}"))?;
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = dir.join(format!("sideload-{millis}-{}.tgz", std::process::id()));
+    std::fs::copy(src, &dest).map_err(|e| format!("cannot stage sideload file: {e}"))?;
+    Ok(dest)
+}
+
 /// Pure shim-text generation (unit-tested).
 pub fn pnpm_shim_script(node: &str, pnpm_cjs: &str) -> String {
     format!("#!/bin/sh\nexec \"{node}\" \"{pnpm_cjs}\" \"$@\"\n")
@@ -189,6 +288,41 @@ mod tests {
         ] {
             assert!(!is_valid_package_name(bad), "should reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn shell_safe_spec_rejects_metacharacters() {
+        assert!(is_shell_safe_spec("file:C:/Users/me/.dsh/sideload-1.tgz"));
+        assert!(!is_shell_safe_spec(
+            "file:C:/Users/me&you/.dsh/sideload-1.tgz"
+        ));
+        assert!(!is_shell_safe_spec(
+            "file:C:/Users/me you/.dsh/sideload-1.tgz"
+        ));
+        assert!(!is_shell_safe_spec(
+            "file:C:/Users/me|you/.dsh/sideload-1.tgz"
+        ));
+    }
+
+    #[test]
+    fn stage_sideload_uses_safe_generated_name() {
+        let home = std::env::temp_dir().join(format!("dsh-stage-sideload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let src = home.join("bad&name.tgz");
+        std::fs::write(&src, b"fake").unwrap();
+        let staged = stage_sideload(&home, &src).expect("stage sideload");
+        assert_eq!(
+            staged.parent().unwrap(),
+            &home.join(".desktop-tools").join("sideload")
+        );
+        let name = staged.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("sideload-") && name.ends_with(".tgz"));
+        assert!(name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'));
+        assert!(staged.is_file());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

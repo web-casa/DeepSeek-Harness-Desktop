@@ -1,7 +1,7 @@
 {
   "name": "deepseek-harness-desktop",
   "private": true,
-  "version": "0.2.6",
+  "version": "0.2.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -18,7 +18,8 @@
     "release:preflight": "node scripts/release-preflight.ts",
     "icons": "node scripts/gen-icon.ts && tauri icon src-tauri/icons/icon-source.png --output src-tauri/icons",
     "test:scripts": "node --test \"scripts/lib/*.test.ts\"",
-    "tauri:windows:build": "tauri-windows-bundle build --runner pnpm"
+    "tauri:windows:build": "tauri-windows-bundle build --runner pnpm",
+    "verify:sideload": "node scripts/verify-sideload.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

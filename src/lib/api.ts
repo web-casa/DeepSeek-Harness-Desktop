@@ -77,34 +77,13 @@ export interface PresetRow {
 
 export const listUserPresets = (): Promise<PresetRow[]> => invoke("list_user_presets");
 export const previewPreset = (): Promise<PresetPreview> => invoke("preview_preset");
-export const previewRemotePreset = (url: string): Promise<PresetPreview> =>
-  invoke("preview_remote_preset", { url });
 export const importPreset = (): Promise<string> => invoke("import_preset");
+export const cancelPresetPreview = (): Promise<void> =>
+  invoke("cancel_preset_preview");
 export const exportPreset = (id: string): Promise<void> =>
   invoke("export_preset", { id });
 export const deletePreset = (id: string): Promise<void> =>
   invoke("delete_preset", { id });
-
-export interface PresetInstallRequest {
-  url: string;
-  source: string;
-}
-
-export const getPendingPresetInstall = (): Promise<PresetInstallRequest | null> =>
-  invoke("get_pending_preset_install");
-export const dismissPendingPresetInstall = (): Promise<void> =>
-  invoke("dismiss_pending_preset_install");
-export const cancelRemotePreset = (): Promise<void> =>
-  invoke("cancel_remote_preset");
-
-export async function onPresetInstallRequest(
-  handler: (request: PresetInstallRequest) => void,
-): Promise<() => void> {
-  const unlisten = await listen<PresetInstallRequest>("preset-install-request", (event) => {
-    handler(event.payload);
-  });
-  return unlisten;
-}
 
 export async function onUpdateProgress(
   handler: (p: { downloaded: number; total: number | null }) => void,
@@ -143,6 +122,89 @@ export const uninstallPlugin = (name: string): Promise<void> =>
   invoke("uninstall_plugin", { name });
 export const cancelPluginOp = (): Promise<void> => invoke("cancel_plugin_op");
 
+
+export interface MarketPluginSource {
+  type?: string;
+  packageName?: string;
+  version?: string;
+  integrity?: string;
+  registry?: string;
+  tarball?: string;
+}
+
+export type MarketDescription = string | { zh?: string; en?: string };
+
+export interface MarketPluginSummary {
+  slug: string;
+  name: string;
+  source?: MarketPluginSource | null;
+  description?: MarketDescription | null;
+  category?: string | null;
+  platforms: string[];
+  stars?: number | null;
+  homepage?: string | null;
+  blocked?: boolean | null;
+  deprecated?: boolean | null;
+}
+
+export interface MarketPluginVersion {
+  version?: string;
+  source?: MarketPluginSource | null;
+  platforms?: string[];
+  engines?: Record<string, unknown> | null;
+  blocked?: boolean | null;
+  deprecated?: boolean | null;
+  publishedAt?: string | null;
+}
+
+export interface MarketPluginDetail {
+  slug: string;
+  name: string;
+  source?: MarketPluginSource | null;
+  description?: MarketDescription | null;
+  category?: string | null;
+  platforms: string[];
+  stars?: number | null;
+  homepage?: string | null;
+  blocked?: boolean | null;
+  deprecated?: boolean | null;
+  screenshots?: string[];
+  versions?: MarketPluginVersion[];
+}
+
+export interface MarketSearchPage {
+  cursor?: string | null;
+  hasMore: boolean;
+  limit: number;
+}
+
+export interface MarketSearchResult {
+  items: MarketPluginSummary[];
+  count: number;
+  page: MarketSearchPage;
+}
+
+export const marketSearch = (
+  query: string,
+  category?: string,
+  limit?: number,
+  cursor?: string,
+  platform = "desktop",
+): Promise<MarketSearchResult> =>
+  invoke("market_search", { query, category, limit, cursor, platform });
+
+export const marketPlugin = (slug: string): Promise<MarketPluginDetail> =>
+  invoke("market_plugin", { slug });
+
+export const marketImage = (url: string): Promise<{ dataUrl: string }> =>
+  invoke("market_image", { url });
+
+export const sideloadPlugin = (path: string): Promise<void> =>
+  invoke("sideload_plugin", { path });
+
+export const pickSideloadFile = (): Promise<string | null> =>
+  invoke("pick_sideload_file");
+
 export interface PluginInstallRequest {
   name: string;
   source: string;
@@ -157,6 +219,42 @@ export async function onPluginInstallRequest(
   handler: (request: PluginInstallRequest) => void,
 ): Promise<() => void> {
   const unlisten = await listen<PluginInstallRequest>("plugin-install-request", (event) => {
+    handler(event.payload);
+  });
+  return unlisten;
+}
+
+export interface RemotePresetRequest {
+  requestId: string;
+  source: string;
+  stage: "awaiting-download" | "downloading" | "awaiting-install" | "installing";
+  id?: string;
+  files?: [string, number][];
+  warnings?: string[];
+}
+
+export interface RemotePresetPreview {
+  requestId: string;
+  id: string;
+  files: [string, number][];
+  warnings: string[];
+}
+
+export const getPendingRemotePreset = (): Promise<RemotePresetRequest | null> =>
+  invoke("get_pending_remote_preset");
+export const dismissRemotePreset = (requestId: string): Promise<void> =>
+  invoke("dismiss_remote_preset", { requestId });
+export const confirmRemotePresetDownload = (
+  requestId: string,
+): Promise<RemotePresetPreview> =>
+  invoke("confirm_remote_preset_download", { requestId });
+export const importRemotePreset = (requestId: string): Promise<string> =>
+  invoke("import_remote_preset", { requestId });
+
+export async function onPresetInstallRequest(
+  handler: (request: RemotePresetRequest) => void,
+): Promise<() => void> {
+  const unlisten = await listen<RemotePresetRequest>("preset-install-request", (event) => {
     handler(event.payload);
   });
   return unlisten;

@@ -1,6 +1,6 @@
 {
-  "desktopVersion": "0.2.6",
-  "harnessVersion": "0.1.0-rc.6",
+  "desktopVersion": "0.2.8",
+  "harnessVersion": "0.1.0-rc.7",
   "nodeVersion": "24.19.0",
   "sidecarVersion": "0.2.4",
   "nodeSha256": {

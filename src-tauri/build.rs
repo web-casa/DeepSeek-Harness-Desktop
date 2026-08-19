@@ -22,7 +22,7 @@ fn main() {
         "quit_app",
         "list_user_presets",
         "preview_preset",
-        "preview_remote_preset",
+        "cancel_preset_preview",
         "import_preset",
         "export_preset",
         "delete_preset",
@@ -32,9 +32,15 @@ fn main() {
         "cancel_plugin_op",
         "get_pending_plugin_install",
         "dismiss_pending_plugin_install",
-        "get_pending_preset_install",
-        "dismiss_pending_preset_install",
-        "cancel_remote_preset",
+        "get_pending_remote_preset",
+        "dismiss_remote_preset",
+        "confirm_remote_preset_download",
+        "import_remote_preset",
+        "pick_sideload_file",
+        "market_search",
+        "market_plugin",
+        "market_image",
+        "sideload_plugin",
     ]);
     let result = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest));
     if let Err(e) = result {

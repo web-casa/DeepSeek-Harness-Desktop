@@ -314,7 +314,7 @@ function runNsisChecks(): void {
     "runtime/node.exe",
     "runtime/sidecar.exe",
     ...HARNESS_CORE,
-    "runtime/harness/node_modules/node-pty/prebuilds/win32-x64/pty.node",
+    "runtime/harness/node_modules/node-pty/prebuilds/win32-x64/conpty.node",
   ];
   for (const path of required) {
     if (!entrySet.has(path.toLowerCase())) {

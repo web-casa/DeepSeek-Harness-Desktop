@@ -9,6 +9,7 @@ mod commands;
 mod curated_plugins;
 mod deep_link;
 mod harness;
+mod market;
 mod paths;
 mod plugins;
 mod preset;
@@ -96,17 +97,22 @@ fn main() {
             // must reach the tray status line.
             tray::init(&app.handle().clone());
             harness::init(&app.handle().clone());
+            commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
+            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
             // The two-phase preset import holds its preview here between
             // preview_preset and import_preset. MUST be managed: extracting
             // an unmanaged State panics at the first command invocation.
             app.manage(commands::PendingPreset(std::sync::Mutex::new(None)));
-            app.manage(commands::RemotePresetTemp(std::sync::Mutex::new(None)));
             app.manage(std::sync::Arc::new(plugins::PluginRunner::new()));
             // Deep-link parsing/dispatch. Manage the pending-request slot
             // BEFORE init drains get_current(): a cold start URL can arrive
             // before the webview subscribed to plugin-install-request.
             app.manage(deep_link::PendingPluginInstall::default());
-            app.manage(deep_link::PendingPresetInstall::default());
+            app.manage(deep_link::PendingRemotePreset::default());
+            app.manage(deep_link::InstallArbiter::default());
+            let market = market::MarketClient::new()
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            app.manage(std::sync::Arc::new(market));
             deep_link::init(app.handle());
             Ok(())
         });
@@ -136,7 +142,7 @@ fn main() {
             commands::quit_app,
             commands::list_user_presets,
             commands::preview_preset,
-            commands::preview_remote_preset,
+            commands::cancel_preset_preview,
             commands::import_preset,
             commands::export_preset,
             commands::delete_preset,
@@ -146,9 +152,15 @@ fn main() {
             commands::cancel_plugin_op,
             commands::get_pending_plugin_install,
             commands::dismiss_pending_plugin_install,
-            commands::get_pending_preset_install,
-            commands::dismiss_pending_preset_install,
-            commands::cancel_remote_preset
+            commands::get_pending_remote_preset,
+            commands::dismiss_remote_preset,
+            commands::confirm_remote_preset_download,
+            commands::import_remote_preset,
+            commands::pick_sideload_file,
+            commands::market_search,
+            commands::market_plugin,
+            commands::market_image,
+            commands::sideload_plugin
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {
@@ -177,8 +189,10 @@ fn main() {
             // Kill a running `dsh plugin` tree first: it is a separate
             // process group / Job Object from the sidecar's Harness tree,
             // and on unix it would be orphaned once the shell exits.
-            app.state::<std::sync::Arc<plugins::PluginRunner>>()
-                .shutdown();
+            let plugin_runner = app.state::<std::sync::Arc<plugins::PluginRunner>>().clone();
+            plugin_runner.shutdown();
+            commands::sweep_remote_preset_temp(&app.state::<harness::Runtime>());
+            commands::sweep_stale_sideloads(&app.state::<harness::Runtime>());
             // The sidecar kills the whole Node/Harness tree on stdin EOF,
             // and the Windows Job Object guarantees cleanup even if we
             // crash. This is the polite path.
