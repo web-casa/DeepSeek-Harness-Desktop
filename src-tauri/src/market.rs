@@ -758,7 +758,9 @@ async fn read_limited_image_body(response: reqwest::Response) -> Result<Vec<u8>,
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
+
+    const TEST_SERVER_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
     const VALID_INTEGRITY: &str =
         "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==";
@@ -786,7 +788,10 @@ mod tests {
     }
 
     fn response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
-        let mut out = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n", body.len());
+        let mut out = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
         for (name, value) in headers {
             out.push_str(&format!("{name}: {value}\r\n"));
         }
@@ -795,13 +800,41 @@ mod tests {
         out
     }
 
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + TEST_SERVER_IO_TIMEOUT;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(TEST_SERVER_IO_TIMEOUT))
+                        .expect("set fixture read timeout");
+                    stream
+                        .set_write_timeout(Some(TEST_SERVER_IO_TIMEOUT))
+                        .expect("set fixture write timeout");
+                    return stream;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "fixture server timed out waiting for a request"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("fixture server accept failed: {error}"),
+            }
+        }
+    }
+
     fn test_server(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        listener
+            .set_nonblocking(true)
+            .expect("set fixture listener nonblocking");
         let port = listener.local_addr().expect("fixture address").port();
         let worker = std::thread::spawn(move || {
             let mut requests = Vec::new();
             for response in responses {
-                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut stream = accept_test_connection(&listener);
                 let mut bytes = Vec::new();
                 let mut chunk = [0_u8; 1024];
                 loop {
@@ -828,9 +861,12 @@ mod tests {
         first_response: String,
     ) -> (String, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        listener
+            .set_nonblocking(true)
+            .expect("set fixture listener nonblocking");
         let port = listener.local_addr().expect("fixture address").port();
         let worker = std::thread::spawn(move || {
-            let (mut first, _) = listener.accept().expect("accept first request");
+            let mut first = accept_test_connection(&listener);
             let mut bytes = [0_u8; 1024];
             let _ = first.read(&mut bytes).expect("read first request");
             first
@@ -841,7 +877,7 @@ mod tests {
             // Accept the conditional revalidation request and close the
             // socket without a response. This models an interrupted network
             // path, not an HTTP API error (which already must not be stale).
-            let (mut second, _) = listener.accept().expect("accept second request");
+            let mut second = accept_test_connection(&listener);
             let _ = second.read(&mut bytes).expect("read second request");
         });
         (format!("http://127.0.0.1:{port}/api/v1"), worker)
@@ -963,7 +999,10 @@ mod tests {
         {
             let mut cache = client.search_cache.lock().expect("cache");
             for entry in cache.values_mut() {
-                entry.at = Instant::now() - SEARCH_TTL;
+                // Keep a margin beyond the boundary so hosted-runner clock
+                // granularity cannot leave this test on the exact TTL edge.
+                // The second request must always exercise revalidation.
+                entry.at = Instant::now() - (SEARCH_TTL + Duration::from_secs(1));
             }
         }
         let second = tauri::async_runtime::block_on(client.search(
