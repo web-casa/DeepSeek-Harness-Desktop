@@ -805,6 +805,12 @@ mod tests {
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // Accepted sockets inherit the listener's nonblocking
+                    // mode on Windows. Restore blocking I/O so the bounded
+                    // read/write timeouts below behave consistently.
+                    stream
+                        .set_nonblocking(false)
+                        .expect("set fixture stream blocking");
                     stream
                         .set_read_timeout(Some(TEST_SERVER_IO_TIMEOUT))
                         .expect("set fixture read timeout");
