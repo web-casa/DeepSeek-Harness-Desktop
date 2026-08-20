@@ -178,6 +178,15 @@ const HOME_CACHE_SCHEMA: u32 = 1;
 const HOME_CACHE_LIMIT: u32 = 30;
 const HOME_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const APPROVED_NPM_REGISTRY_HOSTS: &[&str] = &["registry.npmjs.org"];
+const API_CODE_MAX_CHARS: usize = 64;
+const API_MESSAGE_MAX_CHARS: usize = 512;
+const API_REQUEST_ID_MAX_CHARS: usize = 128;
+
+const MARKET_TIMEOUT: &str = "MARKET_TIMEOUT";
+const MARKET_UNAVAILABLE: &str = "MARKET_UNAVAILABLE";
+const MARKET_INVALID_RESPONSE: &str = "MARKET_INVALID_RESPONSE";
+const MARKET_API_ERROR: &str = "MARKET_API_ERROR";
+const MARKET_HTTP_ERROR: &str = "MARKET_HTTP_ERROR";
 
 pub fn is_valid_market_slug(slug: &str) -> bool {
     let bytes = slug.as_bytes();
@@ -467,12 +476,12 @@ impl MarketClient {
                         });
                     }
                 }
-                return Err(format!("{label} request failed: {error}"));
+                return Err(format_transport_error(label, &error));
             }
         };
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             let cached = Self::cache_revalidated(cache, key)
-                .ok_or_else(|| format!("{label} returned HTTP 304 without a cached response"))?;
+                .ok_or_else(|| invalid_response(label, "returned 304 without a cache entry"))?;
             return Ok(CachedJson {
                 value: cached.value,
                 etag: cached.etag,
@@ -487,12 +496,12 @@ impl MarketClient {
             .get(ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let body = read_limited_json_body(response).await?;
+        let body = read_limited_json_body(response, label).await?;
         if !status.is_success() {
             return Err(format_api_error(label, status, &body));
         }
         let json = serde_json::from_slice::<Value>(&body)
-            .map_err(|e| format!("{label} response was not JSON: {e}"))?;
+            .map_err(|_| invalid_response(label, "returned invalid JSON"))?;
         Self::cache_put(cache, key, json.clone(), etag.clone());
         Ok(CachedJson {
             value: json,
@@ -614,7 +623,7 @@ impl MarketClient {
             .await?;
         let raw = outcome.value;
         let mut parsed: MarketSearchResponse = serde_json::from_value(raw.clone())
-            .map_err(|e| format!("market search response did not match the v4 DTO: {e}"))?;
+            .map_err(|_| invalid_response("market search", "did not match the v4 DTO"))?;
         if is_home
             && matches!(
                 outcome.disposition,
@@ -672,7 +681,7 @@ impl MarketClient {
             .await?
             .value;
         serde_json::from_value(raw)
-            .map_err(|e| format!("market detail response did not match the v4 DTO: {e}"))
+            .map_err(|_| invalid_response("market detail", "did not match the v4 DTO"))
     }
 
     pub async fn detail(&self, slug: &str, dsh_version: &str) -> Result<Value, String> {
@@ -703,9 +712,12 @@ impl MarketClient {
             .get(parsed)
             .send()
             .await
-            .map_err(|e| format!("image request failed: {e}"))?;
+            .map_err(|error| format_transport_error("market image", &error))?;
         if !response.status().is_success() {
-            return Err(format!("image request failed: HTTP {}", response.status()));
+            return Err(format!(
+                "{MARKET_HTTP_ERROR}: market image failed with HTTP {}",
+                response.status()
+            ));
         }
         let content_type = response
             .headers()
@@ -737,6 +749,21 @@ fn is_transport_failure(error: &reqwest::Error) -> bool {
         || (error.is_request() && !error.is_builder() && !error.is_redirect())
 }
 
+fn format_transport_error(label: &str, error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("{MARKET_TIMEOUT}: {label} request timed out")
+    } else {
+        // reqwest errors can include full URLs (including opaque cursors) and
+        // platform-specific socket details. Keep those in private diagnostics,
+        // never in the bootstrap UI error channel.
+        format!("{MARKET_UNAVAILABLE}: {label} is unavailable")
+    }
+}
+
+fn invalid_response(label: &str, reason: &str) -> String {
+    format!("{MARKET_INVALID_RESPONSE}: {label} {reason}")
+}
+
 fn load_disk_home_cache(path: &std::path::Path, expected_origin: &str) -> Option<DiskHomeCache> {
     let bytes = crate::secure_fs::read_bounded(path, JSON_MAX_BYTES as u64)
         .ok()
@@ -764,19 +791,65 @@ fn load_disk_home_cache(path: &std::path::Path, expected_origin: &str) -> Option
 fn format_api_error(label: &str, status: reqwest::StatusCode, body: &[u8]) -> String {
     match serde_json::from_slice::<ApiErrorBody>(body) {
         Ok(parsed) => {
+            let code =
+                bounded_api_code(&parsed.error.code).unwrap_or_else(|| "UNKNOWN".to_string());
+            let message = bounded_api_message(&parsed.error.message)
+                .unwrap_or_else(|| "request failed".to_string());
             let request = parsed
                 .error
                 .request_id
-                .filter(|id| !id.is_empty())
+                .as_deref()
+                .and_then(bounded_request_id)
                 .map(|id| format!(" (requestId: {id})"))
                 .unwrap_or_default();
-            format!(
-                "{label} failed: {} {}: {}{request}",
-                status, parsed.error.code, parsed.error.message
-            )
+            format!("{MARKET_API_ERROR}: {label} failed: {status} {code}: {message}{request}")
         }
-        Err(_) => format!("{label} failed: HTTP {status}"),
+        Err(_) => format!("{MARKET_HTTP_ERROR}: {label} failed with HTTP {status}"),
     }
+}
+
+fn bounded_api_code(raw: &str) -> Option<String> {
+    if raw.is_empty()
+        || raw.chars().count() > API_CODE_MAX_CHARS
+        || !raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+fn is_unsafe_display_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+        )
+}
+
+fn bounded_api_message(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().any(is_unsafe_display_character) {
+        return None;
+    }
+    Some(trimmed.chars().take(API_MESSAGE_MAX_CHARS).collect())
+}
+
+fn bounded_request_id(raw: &str) -> Option<String> {
+    if raw.is_empty()
+        || raw.len() > API_REQUEST_ID_MAX_CHARS
+        || !raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+    {
+        return None;
+    }
+    Some(raw.to_string())
 }
 
 fn required_wire_string<'a>(value: &'a Option<String>, field: &str) -> Result<&'a str, String> {
@@ -839,7 +912,7 @@ fn parse_dsh_requirement(raw: &str) -> Result<VersionReq, String> {
             let normalized = raw.split_whitespace().collect::<Vec<_>>().join(", ");
             VersionReq::parse(&normalized)
         })
-        .map_err(|e| format!("market entry has invalid engines.dsh: {e}"))
+        .map_err(|_| "market entry has invalid engines.dsh".to_string())
 }
 
 /// Store distributions have an additional, locally pinned review boundary.
@@ -886,7 +959,7 @@ fn candidate_from_entry(
         );
     }
     let version = required_wire_string(&source.version, "source.version")?;
-    Version::parse(version).map_err(|e| format!("market entry has invalid source.version: {e}"))?;
+    Version::parse(version).map_err(|_| "market entry has invalid source.version".to_string())?;
     let integrity = required_wire_string(&source.integrity, "source.integrity")?;
     if !is_valid_sha512_integrity(integrity) {
         return Err("market entry has invalid source.integrity".to_string());
@@ -921,7 +994,7 @@ fn candidate_from_entry(
         .map_err(|e| format!("Desktop DSH version is unavailable or invalid: {e}"))?;
     if !requirement.matches(&current) {
         return Err(format!(
-            "this market entry requires DSH {dsh_range}, but Desktop runs {dsh_version}"
+            "this market entry is incompatible with Desktop DSH {dsh_version}"
         ));
     }
 
@@ -973,14 +1046,17 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-async fn read_limited_json_body(response: reqwest::Response) -> Result<Vec<u8>, String> {
+async fn read_limited_json_body(
+    response: reqwest::Response,
+    label: &str,
+) -> Result<Vec<u8>, String> {
     use futures_util::StreamExt;
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("market read failed: {e}"))?;
+        let chunk = chunk.map_err(|error| format_transport_error(label, &error))?;
         if body.len().saturating_add(chunk.len()) > JSON_MAX_BYTES {
-            return Err("market response exceeds 1 MiB".to_string());
+            return Err(invalid_response(label, "exceeded the 1 MiB limit"));
         }
         body.extend_from_slice(&chunk);
     }
@@ -992,9 +1068,9 @@ async fn read_limited_image_body(response: reqwest::Response) -> Result<Vec<u8>,
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("image read failed: {e}"))?;
+        let chunk = chunk.map_err(|error| format_transport_error("market image", &error))?;
         if body.len().saturating_add(chunk.len()) > IMAGE_MAX_BYTES {
-            return Err("image exceeds 2 MiB".to_string());
+            return Err(invalid_response("market image", "exceeded the 2 MiB limit"));
         }
         body.extend_from_slice(&chunk);
     }
@@ -1435,9 +1511,79 @@ mod tests {
         let client = MarketClient::with_base_url(base).expect("client");
         let error = tauri::async_runtime::block_on(client.detail("missing", "0.1.0-rc.7"))
             .expect_err("detail should fail");
+        assert!(error.starts_with(MARKET_API_ERROR));
         assert!(error.contains("NOT_FOUND: no such slug"));
         assert!(error.contains("requestId: req-1"));
         let _ = worker.join().expect("fixture worker");
+    }
+
+    #[test]
+    fn api_error_fields_are_bounded_and_reject_display_controls() {
+        assert_eq!(bounded_api_code("NOT_FOUND").as_deref(), Some("NOT_FOUND"));
+        assert!(bounded_api_code("NOT FOUND").is_none());
+        assert!(bounded_request_id("req-1:edge").is_some());
+        assert!(bounded_request_id("req\nspoof").is_none());
+        for unsafe_message in [
+            "safe\u{2028}second-line",
+            "safe\u{202e}spoof",
+            "safe\u{2060}hidden",
+            "safe\u{feff}hidden",
+        ] {
+            assert!(bounded_api_message(unsafe_message).is_none());
+        }
+        assert_eq!(
+            bounded_api_message(&"界".repeat(API_MESSAGE_MAX_CHARS + 20))
+                .expect("bounded message")
+                .chars()
+                .count(),
+            API_MESSAGE_MAX_CHARS
+        );
+
+        let malicious = serde_json::json!({
+            "error": {
+                "code": "BAD CODE",
+                "message": "safe\u{202e}spoof",
+                "requestId": "req\nspoof"
+            }
+        });
+        let formatted = format_api_error(
+            "market detail",
+            reqwest::StatusCode::BAD_REQUEST,
+            &serde_json::to_vec(&malicious).expect("error JSON"),
+        );
+        assert_eq!(
+            formatted,
+            "MARKET_API_ERROR: market detail failed: 400 Bad Request UNKNOWN: request failed"
+        );
+    }
+
+    #[test]
+    fn successful_html_and_orphan_304_are_invalid_responses() {
+        let (html_base, html_worker) = test_server(vec![response(
+            "200 OK",
+            &[("Content-Type", "text/html")],
+            "<html>not JSON</html>",
+        )]);
+        let html_client = MarketClient::with_base_url(html_base).expect("HTML client");
+        let html_error =
+            tauri::async_runtime::block_on(html_client.detail("fixture", "0.1.0-rc.7"))
+                .expect_err("HTML success response must fail");
+        assert_eq!(
+            html_error,
+            "MARKET_INVALID_RESPONSE: market detail returned invalid JSON"
+        );
+        html_worker.join().expect("HTML fixture worker");
+
+        let (cache_base, cache_worker) = test_server(vec![response("304 Not Modified", &[], "")]);
+        let cache_client = MarketClient::with_base_url(cache_base).expect("304 client");
+        let cache_error =
+            tauri::async_runtime::block_on(cache_client.detail("fixture", "0.1.0-rc.7"))
+                .expect_err("orphan 304 must fail");
+        assert_eq!(
+            cache_error,
+            "MARKET_INVALID_RESPONSE: market detail returned 304 without a cache entry"
+        );
+        cache_worker.join().expect("304 fixture worker");
     }
 
     #[test]
@@ -1474,7 +1620,7 @@ mod tests {
         let error =
             tauri::async_runtime::block_on(client.prepare_install("fixture-plugin", "0.1.0-rc.7"))
                 .expect_err("install preparation must require live revalidation");
-        assert!(error.contains("market detail request failed"));
+        assert_eq!(error, "MARKET_UNAVAILABLE: market detail is unavailable");
         worker.join().expect("fixture worker");
     }
 

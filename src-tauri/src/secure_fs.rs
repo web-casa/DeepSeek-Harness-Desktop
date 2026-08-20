@@ -1,7 +1,8 @@
 //! Small, dependency-free primitives for Desktop-owned private state.
 //!
 //! Callers must keep files below an already-checked private directory. Every
-//! leaf is rejected when it is a symlink, writes use private permissions, and
+//! leaf is rejected when it is a symlink or Windows reparse point, writes use
+//! private permissions, and
 //! replacement is staged beside the destination so a crash cannot expose a
 //! partially written JSON document.
 
@@ -20,10 +21,26 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 #[cfg(unix)]
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
+pub(crate) fn is_symlink_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 pub fn ensure_private_dir(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(meta) => {
-            if meta.file_type().is_symlink() || !meta.is_dir() {
+            if is_symlink_or_reparse(&meta) || !meta.is_dir() {
                 return Err(format!(
                     "private state path is not a real directory: {}",
                     path.display()
@@ -43,7 +60,7 @@ pub fn ensure_private_dir(path: &Path) -> Result<(), String> {
                     path.display()
                 )
             })?;
-            if meta.file_type().is_symlink() || !meta.is_dir() {
+            if is_symlink_or_reparse(&meta) || !meta.is_dir() {
                 return Err(format!(
                     "private state path is not a real directory: {}",
                     path.display()
@@ -110,17 +127,7 @@ fn validate_regular_handle(file: &File, path: &Path) -> Result<fs::Metadata, Str
     let metadata = file
         .metadata()
         .map_err(|e| format!("cannot inspect open file {}: {e}", path.display()))?;
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(format!(
-                "private state leaf is a reparse point: {}",
-                path.display()
-            ));
-        }
-    }
-    if !metadata.is_file() {
+    if is_symlink_or_reparse(&metadata) || !metadata.is_file() {
         return Err(format!(
             "private state leaf is not a regular file: {}",
             path.display()
@@ -145,7 +152,7 @@ pub fn open_regular_read(path: &Path) -> Result<File, String> {
 
 pub fn check_regular_or_missing(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => Err(format!(
+        Ok(meta) if is_symlink_or_reparse(&meta) || !meta.is_file() => Err(format!(
             "private state leaf is not a regular file: {}",
             path.display()
         )),
@@ -197,7 +204,7 @@ pub fn read_bounded(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, Stri
             ))
         }
     };
-    if meta.file_type().is_symlink() || !meta.is_file() {
+    if is_symlink_or_reparse(&meta) || !meta.is_file() {
         return Err(format!(
             "private state leaf is not a regular file: {}",
             path.display()
@@ -399,6 +406,29 @@ mod tests {
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o755
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_directory_is_rejected() {
+        let root = test_dir("junction");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("target");
+        let junction = root.join("junction");
+        fs::create_dir_all(&target).unwrap();
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(ensure_private_dir(&junction).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
