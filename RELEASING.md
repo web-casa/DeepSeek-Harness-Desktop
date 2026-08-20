@@ -45,9 +45,14 @@ git push origin v0.2.1
    二进制架构、必需文件、scoped 许可证
    绊线、零符号链接、执行位、无 quarantine）→ **verify-signing**（见下）→
    SHA-256 checksum → 上传制品。
-4. `build-msix` ×2：原生 Windows x64/arm64 Store 包、静态内容检查与 SHA-256；
+4. 签名 macOS 构建把“签名/构建”和“公证等待”分离：`build` 只提交一次，
+   将 Submission ID、DMG SHA-256 与未 staple 的 DMG 保存为私有 handoff artifact；
+   `notarize-macos` ×2 只查询该 ID（每次最多 20 分钟），Accepted 后 staple、
+   Gatekeeper/内容/签名复验并上传最终公开 artifact。Apple 长时间 In Progress
+   不会重新上传，也不会让构建 runner 无限等待。
+5. `build-msix` ×2：原生 Windows x64/arm64 Store 包、静态内容检查与 SHA-256；
    只保留为 Partner Center workflow artifact。
-5. `release`：tag 绑定 preflight（`--expect-tag`）→ 只下载
+6. `release`：tag 绑定 preflight（`--expect-tag`）→ 只下载
    `deepseek-harness-desktop-*` 公开制品 → 校验 12 个安装包、12 个 checksum、
    1 个 Windows updater signature 且没有 MSIX/未知文件 → **draft** GitHub Release。
 
@@ -103,9 +108,12 @@ Desktop 工作区直接改为公开发布。
   照常发布；README/SECURITY 已如实披露放行方式。
 - Windows Authenticode 需同时配置 Base64 PFX `WINDOWS_CERTIFICATE`、
   `WINDOWS_CERTIFICATE_PASSWORD` 与证书机构提供的 `WINDOWS_TIMESTAMP_URL`；缺少
-  后两项会在构建前失败。macOS 需配置 `APPLE_CERTIFICATE`、
-  `APPLE_CERTIFICATE_PASSWORD` 及公证凭据（`APPLE_ID` / `APPLE_PASSWORD` /
-  `APPLE_TEAM_ID`）。
+  后两项会在构建前失败。macOS 始终需要 `APPLE_CERTIFICATE`、
+  `APPLE_CERTIFICATE_PASSWORD`、`APPLE_TEAM_ID`；公证认证优先使用 App Store
+  Connect API Key（`ASC_KEY_ID`、`ASC_ISSUER_ID`、`ASC_PRIVATE_KEY_B64`），缺少时
+  兼容现有 `APPLE_ID` + app-specific `APPLE_PASSWORD`。任一凭据组部分配置都会
+  fail-closed。ASC CLI 固定为 4.6.0 的 macOS x64/arm64 release asset，并在执行前
+  通过仓库内 SHA-256 白名单验证，不运行远程安装脚本。
 - 配置了证书 secrets → **强制验签**（macOS: codesign --verify --deep --strict +
   spctl --assess + stapler validate；Windows: Authenticode == Valid），
   任一失败即阻断发布（fail-closed，防假签名）。Linux 安装包当前没有独立
@@ -131,6 +139,18 @@ Desktop 工作区直接改为公开发布。
 - 已发布：永不覆盖资产；bump patch 版本重新发布，旧版标注。
 - workflow_dispatch（不发布）可用于在**不打 tag** 的情况下全流程演练构建
   与验证（`tag` 输入为空时构建默认分支）。
+
+### 6a. Apple 公证超时续跑
+
+`notarize-macos` 若在 20 分钟内仍得到 `In Progress`，会以失败结束并在日志中
+打印原 Submission ID；Apple 后台任务不会被取消。此时只能在该 workflow run
+选择 **Re-run failed jobs**。成功的 `build macos-*` job 与其 handoff artifact
+会被复用，等待脚本重新校验 DMG SHA-256 后继续查询原 ID。
+
+不要选择 **Re-run all jobs**，也不要重新触发一条相同 ref 的 Release 演练；这两种
+操作会重新执行提交 job，制造重复 submission。`Invalid` / `Rejected` 会生成
+`dsh-macos-notarization-diagnostics-*` artifact，先查看 developer log 再修复签名
+或 bundle，禁止把终态失败当作可重试网络故障。
 
 ## 7. 更新器（updater）运行语义
 

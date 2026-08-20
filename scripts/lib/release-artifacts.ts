@@ -70,6 +70,7 @@ export interface NativeReleaseTarget {
   uploadPaths: readonly string[];
   appImageTools: boolean;
   flatpak: boolean;
+  notarizationArtifact?: string;
   updaterSignature?: {
     directory: string;
     suffix: string;
@@ -118,6 +119,7 @@ export const NATIVE_RELEASE_TARGETS: readonly NativeReleaseTarget[] = [
     ],
     appImageTools: false,
     flatpak: false,
+    notarizationArtifact: "dsh-macos-notarization-arm64",
     updaterSignature: {
       directory: "target/release/bundle/macos",
       suffix: ".app.tar.gz.sig",
@@ -136,6 +138,7 @@ export const NATIVE_RELEASE_TARGETS: readonly NativeReleaseTarget[] = [
     ],
     appImageTools: false,
     flatpak: false,
+    notarizationArtifact: "dsh-macos-notarization-x64",
     updaterSignature: {
       directory: "target/release/bundle/macos",
       suffix: ".app.tar.gz.sig",
@@ -206,6 +209,16 @@ export function releasePlanProblems(): string[] {
     if (target.id.startsWith("macos-") && !target.tauriBundles.includes("app")) {
       problems.push(`${target.id}: macOS updater tripwire requires the internal app bundle`);
     }
+    if (target.id.startsWith("macos-")) {
+      if (!target.notarizationArtifact?.startsWith("dsh-macos-notarization-")) {
+        problems.push(`${target.id}: macOS target is missing a private notarization artifact`);
+      }
+      if (target.notarizationArtifact?.startsWith("deepseek-harness-desktop-")) {
+        problems.push(`${target.id}: notarization handoff must not match the public artifact pattern`);
+      }
+    } else if (target.notarizationArtifact !== undefined) {
+      problems.push(`${target.id}: only macOS targets may define a notarization artifact`);
+    }
     if (target.updaterSignature) {
       const uploadPath = `${target.updaterSignature.directory}/*${target.updaterSignature.suffix}`;
       if (target.uploadPaths.includes(uploadPath) !== target.updaterSignature.publish) {
@@ -238,7 +251,23 @@ export function githubNativeMatrix(): { include: Record<string, unknown>[] } {
       paths: target.uploadPaths.join("\n"),
       appImageTools: target.appImageTools,
       flatpak: target.flatpak,
+      notarizationArtifact: target.notarizationArtifact,
     })),
+  };
+}
+
+export function githubMacosNotarizationMatrix(): { include: Record<string, unknown>[] } {
+  return {
+    include: NATIVE_RELEASE_TARGETS.filter((target) => target.id.startsWith("macos-")).map(
+      (target) => ({
+        target: target.id,
+        os: target.os,
+        arch: target.arch,
+        handoffArtifact: target.notarizationArtifact,
+        artifact: target.artifact,
+        paths: target.uploadPaths.join("\n"),
+      }),
+    ),
   };
 }
 

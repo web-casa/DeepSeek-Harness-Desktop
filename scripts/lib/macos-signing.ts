@@ -42,16 +42,3 @@ export function parseKeychainList(stdout: string): string[] {
 export function hasHardenedRuntimeFlag(codesignDetails: string): boolean {
   return /^CodeDirectory\b[^\r\n]*\bflags=[^\r\n]*\bruntime\b/m.test(codesignDetails);
 }
-
-export function isRetryableAppleNotarizationNetworkError(output: string): boolean {
-  const notarizationFailure =
-    output.includes("failed to notarize") ||
-    output.includes("appstoreconnect.apple.com/notary/");
-  if (!notarizationFailure) return false;
-
-  return (
-    /NSURLErrorDomain Code=-1009\b/.test(output) ||
-    /\bNo network route\b/i.test(output) ||
-    /The Internet connection appears to be offline\./i.test(output)
-  );
-}

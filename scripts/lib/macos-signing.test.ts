@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   hasHardenedRuntimeFlag,
   isMachOMagic,
-  isRetryableAppleNotarizationNetworkError,
   parseCodesignIdentities,
   parseKeychainList,
 } from "./macos-signing.ts";
@@ -58,21 +57,5 @@ test("parses quoted security keychain output including spaces", () => {
       "/Users/runner/Library/Keychains/login.keychain-db",
       "/tmp/a b.keychain-db",
     ],
-  );
-});
-
-test("retries only an Apple notarization network-route failure", () => {
-  const observedRunnerFailure = `failed to notarize app: Error: HTTPError(statusCode: nil,
-Error Domain=NSURLErrorDomain Code=-1009 "The Internet connection appears to be offline."
-NSErrorFailingURLStringKey=https://appstoreconnect.apple.com/notary/v2/submissions/example?,
-_NSURLErrorNWPathKey=unsatisfied (No network route)`;
-  assert.equal(isRetryableAppleNotarizationNetworkError(observedRunnerFailure), true);
-  assert.equal(
-    isRetryableAppleNotarizationNetworkError("failed to notarize app: status Invalid"),
-    false,
-  );
-  assert.equal(
-    isRetryableAppleNotarizationNetworkError("NSURLErrorDomain Code=-1009 while fetching npm"),
-    false,
   );
 });

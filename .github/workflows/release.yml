@@ -35,6 +35,7 @@ jobs:
     outputs:
       native: ${{ steps.matrix.outputs.native }}
       msix: ${{ steps.matrix.outputs.msix }}
+      macos_notarization: ${{ steps.matrix.outputs.macos_notarization }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
@@ -44,11 +45,14 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Emit reviewed native and Store matrices
+      - name: Emit reviewed native, notarization, and Store matrices
         id: matrix
         run: |
-          echo "native=$(node scripts/release-plan.ts --github-matrix)" >> "$GITHUB_OUTPUT"
-          echo "msix=$(node scripts/release-plan.ts --github-msix-matrix)" >> "$GITHUB_OUTPUT"
+          {
+            echo "native=$(node scripts/release-plan.ts --github-matrix)"
+            echo "msix=$(node scripts/release-plan.ts --github-msix-matrix)"
+            echo "macos_notarization=$(node scripts/release-plan.ts --github-macos-notarization-matrix)"
+          } >> "$GITHUB_OUTPUT"
 
   # The desktop deliberately refuses CDN redirects for remote preset archives.
   # Keep this independent of native builds: a backend contract regression must
@@ -262,46 +266,27 @@ jobs:
             Remove-Item -LiteralPath $encoded, $pfx -Force -ErrorAction SilentlyContinue
           }
 
-      # Do not pass empty APPLE_* variables to Tauri: the CLI treats the
-      # presence of APPLE_CERTIFICATE as a request to import a PKCS#12 even
-      # when GitHub resolved the missing secret to an empty string.
+      # Resolve one complete authentication provider without logging secrets.
+      # ASC API-key auth is preferred when present; existing Apple ID auth is
+      # retained as a no-migration fallback for notarytool.
       - name: Detect macOS signing configuration
         if: runner.os == 'macOS'
-        shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$APPLE_CERTIFICATE" ]]; then
-            if [[ -n "$APPLE_CERTIFICATE_PASSWORD" || -n "$APPLE_ID" || -n "$APPLE_PASSWORD" || -n "$APPLE_TEAM_ID" ]]; then
-              echo "::error::partial Apple signing configuration: APPLE_CERTIFICATE is missing"
-              exit 1
-            fi
-            echo "APPLE_SIGNING_CONFIGURED=0" >> "$GITHUB_ENV"
-            echo "Apple signing is not configured; building an intentionally unsigned DMG."
-            exit 0
-          fi
-
-          missing=()
-          [[ -n "$APPLE_CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
-          [[ -n "$APPLE_ID" ]] || missing+=(APPLE_ID)
-          [[ -n "$APPLE_PASSWORD" ]] || missing+=(APPLE_PASSWORD)
-          [[ -n "$APPLE_TEAM_ID" ]] || missing+=(APPLE_TEAM_ID)
-          if (( ${#missing[@]} > 0 )); then
-            printf '::error::partial Apple signing configuration; missing: %s\n' "${missing[*]}"
-            exit 1
-          fi
-          echo "APPLE_SIGNING_CONFIGURED=1" >> "$GITHUB_ENV"
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
+        run: node scripts/detect-macos-signing.ts
 
       # Tauri signs the app executable and conventional nested-code folders,
       # but our bundled Node/Harness lives under Contents/Resources. Import
       # the identity early, preserve the compliant upstream Node signature,
-      # and sign every other Mach-O resource before Tauri signs/notarizes the
-      # outer app and DMG.
+      # and sign every other Mach-O resource before Tauri signs the outer app
+      # and DMG. Notarization is deliberately deferred to the handoff below.
       - name: Import macOS Developer ID certificate
         if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
         env:
@@ -326,19 +311,59 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Bundle application (macOS, signed and notarized)
+      # Deliberately omit every notarization credential here. Tauri signs the
+      # app and DMG with APPLE_SIGNING_IDENTITY but cannot enter its built-in
+      # unbounded `notarytool --wait` path. Submission is the next step.
+      - name: Bundle application (macOS, signed; notarization deferred)
         if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
-        run: node scripts/build-macos-release.ts
+        run: pnpm tauri build --bundles ${{ matrix.tauriBundles }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # The certificate is already in APPLE_KEYCHAIN_PATH and its identity
-          # is exported through GITHUB_ENV. Omitting APPLE_CERTIFICATE here
-          # prevents Tauri from hiding a duplicate import in a private
-          # process-scoped keychain.
+
+      - name: Verify signed DMG before notarization
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
+        run: |
+          node scripts/verify-bundle.ts --bundle dmg --arch ${{ matrix.arch }}
+          node scripts/verify-signing.ts --bundle dmg --phase pre-notarization
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+
+      # No private signing key is needed after the DMG has been signed and
+      # verified. Remove it before Apple issues a Submission ID so a cleanup
+      # failure can never turn a successful upload into a duplicate on rerun.
+      - name: Remove job-scoped macOS signing keychain before submission
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1' && env.APPLE_KEYCHAIN_PATH != ''
+        shell: bash
+        run: |
+          security delete-keychain "$APPLE_KEYCHAIN_PATH"
+          echo "APPLE_KEYCHAIN_PATH=" >> "$GITHUB_ENV"
+
+      - name: Install SHA-256-verified ASC CLI
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1' && env.APPLE_NOTARIZATION_PROVIDER == 'asc'
+        run: node scripts/prepare-asc-cli.ts --arch ${{ matrix.arch }}
+
+      - name: Submit signed DMG without waiting
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
+        run: node scripts/macos-notarization.ts submit --target ${{ matrix.target }}
+        env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
+
+      - name: Upload notarization handoff
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
+        with:
+          name: ${{ matrix.notarizationArtifact }}
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app.tar.gz.sig
+            target/notarization/${{ matrix.target }}.json
+          if-no-files-found: error
 
       - name: Bundle application (Windows)
         if: runner.os == 'Windows'
@@ -385,22 +410,111 @@ jobs:
       # Content, architecture, manifest, deep-link, materialization, signing,
       # and checksum checks run once for every format in this matrix row.
       - name: Verify complete native release set
+        if: runner.os != 'macOS' || env.APPLE_SIGNING_CONFIGURED == '0'
         run: node scripts/verify-release-set.ts --target ${{ matrix.target }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
 
       - name: Upload bundle artifact
+        if: runner.os != 'macOS' || env.APPLE_SIGNING_CONFIGURED == '0'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.paths }}
           if-no-files-found: error
 
-      - name: Remove job-scoped macOS signing keychain
+      - name: Remove remaining job-scoped macOS signing keychain
         if: runner.os == 'macOS' && always() && env.APPLE_KEYCHAIN_PATH != ''
         shell: bash
-        run: security delete-keychain "$APPLE_KEYCHAIN_PATH"
+        run: |
+          if ! security delete-keychain "$APPLE_KEYCHAIN_PATH"; then
+            echo "::warning::failed to remove ephemeral signing keychain; runner teardown will discard it"
+          fi
+
+  # The build job above succeeds as soon as Apple has accepted each upload and
+  # persists its Submission ID with the exact DMG hash. This bounded job only
+  # polls that ID. If Apple remains In Progress, use "Re-run failed jobs": the
+  # successful build matrix is not repeated, so no duplicate is submitted.
+  notarize-macos:
+    name: Notarize macOS ${{ matrix.arch }}
+    if: >-
+      !cancelled() &&
+      needs.release-plan.result == 'success' &&
+      needs.build.result == 'success'
+    needs: [build, release-plan]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-plan.outputs.macos_notarization) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+
+      - name: Detect macOS signing configuration
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
+        run: node scripts/detect-macos-signing.ts
+
+      - name: Download notarization handoff
+        if: env.APPLE_SIGNING_CONFIGURED == '1'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
+        with:
+          name: ${{ matrix.handoffArtifact }}
+          path: target
+
+      - name: Install SHA-256-verified ASC CLI
+        if: env.APPLE_SIGNING_CONFIGURED == '1' && env.APPLE_NOTARIZATION_PROVIDER == 'asc'
+        run: node scripts/prepare-asc-cli.ts --arch ${{ matrix.arch }}
+
+      - name: Wait for the recorded Apple submission
+        if: env.APPLE_SIGNING_CONFIGURED == '1'
+        timeout-minutes: 25
+        run: node scripts/macos-notarization.ts wait --target ${{ matrix.target }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
+          DSH_NOTARIZATION_WAIT_MINUTES: "20"
+          DSH_NOTARIZATION_POLL_SECONDS: "60"
+
+      - name: Verify accepted and stapled release set
+        if: env.APPLE_SIGNING_CONFIGURED == '1'
+        run: node scripts/verify-release-set.ts --target ${{ matrix.target }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+
+      - name: Upload final macOS artifact
+        if: env.APPLE_SIGNING_CONFIGURED == '1'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.paths }}
+          if-no-files-found: error
+
+      - name: Upload notarization diagnostics
+        if: failure() && env.APPLE_SIGNING_CONFIGURED == '1'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
+        with:
+          name: dsh-macos-notarization-diagnostics-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: target/notarization
+          if-no-files-found: ignore
 
   build-msix:
     name: Build MSIX ${{ matrix.arch }}
@@ -622,8 +736,8 @@ jobs:
 
   macos-deep-link-smoke:
     name: macOS deep-link installer smoke
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' }}
-    needs: [build]
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' && needs.notarize-macos.result == 'success' }}
+    needs: [build, notarize-macos]
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -708,7 +822,7 @@ jobs:
     # soak is a publish gate: a heartbeat regression must surface before
     # release, and the 5-minute soak overlaps the (much longer) platform
     # builds, so waiting on it adds no wall time.
-    needs: [build, build-msix, soak, tag-gate, windows-deep-link-smoke, windows-msi-smoke, macos-deep-link-smoke, preset-download-contract]
+    needs: [build, notarize-macos, build-msix, soak, tag-gate, windows-deep-link-smoke, windows-msi-smoke, macos-deep-link-smoke, preset-download-contract]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

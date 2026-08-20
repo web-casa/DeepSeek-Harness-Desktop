@@ -1,6 +1,7 @@
 // Conditional signing verification for release artifacts.
 //   --bundle nsis  →  Authenticode status of the Windows installer
 //   --bundle dmg   →  codesign/spctl/stapler on the .dmg artifact
+//   --bundle dmg --phase pre-notarization → distribution signature only
 //
 // Policy (fail-closed where it matters):
 //   * signing secrets present (APPLE_CERTIFICATE / WINDOWS_CERTIFICATE) →
@@ -17,6 +18,8 @@
 // out of scope here — it signs update metadata, not the installer.
 
 import { spawnSync } from "node:child_process";
+import { lstatSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { repoRoot, fail, ok, info } from "./lib/common.ts";
 import { expectedSigned, parseAuthenticode, toolRan, type Env } from "./lib/signing.ts";
 import {
@@ -29,10 +32,34 @@ function bundleArgValue(): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
+function phaseArgValue(): "final" | "pre-notarization" {
+  const i = process.argv.indexOf("--phase");
+  const value = i >= 0 ? process.argv[i + 1] : "final";
+  if (value !== "final" && value !== "pre-notarization") {
+    fail("--phase must be final or pre-notarization");
+  }
+  return value;
+}
+
 function findArtifact(bundle: "nsis" | "msi" | "dmg"): string {
   const candidates = bundleArtifactCandidates(repoRoot, bundle);
   if (candidates.length !== 1) {
     fail(`expected exactly one ${bundle} artifact, found: ${candidates.join(", ") || "none"}`);
+  }
+  return candidates[0];
+}
+
+function findMacApp(): string {
+  const directory = join(repoRoot, "target", "release", "bundle", "macos");
+  const candidates = readdirSync(directory)
+    .filter((name) => name.endsWith(".app"))
+    .map((name) => join(directory, name));
+  if (candidates.length !== 1) {
+    fail(`expected exactly one macOS app bundle, found: ${candidates.join(", ") || "none"}`);
+  }
+  const metadata = lstatSync(candidates[0]);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    fail("macOS app bundle must be a real directory, not a symlink");
   }
   return candidates[0];
 }
@@ -53,19 +80,39 @@ function assertToolRan(res: { status: number | null; error?: Error }, what: stri
   }
 }
 
-function verifyDmg(dmg: string, expectSigned: boolean): void {
+function verifyDmg(
+  dmg: string,
+  expectSigned: boolean,
+  phase: "final" | "pre-notarization",
+): void {
   if (expectSigned) {
     // Gatekeeper's own checks against the shipped artifact: spctl walks the
     // dmg's inner signature chain, stapler confirms the notarization ticket.
     run("codesign", ["--verify", "--strict", dmg], true, "codesign verify");
+    if (phase === "pre-notarization") {
+      run(
+        "codesign",
+        ["--verify", "--deep", "--strict", "--verbose=2", findMacApp()],
+        true,
+        "nested app codesign verify",
+      );
+      const stapler = spawnSync("xcrun", ["stapler", "validate", dmg], { encoding: "utf8" });
+      assertToolRan(stapler, "stapler validate");
+      if (stapler.status === 0) {
+        fail("pre-notarization DMG already has a stapled ticket; refusing stale build output");
+      }
+      ok("macOS DMG distribution signature verified before notarization");
+      return;
+    }
     run("spctl", ["--assess", "--type", "open", "--context", "context:primary-signature", "-vv", dmg], true, "spctl assess");
-    run("stapler", ["validate", dmg], true, "stapler validate");
+    run("xcrun", ["stapler", "validate", dmg], true, "stapler validate");
     ok("macOS DMG signature + notarization verified");
   } else {
+    if (phase !== "final") fail("pre-notarization verification requires Apple signing");
     // Unsigned build: notarization must be ABSENT. (The bundler ad-hoc signs
     // the inner .app; that is not a distribution signature and must not be
     // mistaken for one — stapler is the discriminator.)
-    const res = spawnSync("stapler", ["validate", dmg], { encoding: "utf8" });
+    const res = spawnSync("xcrun", ["stapler", "validate", dmg], { encoding: "utf8" });
     assertToolRan(res, "stapler validate");
     if (res.status === 0) {
       fail("unsigned build is notarized — signing state is inconsistent");
@@ -153,8 +200,12 @@ if (bundleType !== "nsis" && bundleType !== "msi" && bundleType !== "dmg") {
 }
 
 const expect = expectedSigned(bundleType, process.env);
+const phase = phaseArgValue();
+if (phase === "pre-notarization" && bundleType !== "dmg") {
+  fail("pre-notarization phase is only valid for DMG artifacts");
+}
 if (bundleType === "dmg") {
-  verifyDmg(findArtifact("dmg"), expect);
+  verifyDmg(findArtifact("dmg"), expect, phase);
 } else {
   verifyAuthenticode(findArtifact(bundleType), expect);
 }

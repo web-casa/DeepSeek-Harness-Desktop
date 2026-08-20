@@ -2,6 +2,7 @@ import { fail, ok } from "./lib/common.ts";
 import {
   NATIVE_RELEASE_TARGETS,
   githubNativeMatrix,
+  githubMacosNotarizationMatrix,
   githubMsixMatrix,
   releasePlanProblems,
 } from "./lib/release-artifacts.ts";
@@ -15,6 +16,8 @@ if (process.argv.includes("--github-matrix")) {
   process.stdout.write(JSON.stringify(githubNativeMatrix()));
 } else if (process.argv.includes("--github-msix-matrix")) {
   process.stdout.write(JSON.stringify(githubMsixMatrix()));
+} else if (process.argv.includes("--github-macos-notarization-matrix")) {
+  process.stdout.write(JSON.stringify(githubMacosNotarizationMatrix()));
 } else {
   for (const target of NATIVE_RELEASE_TARGETS) {
     console.log(`${target.id}: ${target.bundles.join(", ")} (${target.os})`);

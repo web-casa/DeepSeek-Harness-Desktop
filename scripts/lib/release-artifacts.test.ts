@@ -6,6 +6,7 @@ import {
   NATIVE_RELEASE_TARGETS,
   STORE_MSIX_TARGETS,
   githubNativeMatrix,
+  githubMacosNotarizationMatrix,
   githubMsixMatrix,
   releasePlanProblems,
 } from "./release-artifacts.ts";
@@ -28,6 +29,19 @@ test("native matrix uses current architecture-specific hosted runners", () => {
     String(candidate.target).startsWith("macos-"),
   )) {
     assert.equal(row.tauriBundles, "dmg,app");
+  }
+});
+
+test("macOS notarization handoff is private and derived from the native matrix", () => {
+  const rows = githubMacosNotarizationMatrix().include;
+  assert.deepEqual(
+    rows.map((row) => row.target),
+    ["macos-arm64", "macos-x64"],
+  );
+  for (const row of rows) {
+    assert.match(String(row.handoffArtifact), /^dsh-macos-notarization-/);
+    assert.doesNotMatch(String(row.handoffArtifact), /^deepseek-harness-desktop-/);
+    assert.match(String(row.artifact), /^deepseek-harness-desktop-macos-/);
   }
 });
 
@@ -71,7 +85,7 @@ test("both reusable quality jobs checkout the requested release revision", () =>
   assert.equal(workflow.split(exactRef).length - 1, 2);
 });
 
-test("macOS release signs arbitrary runtime code before the outer app", () => {
+test("macOS release signs runtime, uploads once, then waits in a separate job", () => {
   const workflow = readFileSync(
     new URL("../../.github/workflows/release.yml", import.meta.url),
     "utf8",
@@ -79,25 +93,44 @@ test("macOS release signs arbitrary runtime code before the outer app", () => {
   const importIndex = workflow.indexOf("run: node scripts/import-apple-certificate.ts");
   const nestedIndex = workflow.indexOf("run: node scripts/sign-macos-runtime.ts");
   const postSignSmokeIndex = workflow.indexOf("name: Runtime smoke (post-sign)");
-  const bundleIndex = workflow.indexOf("name: Bundle application (macOS, signed and notarized)");
+  const bundleIndex = workflow.indexOf("name: Bundle application (macOS, signed; notarization deferred)");
+  const preVerifyIndex = workflow.indexOf("name: Verify signed DMG before notarization");
+  const preSubmitCleanupIndex = workflow.indexOf(
+    "name: Remove job-scoped macOS signing keychain before submission",
+  );
+  const submitIndex = workflow.indexOf("name: Submit signed DMG without waiting");
+  const handoffIndex = workflow.indexOf("name: Upload notarization handoff");
+  const waitJobIndex = workflow.indexOf("notarize-macos:");
+  const waitIndex = workflow.indexOf("name: Wait for the recorded Apple submission");
   const windowsIndex = workflow.indexOf("name: Bundle application (Windows)");
-  const cleanupIndex = workflow.indexOf("name: Remove job-scoped macOS signing keychain");
+  const cleanupIndex = workflow.indexOf("name: Remove remaining job-scoped macOS signing keychain");
   assert.equal(importIndex > 0, true);
   assert.equal(nestedIndex > importIndex, true);
   assert.equal(postSignSmokeIndex > nestedIndex, true);
   assert.equal(bundleIndex > postSignSmokeIndex, true);
+  assert.equal(preVerifyIndex > bundleIndex, true);
+  assert.equal(preSubmitCleanupIndex > preVerifyIndex, true);
+  assert.equal(submitIndex > preSubmitCleanupIndex, true);
+  assert.equal(submitIndex > bundleIndex, true);
+  assert.equal(handoffIndex > submitIndex, true);
+  assert.equal(waitJobIndex > handoffIndex, true);
+  assert.equal(waitIndex > waitJobIndex, true);
   assert.equal(cleanupIndex > bundleIndex, true);
-  assert.match(workflow, /run: node scripts\/build-macos-release\.ts/);
+  assert.match(workflow, /run: node scripts\/macos-notarization\.ts submit/);
+  assert.match(workflow, /run: node scripts\/macos-notarization\.ts wait/);
 
   // Tauri must use the already-imported identity. Passing the PKCS#12 again
   // creates a separate process-scoped keychain that the nested signer cannot
   // access and makes the two signing paths needlessly diverge.
-  const signedBundleStep = workflow.slice(bundleIndex, windowsIndex);
+  const signedBundleStep = workflow.slice(bundleIndex, preVerifyIndex);
   assert.equal(signedBundleStep.includes("APPLE_CERTIFICATE:"), false);
+  assert.equal(signedBundleStep.includes("APPLE_ID:"), false);
+  assert.equal(signedBundleStep.includes("APPLE_PASSWORD:"), false);
   const importer = readFileSync(
     new URL("../import-apple-certificate.ts", import.meta.url),
     "utf8",
   );
   assert.equal(importer.includes("APPLE_SIGNING_IDENTITY=${identity}"), true);
   assert.equal(workflow.slice(cleanupIndex).includes("always()"), true);
+  assert.equal(workflow.slice(cleanupIndex).includes("::warning::"), true);
 });
