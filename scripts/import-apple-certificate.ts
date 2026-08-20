@@ -58,10 +58,6 @@ const certificatePath = join(runnerTemp, `dsh-signing-${nonce}.p12`);
 const keychainPath = join(runnerTemp, `dsh-signing-${nonce}.keychain-db`);
 let keychainCreated = false;
 
-// Defense in depth if a future command starts echoing its arguments.
-console.log(`::add-mask::${certificatePassword}`);
-console.log(`::add-mask::${keychainPassword}`);
-
 try {
   writeFileSync(certificatePath, certificate, { mode: 0o600, flag: "wx" });
   chmodSync(certificatePath, 0o600);
