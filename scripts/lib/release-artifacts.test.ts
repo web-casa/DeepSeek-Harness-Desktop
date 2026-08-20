@@ -101,6 +101,40 @@ test("Windows installer smoke searches the preserved artifact tree exactly", () 
   assert.equal(workflow.split("$installers.Count -ne 1").length - 1, 2);
 });
 
+test("Windows installer smoke can safely reuse one completed Release run", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /windows_smoke_source_run_id:/);
+  assert.match(workflow, /actions: read/);
+  assert.match(
+    workflow,
+    /source_workflow" != "\.github\/workflows\/release\.yml"/,
+  );
+  assert.match(
+    workflow,
+    /source_status" != "completed"/,
+  );
+  assert.match(
+    workflow,
+    /select\(\.name == "deepseek-harness-desktop-windows-x64" and \.expired == false\)/,
+  );
+  const sourceRun =
+    "run-id: ${{ github.event.inputs.windows_smoke_source_run_id || github.run_id }}";
+  assert.equal(workflow.split(sourceRun).length - 1, 2);
+  assert.equal(
+    workflow.split("needs: [build, windows-smoke-source]").length - 1,
+    2,
+  );
+  assert.equal(
+    workflow.split(
+      "if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''",
+    ).length - 1,
+    3,
+  );
+});
+
 test("macOS release signs runtime, uploads once, then waits in a separate job", () => {
   const workflow = readFileSync(
     new URL("../../.github/workflows/release.yml", import.meta.url),

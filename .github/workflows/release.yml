@@ -14,11 +14,16 @@ on:
         required: false
         default: code
         description: "Public Cordis preset slug that must return a direct ZIP response."
+      windows_smoke_source_run_id:
+        type: string
+        required: false
+        description: "Completed Release run ID whose Windows x64 artifact should be smoke-tested without rebuilding."
 
-# Least privilege baseline for every job; only the `release` job escalates
-# (contents: write) to publish the GitHub Release. Also covers the new
-# build-msix job (CodeQL missing-workflow-permissions).
+# Read-only baseline for every job. Cross-run Windows smoke needs Actions
+# artifact access; only the `release` job escalates contents to write when it
+# publishes a GitHub Release.
 permissions:
+  actions: read
   contents: read
 
 # Never run two expensive release builds for the same ref concurrently. A
@@ -30,6 +35,7 @@ concurrency:
 jobs:
   release-plan:
     name: Validate release matrix
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -60,6 +66,7 @@ jobs:
   # build and installer evidence for diagnosis.
   preset-download-contract:
     name: Cordis preset direct ZIP contract
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -78,6 +85,7 @@ jobs:
 
   quality:
     name: Quality gates
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''
     uses: ./.github/workflows/quality.yml
     with:
       checkout_ref: ${{ github.event.inputs.tag || github.ref }}
@@ -589,10 +597,69 @@ jobs:
             target/msix/*_${{ matrix.arch }}.msix.sha256
           if-no-files-found: error
 
+  windows-smoke-source:
+    name: Validate Windows smoke source run
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.windows_smoke_source_run_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require a completed same-repository Release artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.inputs.windows_smoke_source_run_id }}
+        run: |
+          if [[ ! "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::windows_smoke_source_run_id must be a positive numeric Actions run ID"
+            exit 1
+          fi
+
+          source_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID")"
+          source_repository="$(jq -r '.head_repository.full_name // ""' <<< "$source_run")"
+          source_workflow="$(jq -r '.path // ""' <<< "$source_run")"
+          source_status="$(jq -r '.status // ""' <<< "$source_run")"
+          source_sha="$(jq -r '.head_sha // ""' <<< "$source_run")"
+
+          if [[ "$source_repository" != "$GITHUB_REPOSITORY" ]]; then
+            echo "::error::source run belongs to $source_repository, expected $GITHUB_REPOSITORY"
+            exit 1
+          fi
+          if [[ "$source_workflow" != ".github/workflows/release.yml" ]]; then
+            echo "::error::source run used $source_workflow, expected .github/workflows/release.yml"
+            exit 1
+          fi
+          if [[ "$source_status" != "completed" ]]; then
+            echo "::error::source run is $source_status; wait for it to complete before reusing artifacts"
+            exit 1
+          fi
+
+          artifact_count="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name == "deepseek-harness-desktop-windows-x64" and .expired == false)] | length')"
+          if [[ "$artifact_count" != "1" ]]; then
+            echo "::error::expected one unexpired deepseek-harness-desktop-windows-x64 artifact, got $artifact_count"
+            exit 1
+          fi
+
+          echo "Reusing Windows x64 artifact from Release run $SOURCE_RUN_ID ($source_sha)"
+
   windows-deep-link-smoke:
     name: Windows deep-link installer smoke
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' }}
-    needs: [build]
+    if: >-
+      ${{
+        always() &&
+        (
+          (
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.windows_smoke_source_run_id != '' &&
+            needs.windows-smoke-source.result == 'success'
+          ) ||
+          (
+            (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) &&
+            github.event.inputs.windows_smoke_source_run_id == '' &&
+            needs.build.result == 'success'
+          )
+        )
+      }}
+    needs: [build, windows-smoke-source]
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -600,6 +667,9 @@ jobs:
         with:
           name: deepseek-harness-desktop-windows-x64
           path: artifacts
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.windows_smoke_source_run_id || github.run_id }}
 
       - name: Silent install NSIS
         shell: pwsh
@@ -696,8 +766,23 @@ jobs:
 
   windows-msi-smoke:
     name: Windows MSI installer smoke
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' }}
-    needs: [build]
+    if: >-
+      ${{
+        always() &&
+        (
+          (
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.windows_smoke_source_run_id != '' &&
+            needs.windows-smoke-source.result == 'success'
+          ) ||
+          (
+            (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) &&
+            github.event.inputs.windows_smoke_source_run_id == '' &&
+            needs.build.result == 'success'
+          )
+        )
+      }}
+    needs: [build, windows-smoke-source]
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -705,6 +790,9 @@ jobs:
         with:
           name: deepseek-harness-desktop-windows-x64
           path: artifacts
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.windows_smoke_source_run_id || github.run_id }}
 
       - name: Silent install MSI
         shell: pwsh
