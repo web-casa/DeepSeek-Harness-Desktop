@@ -6,9 +6,11 @@
 // dsharness deep-link registration, and a fully materialized Harness tree.
 
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -48,6 +50,14 @@ const config = JSON.parse(
 };
 const productName = config.productName ?? "DSH Desktop";
 const appIdentifier = config.identifier ?? "com.yeagoo.dsh-desktop";
+
+function commandOutput(...values: readonly (string | null | undefined)[]): string {
+  return values
+    .map((value) => value?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n")
+    .slice(-4000);
+}
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -95,10 +105,53 @@ function run(
   });
   if (result.status !== 0) {
     throw new Error(
-      `${what} failed (exit ${result.status}, ${result.error?.message ?? "no spawn error"}):\n${(result.stderr ?? result.stdout ?? "").trim().slice(-4000)}`,
+      `${what} failed (exit ${result.status}, ${result.error?.message ?? "no spawn error"}):\n${commandOutput(result.stdout, result.stderr)}`,
     );
   }
   return result.stdout ?? "";
+}
+
+function runToFile(command: string, args: string[], output: string, what: string): void {
+  const outputFd = openSync(output, "w", 0o600);
+  try {
+    const result = spawnSync(command, args, {
+      encoding: "utf8",
+      maxBuffer: 128 * 1024 * 1024,
+      stdio: ["ignore", outputFd, "pipe"],
+    });
+    if (result.status !== 0) {
+      throw new Error(
+        `${what} failed (exit ${result.status}, ${result.error?.message ?? "no spawn error"}):\n${commandOutput(result.stderr)}`,
+      );
+    }
+  } finally {
+    closeSync(outputFd);
+  }
+}
+
+function runFromFile(
+  command: string,
+  args: string[],
+  input: string,
+  what: string,
+  cwd: string,
+): void {
+  const inputFd = openSync(input, "r");
+  try {
+    const result = spawnSync(command, args, {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 128 * 1024 * 1024,
+      stdio: [inputFd, "pipe", "pipe"],
+    });
+    if (result.status !== 0) {
+      throw new Error(
+        `${what} failed (exit ${result.status}, ${result.error?.message ?? "no spawn error"}):\n${commandOutput(result.stdout, result.stderr)}`,
+      );
+    }
+  } finally {
+    closeSync(inputFd);
+  }
 }
 
 function checkBinaryType(
@@ -469,24 +522,31 @@ function verifyRpm(artifact: string, arch: ReleaseArch): void {
   if (packageArch !== expectedArch) {
     throw new Error(`RPM architecture ${packageArch} != expected ${expectedArch}`);
   }
-  const extraction = join(tmpDir, `rpm-extract-${process.pid}`);
-  rmSync(extraction, { recursive: true, force: true });
+  const scratch = join(tmpDir, `rpm-extract-${process.pid}`);
+  const extraction = join(scratch, "root");
+  rmSync(scratch, { recursive: true, force: true });
   mkdirSync(extraction, { recursive: true });
   try {
-    run(
-      "bash",
-      [
-        "-o",
-        "pipefail",
-        "-c",
-        'rpm2cpio "$DSH_BUNDLE" | cpio -idm --quiet --no-absolute-filenames',
-      ],
-      "RPM extraction",
-      { cwd: extraction, env: { ...process.env, DSH_BUNDLE: artifact } },
+    run("rpm", ["-K", artifact], "RPM payload digest verification");
+
+    // Avoid `rpm2cpio | cpio`: on hosted Ubuntu 22.04 both commands can
+    // extract the complete payload yet the pipe intermittently exits 1.
+    // Materializing the intermediate stream reports each process separately
+    // and still fails closed on either conversion or extraction failure.
+    // Keep the archive outside the extraction root so an RPM entry named
+    // payload.cpio can neither collide with nor mutate the open input file.
+    const archive = join(scratch, "payload.cpio");
+    runToFile("rpm2cpio", [artifact], archive, "RPM payload conversion");
+    runFromFile(
+      "cpio",
+      ["-idm", "--quiet", "--no-absolute-filenames"],
+      archive,
+      "RPM payload extraction",
+      extraction,
     );
     verifyLinuxLayout(extraction, "usr", arch);
   } finally {
-    rmSync(extraction, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 
@@ -594,6 +654,11 @@ function verifyFlatpak(artifact: string, arch: ReleaseArch): void {
 }
 
 function runSelfTest(): void {
+  const diagnostic = commandOutput("stdout detail", "stderr detail");
+  if (diagnostic !== "stdout detail\nstderr detail") {
+    fail(`self-test: command diagnostics dropped a stream: ${diagnostic}`);
+  }
+
   const fixture = [
     "7-Zip 24.09 : Copyright",
     "",
@@ -628,7 +693,7 @@ function runSelfTest(): void {
     rmSync(executable, { force: true });
     rmSync(plain, { force: true });
   }
-  ok("self-test: bundle parser and executable checks pass");
+  ok("self-test: bundle parser, diagnostics, and executable checks pass");
 }
 
 if (process.argv.includes("--self-test")) {
