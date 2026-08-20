@@ -113,11 +113,16 @@ export interface ParsedNotarizationResponse {
   status: NotarizationStatus;
 }
 
-export function parseNotarizationResponse(
+interface RawNotarizationResponse {
+  submissionId: string;
+  statusValue: unknown;
+}
+
+function parseRawNotarizationResponse(
   provider: NotarizationProvider,
   json: string,
   expectedSubmissionId?: string,
-): ParsedNotarizationResponse {
+): RawNotarizationResponse {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -147,9 +152,37 @@ export function parseNotarizationResponse(
       `${provider} returned submission ${submissionId}, expected ${expectedSubmissionId}`,
     );
   }
+  return { submissionId, statusValue };
+}
+
+export function parseNotarizationResponse(
+  provider: NotarizationProvider,
+  json: string,
+  expectedSubmissionId?: string,
+): ParsedNotarizationResponse {
+  const { submissionId, statusValue } = parseRawNotarizationResponse(
+    provider,
+    json,
+    expectedSubmissionId,
+  );
   const status = normalizeNotarizationStatus(statusValue);
   if (status === null) throw new Error(`${provider} returned an unknown notarization status`);
   return { submissionId, status };
+}
+
+// A successful fire-and-forget upload is not a status response. In particular,
+// notarytool may return only `id`, `message`, and `path` until `--wait` is used.
+// Once a valid ID is present and the command exits successfully, persist it as
+// In Progress and let the separate status query determine the real state.
+export function parseNotarizationSubmissionResponse(
+  provider: NotarizationProvider,
+  json: string,
+): ParsedNotarizationResponse {
+  const { submissionId, statusValue } = parseRawNotarizationResponse(provider, json);
+  return {
+    submissionId,
+    status: normalizeNotarizationStatus(statusValue) ?? "In Progress",
+  };
 }
 
 export function isSubmissionId(value: string): boolean {

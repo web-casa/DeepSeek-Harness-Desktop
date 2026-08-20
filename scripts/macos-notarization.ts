@@ -27,6 +27,7 @@ import {
   notarizationPollBackoff,
   notarizationStateProblems,
   parseNotarizationResponse,
+  parseNotarizationSubmissionResponse,
   type NotarizationProvider,
   type NotarizationState,
   type NotarizationStatus,
@@ -310,7 +311,7 @@ async function submit(target: NativeReleaseTarget): Promise<void> {
   for (let attempt = 1; attempt <= SUBMIT_ATTEMPTS; attempt += 1) {
     const result = submitDmg(provider, dmg);
     if (result.status === 0) {
-      const response = parseNotarizationResponse(provider, result.stdout);
+      const response = parseNotarizationSubmissionResponse(provider, result.stdout);
       const state: NotarizationState = {
         schemaVersion: 1,
         target: target.id as `macos-${typeof target.arch}`,

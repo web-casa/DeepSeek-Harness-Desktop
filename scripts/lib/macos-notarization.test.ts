@@ -8,6 +8,7 @@ import {
   notarizationPollBackoff,
   notarizationStateProblems,
   parseNotarizationResponse,
+  parseNotarizationSubmissionResponse,
   resolveMacosSigningConfiguration,
 } from "./macos-notarization.ts";
 
@@ -75,6 +76,20 @@ test("normalizes and parses ASC and notarytool responses", () => {
   assert.deepEqual(
     parseNotarizationResponse("notarytool", JSON.stringify({ id, status: "Accepted" }), id),
     { submissionId: id, status: "Accepted" },
+  );
+  assert.deepEqual(
+    parseNotarizationSubmissionResponse(
+      "notarytool",
+      JSON.stringify({ id, message: "Successfully uploaded file", path: "/tmp/App.dmg" }),
+    ),
+    { submissionId: id, status: "In Progress" },
+  );
+  assert.deepEqual(
+    parseNotarizationSubmissionResponse(
+      "notarytool",
+      JSON.stringify({ id, status: "Uploaded", message: "Successfully uploaded file" }),
+    ),
+    { submissionId: id, status: "In Progress" },
   );
   assert.throws(
     () => parseNotarizationResponse("notarytool", JSON.stringify({ id, status: "Mystery" })),
