@@ -18,6 +18,15 @@ on:
         type: string
         required: false
         description: "Completed Release run ID whose Windows x64 artifact should be smoke-tested without rebuilding."
+      windows_smoke_installer:
+        type: choice
+        required: false
+        default: all
+        options:
+          - all
+          - nsis
+          - msi
+        description: "Installer smoke to run when reusing a completed Release run."
 
 # Read-only baseline for every job. Cross-run Windows smoke needs Actions
 # artifact access; only the `release` job escalates contents to write when it
@@ -650,6 +659,7 @@ jobs:
           (
             github.event_name == 'workflow_dispatch' &&
             github.event.inputs.windows_smoke_source_run_id != '' &&
+            github.event.inputs.windows_smoke_installer != 'msi' &&
             needs.windows-smoke-source.result == 'success'
           ) ||
           (
@@ -773,6 +783,7 @@ jobs:
           (
             github.event_name == 'workflow_dispatch' &&
             github.event.inputs.windows_smoke_source_run_id != '' &&
+            github.event.inputs.windows_smoke_installer != 'nsis' &&
             needs.windows-smoke-source.result == 'success'
           ) ||
           (
@@ -841,14 +852,23 @@ jobs:
           })
           if ($commands.Count -lt 1) { throw "MSI did not register dsharness" }
           foreach ($command in $commands) {
-            if ($command -notlike '*deepseek-harness-desktop.exe*' -or $command -notlike '*"%1"*') {
+            $match = [regex]::Match(
+              $command,
+              '^"([^"]+\.exe)"\s+"%1"$',
+              [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            if (-not $match.Success) {
               throw "invalid MSI protocol command: $command"
             }
-            $match = [regex]::Match($command, '^"([^"]*deepseek-harness-desktop\.exe)"')
-            if (-not $match.Success -or -not (Test-Path -LiteralPath $match.Groups[1].Value)) {
+            $registeredPath = $match.Groups[1].Value
+            if (-not (Test-Path -LiteralPath $registeredPath -PathType Leaf)) {
               throw "MSI protocol command does not point to an installed binary: $command"
             }
-            Write-Host "MSI installed $($match.Groups[1].Value)"
+            $installedBinary = Get-Item -LiteralPath $registeredPath
+            if ($installedBinary.Name -ine 'deepseek-harness-desktop.exe') {
+              throw "MSI protocol command points to unexpected executable $($installedBinary.FullName)"
+            }
+            Write-Host "MSI installed $($installedBinary.FullName)"
           }
 
   macos-deep-link-smoke:

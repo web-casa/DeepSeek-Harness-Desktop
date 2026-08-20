@@ -110,6 +110,7 @@ test("Windows installer smoke can safely reuse one completed Release run", () =>
     "utf8",
   );
   assert.match(workflow, /windows_smoke_source_run_id:/);
+  assert.match(workflow, /windows_smoke_installer:/);
   assert.match(workflow, /actions: read/);
   assert.match(
     workflow,
@@ -130,11 +131,35 @@ test("Windows installer smoke can safely reuse one completed Release run", () =>
     workflow.split("needs: [build, windows-smoke-source]").length - 1,
     2,
   );
+  assert.match(
+    workflow,
+    /github\.event\.inputs\.windows_smoke_installer != 'msi'/,
+  );
+  assert.match(
+    workflow,
+    /github\.event\.inputs\.windows_smoke_installer != 'nsis'/,
+  );
   assert.equal(
     workflow.split(
       "if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''",
     ).length - 1,
     3,
+  );
+});
+
+test("MSI smoke accepts a valid 8.3 registry path but verifies the real file", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /Test-Path -LiteralPath \$registeredPath -PathType Leaf/);
+  assert.match(
+    workflow,
+    /\$installedBinary\.Name -ine 'deepseek-harness-desktop\.exe'/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /\$command -notlike '\*deepseek-harness-desktop\.exe\*'/,
   );
 });
 
