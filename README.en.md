@@ -9,16 +9,12 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Version | v0.2.8 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · unsigned preview · [中文](README.md) |
+| Version | v0.2.9 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
 
-> ⚠️ **macOS users**: the Apple developer certificate is still being
-> applied for, so the app is unsigned. If Gatekeeper blocks the first
-> launch, run:
-> ```bash
-> xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
-> ```
-> (prefix with `sudo` if it reports a permission error.) This step should
-> disappear in the next release once signing + notarization land.
+> **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
+> Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
+> Download only from this repository's Releases; if an official installer is
+> still blocked, preserve the diagnostics and report it in a repository issue.
 
 | Platform | GitHub Release packages |
 |---|---|
@@ -35,7 +31,7 @@ workflow artifacts. They are Store-signing inputs, not public sideload files.
 | | |
 |---|---|
 | 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app marketplace search/install; safe preset import/export |
-| 🔄 **Auto-updater** (Windows) | Update packages verified by an embedded minisign pubkey; macOS activates once signed + notarized |
+| 🔄 **Auto-updater** (Windows) | Update packages verified by an embedded minisign pubkey; macOS updater-manifest integration remains pending |
 | 💓 **Hung-process self-healing** | Heartbeat detects an unresponsive Harness and restarts it (backoff + cap) |
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |
 | 🔒 **Privacy defaults** | Session telemetry OFF; child env sanitized (NODE_OPTIONS, loader injection keys, …) |
@@ -160,11 +156,11 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Status: v0.2.8 in development (cordis.run deep-link install confirmation;
-  v0.2.4 is the current release, and the v0.2.3 draft is obsolete and will
-  not be published).
-- Known limits: unsigned (manual SmartScreen/Gatekeeper approval); macOS
-  updater pending signing; Linux packages currently have SHA-256 sidecars but
-  no separate package-repository signature.
+- Status: v0.2.9 release candidate, including multi-format installers, macOS
+  Developer ID signing/notarization, the Cordis v4 marketplace contract,
+  diagnostic resilience, and safe plugin recovery.
+- Known limits: Windows GitHub installers do not yet have Authenticode and may
+  trigger SmartScreen; the macOS updater manifest is not yet published; Linux
+  packages have SHA-256 sidecars but no separate package-repository signature.
 - License: MIT; the bundled Harness and every dependency license ship in
   `runtime/harness/licenses/`.

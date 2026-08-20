@@ -8,14 +8,11 @@
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| 版本 | v0.2.8 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · 未签名预览版 · [English](README.en.md) |
+| 版本 | v0.2.9 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · macOS 已签名/公证 · [English](README.en.md) |
 
-> ⚠️ **macOS 用户**：Apple 开发者证书仍在申请中，应用尚未签名。首次打开若被
-> Gatekeeper 拦截，请执行：
-> ```bash
-> xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
-> ```
-> （如提示权限不足，在命令前加 `sudo`。）预计下一版本完成签名+公证后不再需要此步骤。
+> **macOS 用户**：v0.2.9 起，DMG 使用 Developer ID Application 签名并经
+> Apple 公证、staple 与 Gatekeeper 复验。请只从本仓库 Releases 下载；若官方
+> 安装包仍被 Gatekeeper 拦截，请保留诊断信息并通过仓库 issue 报告。
 
 | 平台 | GitHub Release 安装包 |
 |---|---|
@@ -32,7 +29,7 @@
 | | |
 |---|---|
 | 🔌 **插件生态** | Cordis 插件体系随包携带；插件市场浏览/搜索/一键安装；预设安全导入导出；离线 `.tgz` 侧载 |
-| 🔄 **自动更新**（Windows） | 更新包由内嵌 minisign 公钥校验；macOS 待签名+公证后启用 |
+| 🔄 **自动更新**（Windows） | 更新包由内嵌 minisign 公钥校验；macOS 更新清单仍待发布接入 |
 | 💓 **挂死自愈** | 心跳检测 Harness「活着但无响应」并自动重启（退避+上限） |
 | 🛡️ **安全边界** | Harness 窗口零 IPC 权限；桌面命令仅授权本地窗口；环境消毒 |
 | 🔒 **隐私默认值** | 会话遥测默认关闭；子进程环境消毒（NODE_OPTIONS/loader 注入键等） |
@@ -154,6 +151,6 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 - CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发五个原生构建目标（Windows x64、macOS x64/arm64、Linux x64/arm64）及 Store MSIX x64/arm64，再经完整资产清单门禁发布 draft release + `latest.json`。
 - Microsoft Store：`v*` tag 同时构建 x64/arm64 MSIX（`build-msix` job，Store 模式关闭应用内更新并限制插件为 cordis.run 审核列表）。MSIX 产物作为 workflow artifact 下载后上传 Partner Center，不发布到 GitHub Release。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
-- 当前状态：v0.2.8 开发中（新增 cordis.run deep-link 一键安装确认；v0.2.4 为当前发布，v0.2.3 draft 作废不发布）。
-- 已知边界：未签名（SmartScreen/Gatekeeper 手动放行）；macOS 更新器待签名；Linux 包当前以 SHA-256 保护，尚无独立软件仓库签名。
+- 当前状态：v0.2.9 发布候选；包含多格式安装包、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复。
+- 已知边界：Windows GitHub 安装包尚未配置 Authenticode，可能触发 SmartScreen；macOS 更新清单尚未接入；Linux 包当前以 SHA-256 保护，尚无独立软件仓库签名。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。
