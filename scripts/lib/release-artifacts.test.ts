@@ -85,6 +85,22 @@ test("both reusable quality jobs checkout the requested release revision", () =>
   assert.equal(workflow.split(exactRef).length - 1, 2);
 });
 
+test("Windows installer smoke searches the preserved artifact tree exactly", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    workflow,
+    /Get-ChildItem -Path artifacts -Recurse -File -Filter '\*-setup\.exe'/,
+  );
+  assert.match(
+    workflow,
+    /Get-ChildItem -Path artifacts -Recurse -File -Filter '\*\.msi'/,
+  );
+  assert.equal(workflow.split("$installers.Count -ne 1").length - 1, 2);
+});
+
 test("macOS release signs runtime, uploads once, then waits in a separate job", () => {
   const workflow = readFileSync(
     new URL("../../.github/workflows/release.yml", import.meta.url),

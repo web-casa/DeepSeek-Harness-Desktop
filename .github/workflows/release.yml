@@ -604,8 +604,11 @@ jobs:
       - name: Silent install NSIS
         shell: pwsh
         run: |
-          $installer = Get-ChildItem artifacts/*-setup.exe | Select-Object -First 1
-          if (-not $installer) { throw "installer not found" }
+          $installers = @(Get-ChildItem -Path artifacts -Recurse -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one NSIS installer, got $($installers.Count)"
+          }
+          $installer = $installers[0]
           Write-Host "Installing $($installer.FullName)"
           $p = Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "installer exit $($p.ExitCode)" }
@@ -706,8 +709,11 @@ jobs:
       - name: Silent install MSI
         shell: pwsh
         run: |
-          $installer = Get-ChildItem artifacts/*.msi | Select-Object -First 1
-          if (-not $installer) { throw "MSI installer not found" }
+          $installers = @(Get-ChildItem -Path artifacts -Recurse -File -Filter '*.msi')
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one MSI installer, got $($installers.Count)"
+          }
+          $installer = $installers[0]
           $arguments = @('/i', $installer.FullName, '/qn', '/norestart')
           $process = Start-Process -FilePath msiexec.exe -ArgumentList $arguments -Wait -PassThru
           if ($process.ExitCode -notin @(0, 3010)) { throw "MSI installer exit $($process.ExitCode)" }
