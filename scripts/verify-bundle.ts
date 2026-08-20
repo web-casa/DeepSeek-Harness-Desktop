@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
+import { tmpdir as osTmpDir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { repoRoot, tmpDir, readManifest, fail, ok, info } from "./lib/common.ts";
 import { quarantinePresent, parseSltListing } from "./lib/bundle-checks.ts";
@@ -347,17 +348,30 @@ function findUniqueRuntimeRoot(root: string, extension: string): string {
 }
 
 function verifyMsi(artifact: string, arch: ReleaseArch): void {
-  const extraction = join(tmpDir, `msi-admin-${process.pid}`);
-  const log = join(tmpDir, `msi-admin-${process.pid}.log`);
+  // Keep the administrative-install root short. The bundled npm tree has
+  // legitimate 160+ character relative paths; putting it below the GitHub
+  // workspace can push msiexec over the traditional MAX_PATH limit and
+  // produce an otherwise opaque 1603.
+  const scratchRoot = process.env.RUNNER_TEMP?.trim() || osTmpDir();
+  const extraction = join(scratchRoot, `dsh-msi-${process.pid}`);
+  const log = join(scratchRoot, `dsh-msi-${process.pid}.log`);
   rmSync(extraction, { recursive: true, force: true });
   rmSync(log, { force: true });
   mkdirSync(extraction, { recursive: true });
   try {
-    run(
-      "msiexec",
-      ["/a", artifact, "/qn", `TARGETDIR=${extraction}`, "/l*v", log],
-      "MSI administrative extraction",
-    );
+    try {
+      run(
+        "msiexec",
+        ["/a", artifact, "/qn", `TARGETDIR=${extraction}`, "/l*v", log],
+        "MSI administrative extraction",
+      );
+    } catch (error) {
+      const logTail = existsSync(log)
+        ? readFileSync(log, "utf8").trim().slice(-12_000)
+        : "(msiexec did not create a log)";
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`${detail}\nmsiexec log tail:\n${logTail}`);
+    }
     const main = findUniqueFile(extraction, "deepseek-harness-desktop.exe", "MSI main executable");
     const runtime = findUniqueRuntimeRoot(extraction, ".exe");
     verifyRuntimeTree(main, runtime, "win32", arch);
