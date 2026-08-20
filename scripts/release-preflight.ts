@@ -19,6 +19,11 @@ import {
   assertNpmInAuditedRange,
 } from "./lib/common.ts";
 import { repositoryCommandContractProblems } from "./lib/command-contract.ts";
+import { releasePlanProblems } from "./lib/release-artifacts.ts";
+import {
+  appImageToolDefinitionProblems,
+} from "./lib/appimage-tools.ts";
+import { FLATPAK_ID, flatpakContractProblems, flatpakMetadataProblems } from "./lib/flatpak.ts";
 
 const PLATFORM_KEYS = ["win32-x64", "win32-arm64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
 // Case-insensitive: the checksums we publish are lowercase, but a manual edit
@@ -49,6 +54,24 @@ function cargoDepVersion(path: string, dep: string): string {
 }
 
 const manifest = readManifest();
+
+// --- deny: release packaging contract ------------------------------------
+const packagingProblems = [
+  ...releasePlanProblems(),
+  ...appImageToolDefinitionProblems("x64"),
+  ...appImageToolDefinitionProblems("arm64"),
+  ...flatpakContractProblems(),
+  ...flatpakMetadataProblems(
+    readFileSync(
+      join(repoRoot, "packaging", "flatpak", `${FLATPAK_ID}.metainfo.xml`),
+      "utf8",
+    ),
+  ),
+];
+if (packagingProblems.length > 0) {
+  fail(`release packaging contract drift:\n- ${packagingProblems.join("\n- ")}`);
+}
+ok("release matrix, AppImage inputs, Flatpak permissions, and Store separation aligned");
 
 // --- deny: command/capability contract ------------------------------------
 const commandContractProblems = repositoryCommandContractProblems(repoRoot);

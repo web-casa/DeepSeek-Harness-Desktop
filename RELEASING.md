@@ -1,6 +1,6 @@
 # RELEASING.md — 发布手册
 
-发布流程全自动：在 `main` 上打 `v*` tag 即触发完整流水线（质量门 → 双平台
+发布流程全自动：在 `main` 上打 `v*` tag 即触发完整流水线（质量门 → 五个原生目标
 构建 → 内容/签名验证 → draft release）。人工职责只有四步：版本对齐、打 tag、
 审阅 draft、Publish。
 
@@ -38,13 +38,18 @@ git push origin v0.2.1
 1. `tag-gate`：tag 提交必须是 `origin/main` 祖先。
 2. `quality`（reusable）：fmt / clippy（含 Windows 宿主）/ nextest /
    llvm-cov / deny / vet / 脚本类型与 self-test。
-3. `build` ×2（windows-x64 NSIS、macos-arm64 DMG）：下载 Node（SHA-256）
+3. `build` ×5（Windows x64 EXE+MSI、macOS x64/arm64 DMG、Linux
+   x64/arm64 AppImage+DEB+RPM+Flatpak）：下载 Node（SHA-256）
    → prepare-harness（441+ 许可证 + 零链接断言）→ 构建 sidecar → 冒烟 →
-   `tauri build` → **verify-bundle**（二进制类型、必需文件、scoped 许可证
+   `tauri build`（Flatpak 从同一 DEB 导入）→ **verify-bundle**（包元数据、
+   二进制架构、必需文件、scoped 许可证
    绊线、零符号链接、执行位、无 quarantine）→ **verify-signing**（见下）→
    SHA-256 checksum → 上传制品。
-4. `release`：tag 绑定 preflight（`--expect-tag`）→ 下载制品 →
-   **draft** GitHub Release（`files: artifacts/**/*`）。
+4. `build-msix` ×2：原生 Windows x64/arm64 Store 包、静态内容检查与 SHA-256；
+   只保留为 Partner Center workflow artifact。
+5. `release`：tag 绑定 preflight（`--expect-tag`）→ 只下载
+   `deepseek-harness-desktop-*` 公开制品 → 校验 12 个安装包、12 个 checksum、
+   1 个 Windows updater signature 且没有 MSIX/未知文件 → **draft** GitHub Release。
 
 ### 3a. cordis.run preset 直返 ZIP 契约
 
@@ -61,7 +66,7 @@ git push origin v0.2.1
 
 ### 3b. Microsoft Store MSIX 构建
 
-`build-msix` job 与双平台 build 并行，仅发布/演练时运行：
+`build-msix` job 与五目标 native build 并行，仅发布/演练时运行：
 
 - `STORE_BUILD=1`：Store 版关闭应用内更新，插件安装只允许
   `src-tauri/store-curated-plugins.json` 中的 cordis.run 审核列表。
@@ -69,7 +74,8 @@ git push origin v0.2.1
   对应 Node、prepare-harness、构建 sidecar，再运行
   `pnpm tauri:windows:build`；`scripts/verify-msix.ts` 校验包身份、协议与
   运行时内容。
-- 产物上传为 workflow artifact `dsh-desktop-store-msix`，**不发布到 GitHub
+- 产物按架构上传为 workflow artifact `dsh-desktop-store-msix-x64` /
+  `dsh-desktop-store-msix-arm64`（各带 `.sha256`），**不发布到 GitHub
   Release**；维护者下载后在 Partner Center 上传 `.msix` 包提交 Store。
 - Store 产品身份固定在
   `src-tauri/gen/windows/AppxManifest.xml.template` 与 `bundle.config.json`；
@@ -92,17 +98,26 @@ Desktop 工作区直接改为公开发布。
 
 ## 4. 签名状态（verify-signing 语义）
 
-- 未配置 `APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE` secrets → 构建为
+- 未配置 `APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE` secrets → Windows/macOS 构建为
   **有意未签名**，流水线断言「确实未签名/未公证」（warn 级，防状态漂移），
   照常发布；README/SECURITY 已如实披露放行方式。
-- 配置了 secrets → **强制验签**（macOS: codesign --verify --deep --strict +
+- Windows Authenticode 需同时配置 Base64 PFX `WINDOWS_CERTIFICATE`、
+  `WINDOWS_CERTIFICATE_PASSWORD` 与证书机构提供的 `WINDOWS_TIMESTAMP_URL`；缺少
+  后两项会在构建前失败。macOS 需配置 `APPLE_CERTIFICATE`、
+  `APPLE_CERTIFICATE_PASSWORD` 及公证凭据（`APPLE_ID` / `APPLE_PASSWORD` /
+  `APPLE_TEAM_ID`）。
+- 配置了证书 secrets → **强制验签**（macOS: codesign --verify --deep --strict +
   spctl --assess + stapler validate；Windows: Authenticode == Valid），
-  任一失败即阻断发布（fail-closed，防假签名）。
+  任一失败即阻断发布（fail-closed，防假签名）。Linux 安装包当前没有独立
+  软件仓库签名，统一由发布资产的 SHA-256 sidecar 与完整清单门禁保护。
 
 ## 5. 审阅并 Publish
 
-1. 打开 releases 页的 draft `vX.Y.Z`：核对 4 个资产
-   （`*.exe`/`*.dmg` + 各自 `.sha256`）与体积量级。
+1. 打开 releases 页的 draft `vX.Y.Z`：核对 12 个公开安装包
+   （EXE、MSI、双架构 DMG、双架构 AppImage/DEB/RPM/Flatpak）、各自
+   `.sha256`、1 个 Windows updater signature 与体积量级；确认没有 `.msix`。
+   macOS 两个 job 会在本地强制检查各自 `.app.tar.gz.sig` 已生成，但在 updater
+   尚未启用期间不上传这些同名、无对应公开更新包的 build-only tripwire。
 2. 抽查 checksum：`shasum -a 256 <下载文件>` 对照 `.sha256` 内容。
 3. 手动下载安装验证（未签名构建：确认 SmartScreen/Gatekeeper 放行路径可走通）。
 4. 点 **Publish release**。

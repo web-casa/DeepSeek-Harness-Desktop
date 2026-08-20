@@ -28,6 +28,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-plan:
+    name: Validate release matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      native: ${{ steps.matrix.outputs.native }}
+      msix: ${{ steps.matrix.outputs.msix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+
+      - name: Emit reviewed native and Store matrices
+        id: matrix
+        run: |
+          echo "native=$(node scripts/release-plan.ts --github-matrix)" >> "$GITHUB_OUTPUT"
+          echo "msix=$(node scripts/release-plan.ts --github-msix-matrix)" >> "$GITHUB_OUTPUT"
+
   # The desktop deliberately refuses CDN redirects for remote preset archives.
   # Keep this independent of native builds: a backend contract regression must
   # block tag publication, while workflow_dispatch can still collect Windows
@@ -53,6 +75,8 @@ jobs:
   quality:
     name: Quality gates
     uses: ./.github/workflows/quality.yml
+    with:
+      checkout_ref: ${{ github.event.inputs.tag || github.ref }}
 
   # Refuse to spend two platform builds (and a publish) on a tag that can
   # never be published: the tag commit must be an ancestor of main. The
@@ -93,6 +117,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
         with:
@@ -125,40 +151,24 @@ jobs:
     # explicitly allowed for dispatch).
     if: >-
       !cancelled() &&
+      needs.release-plan.result == 'success' &&
       needs.quality.result == 'success' &&
       (needs.tag-gate.result == 'success' || needs.tag-gate.result == 'skipped')
-    needs: [quality, tag-gate]
+    needs: [quality, tag-gate, release-plan]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: windows-x64
-            os: windows-latest
-            bundle: nsis
-            artifact: deepseek-harness-desktop-windows-x64
-            glob: target/release/bundle/nsis/*-setup.exe
-            # createUpdaterArtifacts signs the NSIS installer the updater
-            # downloads (basicUi install mode); the .sig rides along.
-            updaterGlob: target/release/bundle/nsis/*.sig
-          - target: macos-arm64
-            os: macos-14
-            bundle: dmg
-            artifact: deepseek-harness-desktop-macos-arm64
-            glob: target/release/bundle/dmg/*.dmg
-            # macOS updater stays OFF at the command layer while unsigned
-            # (Gatekeeper rejects un-notarized updates). createUpdaterArtifacts
-            # still PRODUCES a signed .app.tar.gz + .sig on macOS (the
-            # minisign key is present), and the glob uploads it — but
-            # latest.json never references darwin, so it is inert. Deliberate
-            # tripwire: if the signing key is ever removed, this glob fails
-            # the macOS build and forces a conscious decision.
-            updaterGlob: target/release/bundle/macos/*.app.tar.gz.sig
+      matrix: ${{ fromJSON(needs.release-plan.outputs.native) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Linux bundle and Flatpak dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 35
+        run: bash scripts/ci/install-linux-release-deps.sh
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable branch (toolchain version pinned via rust-toolchain.toml)
 
@@ -207,64 +217,132 @@ jobs:
       - name: Sideload plugin smoke (pre-bundle)
         run: node scripts/verify-sideload.ts
 
-      # Code signing & updater (P3) — wire these secrets when available:
-      #   TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)  updater signature keypair
-      #   WINDOWS_CERTIFICATE(_PASSWORD)        Authenticode PFX (OV; EV needs HSM)
-      #   APPLE_CERTIFICATE / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
-      #       Developer ID signing + notarization (staple happens in tauri CLI)
-      - name: Bundle application
-        run: pnpm tauri build --bundles ${{ matrix.bundle }}
+      - name: Preseed SHA-256-verified AppImage tools
+        if: matrix.appImageTools
+        run: node scripts/prepare-appimage-tools.ts --arch ${{ matrix.arch }}
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/dsh-cache
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # Tauri imports APPLE_CERTIFICATE itself. Windows instead needs the PFX
+      # in the runner certificate store and its thumbprint in the build config.
+      # Both paths remain optional, but become fail-closed once their primary
+      # certificate secret is configured.
+      - name: Import Windows Authenticode certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            Write-Host "WINDOWS_CERTIFICATE is not configured; building intentionally unsigned installers."
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "WINDOWS_CERTIFICATE_PASSWORD is required when WINDOWS_CERTIFICATE is configured"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) {
+            throw "WINDOWS_TIMESTAMP_URL is required when WINDOWS_CERTIFICATE is configured"
+          }
+          $encoded = Join-Path $env:RUNNER_TEMP "dsh-windows-certificate.txt"
+          $pfx = Join-Path $env:RUNNER_TEMP "dsh-windows-certificate.pfx"
+          try {
+            [IO.File]::WriteAllText($encoded, $env:WINDOWS_CERTIFICATE)
+            certutil -f -decode $encoded $pfx
+            if ($LASTEXITCODE -ne 0) { throw "certutil failed to decode WINDOWS_CERTIFICATE" }
+            $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+            $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password)
+            $signingCertificates = @($imported | Where-Object { $_.HasPrivateKey })
+            if ($signingCertificates.Count -ne 1) {
+              throw "expected exactly one imported certificate with a private key, found $($signingCertificates.Count)"
+            }
+            "WINDOWS_CERTIFICATE_THUMBPRINT=$($signingCertificates[0].Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } finally {
+            Remove-Item -LiteralPath $encoded, $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Bundle application (macOS)
+        if: runner.os == 'macOS'
+        run: pnpm tauri build --bundles ${{ matrix.tauriBundles }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      # Installer content assertion: main binary type, full runtime tree,
-      # platform-specific node-pty prebuild, zero symlinks in the harness tree.
-      - name: Verify bundle contents
-        run: node scripts/verify-bundle.ts --bundle ${{ matrix.bundle }}
+      - name: Bundle application (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)) {
+            pnpm tauri build --bundles "${{ matrix.tauriBundles }}"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            $configPath = Join-Path $env:RUNNER_TEMP "tauri-windows-signing.json"
+            @{
+              bundle = @{
+                windows = @{
+                  certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT
+                  digestAlgorithm = "sha256"
+                  timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+                }
+              }
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $configPath -Encoding utf8
+            pnpm tauri build --bundles "${{ matrix.tauriBundles }}" --config $configPath
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
-      # Conditional signing verification: with signing secrets present the
-      # artifact MUST verify (fail-closed); without them the build must be
-      # genuinely unsigned (warn-level) so signing state can never drift.
-      - name: Verify signing state
-        run: node scripts/verify-signing.ts --bundle ${{ matrix.bundle }}
+      # Linux update commands are deliberately unsupported. Do not emit inert
+      # updater tarballs/signatures for AppImage while building public package
+      # formats that are checksum-protected instead.
+      - name: Bundle application (Linux)
+        if: runner.os == 'Linux'
+        run: >-
+          pnpm tauri build
+          --bundles ${{ matrix.tauriBundles }}
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/dsh-cache
+
+      - name: Build Flatpak from the Tauri DEB
+        if: matrix.flatpak
+        run: node scripts/build-flatpak.ts --arch ${{ matrix.arch }}
+
+      # Content, architecture, manifest, deep-link, materialization, signing,
+      # and checksum checks run once for every format in this matrix row.
+      - name: Verify complete native release set
+        run: node scripts/verify-release-set.ts --target ${{ matrix.target }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-
-      # Unsigned distribution: give users a checksum file for verification.
-      - name: Emit SHA-256 checksum
-        run: node scripts/checksums.ts --bundle ${{ matrix.bundle }}
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            ${{ matrix.glob }}
-            ${{ matrix.glob }}.sha256
-            ${{ matrix.updaterGlob }}
+          path: ${{ matrix.paths }}
           if-no-files-found: error
 
   build-msix:
     name: Build MSIX ${{ matrix.arch }}
     if: |
       always() &&
+      needs.release-plan.result == 'success' &&
       needs.quality.result == 'success' &&
       needs.tag-gate.result != 'failure'
-    needs: [quality, tag-gate]
+    needs: [quality, tag-gate, release-plan]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: dsh-desktop-store-msix-x64
-          - arch: arm64
-            os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            artifact: dsh-desktop-store-msix-arm64
+      matrix: ${{ fromJSON(needs.release-plan.outputs.msix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
@@ -315,12 +393,16 @@ jobs:
       - name: Verify MSIX package
         run: node scripts/verify-msix.ts --arch ${{ matrix.arch }}
 
+      - name: Emit MSIX SHA-256 checksum
+        run: node scripts/checksums-msix.ts --arch ${{ matrix.arch }}
+
       - name: Upload MSIX artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
         with:
           name: ${{ matrix.artifact }}
           path: |
             target/msix/*_${{ matrix.arch }}.msix
+            target/msix/*_${{ matrix.arch }}.msix.sha256
           if-no-files-found: error
 
   windows-deep-link-smoke:
@@ -425,11 +507,54 @@ jobs:
           if ($after[0].Id -ne $before[0].Id) { throw "preset warm link spawned a second instance" }
           Write-Host "preset single instance retained pid=$($after[0].Id)"
 
+  windows-msi-smoke:
+    name: Windows MSI installer smoke
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' }}
+    needs: [build]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
+        with:
+          name: deepseek-harness-desktop-windows-x64
+          path: artifacts
+
+      - name: Silent install MSI
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem artifacts/*.msi | Select-Object -First 1
+          if (-not $installer) { throw "MSI installer not found" }
+          $arguments = @('/i', $installer.FullName, '/qn', '/norestart')
+          $process = Start-Process -FilePath msiexec.exe -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -notin @(0, 3010)) { throw "MSI installer exit $($process.ExitCode)" }
+
+      - name: Verify MSI dsharness registration and installed binary
+        shell: pwsh
+        run: |
+          $keys = @(
+            "Registry::HKEY_CURRENT_USER\Software\Classes\dsharness\shell\open\command",
+            "Registry::HKEY_LOCAL_MACHINE\Software\Classes\dsharness\shell\open\command"
+          )
+          $commands = @($keys | Where-Object { Test-Path $_ } | ForEach-Object {
+            (Get-ItemProperty $_).'(default)'
+          })
+          if ($commands.Count -lt 1) { throw "MSI did not register dsharness" }
+          foreach ($command in $commands) {
+            if ($command -notlike '*deepseek-harness-desktop.exe*' -or $command -notlike '*"%1"*') {
+              throw "invalid MSI protocol command: $command"
+            }
+            $match = [regex]::Match($command, '^"([^"]*deepseek-harness-desktop\.exe)"')
+            if (-not $match.Success -or -not (Test-Path -LiteralPath $match.Groups[1].Value)) {
+              throw "MSI protocol command does not point to an installed binary: $command"
+            }
+            Write-Host "MSI installed $($match.Groups[1].Value)"
+          }
+
   macos-deep-link-smoke:
     name: macOS deep-link installer smoke
     if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' }}
     needs: [build]
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
@@ -513,7 +638,7 @@ jobs:
     # soak is a publish gate: a heartbeat regression must surface before
     # release, and the 5-minute soak overlaps the (much longer) platform
     # builds, so waiting on it adds no wall time.
-    needs: [build, soak, tag-gate, windows-deep-link-smoke, macos-deep-link-smoke, preset-download-contract]
+    needs: [build, build-msix, soak, tag-gate, windows-deep-link-smoke, windows-msi-smoke, macos-deep-link-smoke, preset-download-contract]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -538,13 +663,11 @@ jobs:
       # workflow-only and must never be swept into the GitHub Release.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
         with:
-          name: deepseek-harness-desktop-windows-x64
+          pattern: deepseek-harness-desktop-*
           path: artifacts
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
-        with:
-          name: deepseek-harness-desktop-macos-arm64
-          path: artifacts
+      - name: Verify complete public release inventory
+        run: node scripts/verify-release-inventory.ts --directory artifacts
 
       - name: Publish release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2 (SHA-pinned)
