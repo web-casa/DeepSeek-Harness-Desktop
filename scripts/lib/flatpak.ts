@@ -2,6 +2,9 @@ import type { ReleaseArch } from "./release-artifacts.ts";
 
 export const FLATPAK_ID = "com.yeagoo.dsh-desktop";
 export const FLATPAK_RUNTIME_VERSION = "49";
+export const FLATPAK_BRANCH = "stable";
+export const FLATPAK_COMMAND = "deepseek-harness-desktop";
+export const FLATPAK_RUNTIME_REPO = "https://dl.flathub.org/repo/flathub.flatpakrepo";
 
 export const FLATPAK_FINISH_ARGS = [
   "--share=network",
@@ -17,50 +20,11 @@ export function flatpakArch(arch: ReleaseArch): "x86_64" | "aarch64" {
   return arch === "x64" ? "x86_64" : "aarch64";
 }
 
-export function flatpakManifest(): Record<string, unknown> {
-  const desktopFile = `${FLATPAK_ID}.desktop`;
-  const metainfoFile = `${FLATPAK_ID}.metainfo.xml`;
-  return {
-    "app-id": FLATPAK_ID,
-    runtime: "org.gnome.Platform",
-    "runtime-version": FLATPAK_RUNTIME_VERSION,
-    sdk: "org.gnome.Sdk",
-    command: "deepseek-harness-desktop",
-    branch: "stable",
-    "finish-args": FLATPAK_FINISH_ARGS,
-    "build-options": {
-      strip: false,
-      "no-debuginfo": true,
-    },
-    modules: [
-      {
-        name: "dsh-desktop",
-        buildsystem: "simple",
-        "build-commands": [
-          "mkdir deb && cd deb && ar x ../app.deb && tar -xf data.tar.*",
-          'install -Dm755 "deb/usr/bin/deepseek-harness-desktop" "/app/bin/deepseek-harness-desktop"',
-          'mkdir -p "/app/lib/DSH Desktop" && cp -a "deb/usr/lib/DSH Desktop/." "/app/lib/DSH Desktop/"',
-          `sed -e 's/^Icon=.*/Icon=${FLATPAK_ID}/' "deb/usr/share/applications/DSH Desktop.desktop" > "${desktopFile}"`,
-          `install -Dm644 "${desktopFile}" "/app/share/applications/${desktopFile}"`,
-          'mkdir -p /app/share/icons/hicolor && cp -a "deb/usr/share/icons/hicolor/." /app/share/icons/hicolor/',
-          `for icon in /app/share/icons/hicolor/*/apps/deepseek-harness-desktop.png; do mv "$icon" "$(dirname "$icon")/${FLATPAK_ID}.png"; done`,
-          `install -Dm644 "${metainfoFile}" "/app/share/metainfo/${metainfoFile}"`,
-        ],
-        sources: [
-          { type: "file", path: "app.deb", "dest-filename": "app.deb" },
-          {
-            type: "file",
-            path: metainfoFile,
-            "dest-filename": metainfoFile,
-          },
-        ],
-      },
-    ],
-  };
-}
-
 export function flatpakContractProblems(): string[] {
   const problems: string[] = [];
+  if (FLATPAK_RUNTIME_REPO !== "https://dl.flathub.org/repo/flathub.flatpakrepo") {
+    problems.push("Flatpak runtime repository must remain the reviewed Flathub HTTPS endpoint");
+  }
   const finishArgs = FLATPAK_FINISH_ARGS as readonly string[];
   if (finishArgs.includes("--filesystem=host")) {
     problems.push("Flatpak must not receive host filesystem access");

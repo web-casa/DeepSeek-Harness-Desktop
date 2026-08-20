@@ -4,26 +4,27 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "./common.ts";
 import {
+  FLATPAK_BRANCH,
+  FLATPAK_COMMAND,
+  FLATPAK_FINISH_ARGS,
   FLATPAK_ID,
+  FLATPAK_RUNTIME_REPO,
   FLATPAK_RUNTIME_VERSION,
   flatpakArch,
   flatpakContractProblems,
-  flatpakManifest,
   flatpakMetadataProblems,
 } from "./flatpak.ts";
 
-test("Flatpak manifest stays pinned and minimally permissioned", () => {
+test("Flatpak build contract stays pinned and minimally permissioned", () => {
   assert.deepEqual(flatpakContractProblems(), []);
-  const manifest = flatpakManifest();
-  assert.equal(manifest["app-id"], FLATPAK_ID);
-  assert.equal(manifest["runtime-version"], FLATPAK_RUNTIME_VERSION);
-  assert.equal(manifest.branch, "stable");
-  assert.deepEqual(manifest["build-options"], {
-    strip: false,
-    "no-debuginfo": true,
-  });
-  assert.equal(JSON.stringify(manifest).includes("--filesystem=host"), false);
-  assert.equal(JSON.stringify(manifest).includes("--socket=session-bus"), false);
+  assert.equal(FLATPAK_ID, "com.yeagoo.dsh-desktop");
+  assert.equal(FLATPAK_RUNTIME_VERSION, "49");
+  assert.equal(FLATPAK_BRANCH, "stable");
+  assert.equal(FLATPAK_COMMAND, "deepseek-harness-desktop");
+  assert.equal(FLATPAK_RUNTIME_REPO, "https://dl.flathub.org/repo/flathub.flatpakrepo");
+  const finishArgs = FLATPAK_FINISH_ARGS as readonly string[];
+  assert.equal(finishArgs.includes("--filesystem=host"), false);
+  assert.equal(finishArgs.includes("--socket=session-bus"), false);
 });
 
 test("committed AppStream metadata matches the Flatpak identity", () => {

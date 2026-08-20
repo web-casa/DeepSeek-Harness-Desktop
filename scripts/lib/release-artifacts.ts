@@ -11,6 +11,11 @@ export type PublicBundle =
   | "rpm"
   | "flatpak";
 
+// `app` is an internal macOS bundle target used only to materialize the
+// signed updater tripwire. It is never a public release asset; users receive
+// the DMG.
+export type TauriBundle = Exclude<PublicBundle, "flatpak"> | "app";
+
 export interface BundleSpec {
   directory: string;
   suffix: string;
@@ -60,7 +65,7 @@ export interface NativeReleaseTarget {
   os: string;
   arch: ReleaseArch;
   bundles: readonly PublicBundle[];
-  tauriBundles: readonly Exclude<PublicBundle, "flatpak">[];
+  tauriBundles: readonly TauriBundle[];
   artifact: string;
   uploadPaths: readonly string[];
   appImageTools: boolean;
@@ -106,7 +111,7 @@ export const NATIVE_RELEASE_TARGETS: readonly NativeReleaseTarget[] = [
     os: "macos-15",
     arch: "arm64",
     bundles: ["dmg"],
-    tauriBundles: ["dmg"],
+    tauriBundles: ["dmg", "app"],
     artifact: "deepseek-harness-desktop-macos-arm64",
     uploadPaths: [
       ...artifactPaths(["dmg"]),
@@ -124,7 +129,7 @@ export const NATIVE_RELEASE_TARGETS: readonly NativeReleaseTarget[] = [
     os: "macos-15-intel",
     arch: "x64",
     bundles: ["dmg"],
-    tauriBundles: ["dmg"],
+    tauriBundles: ["dmg", "app"],
     artifact: "deepseek-harness-desktop-macos-x64",
     uploadPaths: [
       ...artifactPaths(["dmg"]),
@@ -189,13 +194,17 @@ export function releasePlanProblems(): string[] {
     if (target.bundles.includes("appimage") !== target.appImageTools) {
       problems.push(`${target.id}: AppImage tool flag does not match bundle set`);
     }
-    if (target.tauriBundles.includes("flatpak" as never)) {
-      problems.push(`${target.id}: Flatpak must not be passed to Tauri`);
-    }
     for (const bundle of target.tauriBundles) {
-      if (!target.bundles.includes(bundle)) {
+      if (bundle === "app") {
+        if (!target.id.startsWith("macos-") || !target.updaterSignature) {
+          problems.push(`${target.id}: internal app bundle is only valid for macOS updater checks`);
+        }
+      } else if (!target.bundles.includes(bundle)) {
         problems.push(`${target.id}: Tauri bundle ${bundle} is not published`);
       }
+    }
+    if (target.id.startsWith("macos-") && !target.tauriBundles.includes("app")) {
+      problems.push(`${target.id}: macOS updater tripwire requires the internal app bundle`);
     }
     if (target.updaterSignature) {
       const uploadPath = `${target.updaterSignature.directory}/*${target.updaterSignature.suffix}`;

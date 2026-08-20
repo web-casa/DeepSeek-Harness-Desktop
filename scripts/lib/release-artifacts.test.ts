@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   BUNDLE_SPECS,
   NATIVE_RELEASE_TARGETS,
@@ -23,6 +24,11 @@ test("native matrix uses current architecture-specific hosted runners", () => {
   assert.equal(rows.some((row) => row.os === "macos-14"), false);
   assert.equal(rows.some((row) => row.os === "macos-15-intel"), true);
   assert.equal(rows.some((row) => row.os === "ubuntu-22.04-arm"), true);
+  for (const row of rows.filter((candidate) =>
+    String(candidate.target).startsWith("macos-"),
+  )) {
+    assert.equal(row.tauriBundles, "dmg,app");
+  }
 });
 
 test("Store MSIX remains a separate exact x64 and arm64 matrix", () => {
@@ -54,4 +60,13 @@ test("every public artifact path includes both installer and SHA-256 sidecar", (
       );
     }
   }
+});
+
+test("both reusable quality jobs checkout the requested release revision", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/quality.yml", import.meta.url),
+    "utf8",
+  );
+  const exactRef = "ref: ${{ inputs.checkout_ref || github.ref }}";
+  assert.equal(workflow.split(exactRef).length - 1, 2);
 });

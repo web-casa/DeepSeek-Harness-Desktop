@@ -25,7 +25,7 @@ import {
   type PublicBundle,
   type ReleaseArch,
 } from "./lib/release-artifacts.ts";
-import { flatpakMetadataProblems } from "./lib/flatpak.ts";
+import { FLATPAK_RUNTIME_REPO, flatpakMetadataProblems } from "./lib/flatpak.ts";
 
 type RuntimePlatform = "win32" | "darwin" | "linux";
 type BinaryKind = "PE" | "Mach-O" | "ELF";
@@ -516,6 +516,11 @@ function verifyFlatpak(artifact: string, arch: ReleaseArch): void {
   rmSync(scratch, { recursive: true, force: true });
   mkdirSync(scratch, { recursive: true });
   try {
+    const bundleStrings = run("strings", [artifact], "Flatpak bundle metadata string scan");
+    if (!bundleStrings.split(/\r?\n/).includes(FLATPAK_RUNTIME_REPO)) {
+      throw new Error(`Flatpak bundle does not embed runtime repository ${FLATPAK_RUNTIME_REPO}`);
+    }
+    ok("Flatpak bundle embeds the reviewed Flathub runtime repository");
     run(
       "ostree",
       [`--repo=${repository}`, "init", "--mode=archive-z2"],
@@ -556,10 +561,9 @@ function verifyFlatpak(artifact: string, arch: ReleaseArch): void {
     if (metainfoProblems.length > 0) throw new Error(metainfoProblems.join("\n"));
     ok("Flatpak AppStream identity and launchable are aligned");
 
-    // flatpak-builder strips binaries by default. That would silently turn
-    // this into a second, unreviewed runtime build even though the manifest
-    // imports the verified DEB. Compare the complete runtime tree and main
-    // executable bytes against that exact DEB input.
+    // A packaging transform must never silently turn this into a second,
+    // unreviewed runtime build. Compare the complete runtime tree and main
+    // executable bytes against the exact DEB input.
     const deb = artifactFor("deb");
     const debExtraction = join(scratch, "deb");
     mkdirSync(debExtraction, { recursive: true });
