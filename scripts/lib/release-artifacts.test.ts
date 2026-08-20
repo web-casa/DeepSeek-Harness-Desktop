@@ -99,6 +99,9 @@ test("Windows installer smoke searches the preserved artifact tree exactly", () 
     /Get-ChildItem -Path artifacts -Recurse -File -Filter '\*\.msi'/,
   );
   assert.equal(workflow.split("$installers.Count -ne 1").length - 1, 2);
+  assert.match(workflow, /\$quotedInstaller = '\"' \+ \$installer\.FullName \+ '\"'/);
+  assert.match(workflow, /\/l\*v \$quotedLogPath/);
+  assert.match(workflow, /\$process\.WaitForExit\(600000\)/);
 });
 
 test("Windows installer smoke can safely reuse one completed Release run", () => {

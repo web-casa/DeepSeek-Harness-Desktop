@@ -796,15 +796,38 @@ jobs:
 
       - name: Silent install MSI
         shell: pwsh
+        timeout-minutes: 12
         run: |
           $installers = @(Get-ChildItem -Path artifacts -Recurse -File -Filter '*.msi')
           if ($installers.Count -ne 1) {
             throw "expected exactly one MSI installer, got $($installers.Count)"
           }
           $installer = $installers[0]
-          $arguments = @('/i', $installer.FullName, '/qn', '/norestart')
-          $process = Start-Process -FilePath msiexec.exe -ArgumentList $arguments -Wait -PassThru
-          if ($process.ExitCode -notin @(0, 3010)) { throw "MSI installer exit $($process.ExitCode)" }
+          $logPath = Join-Path $env:RUNNER_TEMP 'dsh-msi-install.log'
+          $quotedInstaller = '"' + $installer.FullName + '"'
+          $quotedLogPath = '"' + $logPath + '"'
+          $arguments = "/i $quotedInstaller /qn /norestart /l*v $quotedLogPath"
+          Write-Host "Installing $($installer.FullName)"
+          $process = Start-Process -FilePath msiexec.exe -ArgumentList $arguments -PassThru
+
+          if (-not $process.WaitForExit(600000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $logPath) {
+              Write-Host '::group::MSI log tail after timeout'
+              Get-Content -LiteralPath $logPath -Tail 200
+              Write-Host '::endgroup::'
+            }
+            throw "MSI installer exceeded the 10-minute process timeout"
+          }
+
+          if ($process.ExitCode -notin @(0, 3010)) {
+            if (Test-Path -LiteralPath $logPath) {
+              Write-Host '::group::MSI failure log tail'
+              Get-Content -LiteralPath $logPath -Tail 200
+              Write-Host '::endgroup::'
+            }
+            throw "MSI installer exit $($process.ExitCode)"
+          }
 
       - name: Verify MSI dsharness registration and installed binary
         shell: pwsh
