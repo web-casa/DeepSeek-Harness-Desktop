@@ -1,6 +1,6 @@
 # DSH Desktop
 
-把官方 DeepSeek Harness 打包成 Windows / macOS 原生应用，让 Harness 及其**插件生态**开箱即用。
+把官方 DeepSeek Harness 打包成 Windows / macOS / Linux 原生应用，让 Harness 及其**插件生态**开箱即用。
 不是 fork：Harness 原样随包携带，桌面层只负责生命周期与安全边界。
 
 | 仓库 | [web-casa/DeepSeek-Harness-Desktop](https://github.com/web-casa/DeepSeek-Harness-Desktop) |
@@ -8,7 +8,7 @@
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| 版本 | v0.2.8 · Windows x64 NSIS / macOS arm64 DMG · 未签名预览版 · [English](README.en.md) |
+| 版本 | v0.2.8 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · 未签名预览版 · [English](README.en.md) |
 
 > ⚠️ **macOS 用户**：Apple 开发者证书仍在申请中，应用尚未签名。首次打开若被
 > Gatekeeper 拦截，请执行：
@@ -16,6 +16,16 @@
 > xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 > ```
 > （如提示权限不足，在命令前加 `sudo`。）预计下一版本完成签名+公证后不再需要此步骤。
+
+| 平台 | GitHub Release 安装包 |
+|---|---|
+| Windows x64 | NSIS `*-setup.exe`、WiX `.msi` |
+| macOS | arm64 与 x64 `.dmg` |
+| Linux | x64 与 arm64 `.AppImage`、`.deb`、`.rpm`、`.flatpak` |
+
+每个公开安装包旁均有同名 `.sha256`。Microsoft Store 的 x64/arm64 MSIX
+保持为独立、未签名的 Partner Center workflow artifact，不会混入公开 Release；
+这类包由商店完成签名，不能作为普通侧载包使用。
 
 ## 特性一览
 
@@ -127,7 +137,7 @@ Microsoft Store 构建仍只允许 `src-tauri/store-curated-plugins.json` 的审
 | Rust | `cargo nextest`（sidecar 35 + Tauri 35，Windows 宿主亦实跑）· llvm-cov ≥50%/25% · `clippy -D warnings` |
 | 供应链 | `cargo deny` · `cargo vet --locked`（70 全审 + 2 delta + 豁免基线）· `npm audit`/`pnpm audit` 阻断 high |
 | 安全扫描 | CodeQL（rust/js-ts/actions）· Dependency Review |
-| 安装包 | `verify-bundle` + `verify-signing`（fail-closed）+ SHA-256 |
+| 安装包 | 7 种公开格式统一 `verify-bundle` + Windows/macOS `verify-signing`（fail-closed）+ 每包 SHA-256 |
 | 发布 | 5 分钟负载 soak · updater 产物与 `latest.json` |
 
 ### 目录
@@ -141,9 +151,9 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 
 ## 发布与版本
 
-- CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发完整发布（质量门 → soak → 打包 → 内容/签名断言 → draft release + `latest.json`）。
+- CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发五个原生构建目标（Windows x64、macOS x64/arm64、Linux x64/arm64）及 Store MSIX x64/arm64，再经完整资产清单门禁发布 draft release + `latest.json`。
 - Microsoft Store：`v*` tag 同时构建 x64/arm64 MSIX（`build-msix` job，Store 模式关闭应用内更新并限制插件为 cordis.run 审核列表）。MSIX 产物作为 workflow artifact 下载后上传 Partner Center，不发布到 GitHub Release。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
 - 当前状态：v0.2.8 开发中（新增 cordis.run deep-link 一键安装确认；v0.2.4 为当前发布，v0.2.3 draft 作废不发布）。
-- 已知边界：未签名（SmartScreen/Gatekeeper 手动放行）；macOS 更新器待签名；Linux 仅开发用。
+- 已知边界：未签名（SmartScreen/Gatekeeper 手动放行）；macOS 更新器待签名；Linux 包当前以 SHA-256 保护，尚无独立软件仓库签名。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。

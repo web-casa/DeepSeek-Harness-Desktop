@@ -36,6 +36,7 @@ test("expectedSigned: platform secret presence decides", () => {
   assert.equal(expectedSigned("dmg", { APPLE_CERTIFICATE: "" }), false);
   assert.equal(expectedSigned("nsis", {}), false);
   assert.equal(expectedSigned("nsis", { WINDOWS_CERTIFICATE: "x" }), true);
+  assert.equal(expectedSigned("msi", { WINDOWS_CERTIFICATE: "x" }), true);
   // The other platform's secret must not leak across.
   assert.equal(expectedSigned("dmg", { WINDOWS_CERTIFICATE: "x" }), false);
   assert.equal(expectedSigned("nsis", { APPLE_CERTIFICATE: "x" }), false);

@@ -34,6 +34,10 @@ import {
 } from "./lib/common.ts";
 import { materialize } from "./lib/materialize.ts";
 import { isPackageRoot } from "./lib/licenses.ts";
+import {
+  hostUsesGlibc,
+  pruneGlibcKoffiMuslVariant,
+} from "./lib/runtime-prune.ts";
 
 // Collect every package's license file into licenses/<rel-path> so the
 // installer carries third-party attribution for the whole dependency tree.
@@ -151,6 +155,13 @@ try {
     join(repoRoot, "runtime", "node_modules"),
     join(staging, "node_modules"),
   );
+  if (hostUsesGlibc()) {
+    const removed = pruneGlibcKoffiMuslVariant(
+      join(staging, "node_modules"),
+      process.arch,
+    );
+    info(`removed unused Koffi musl variant from glibc bundle: ${removed}`);
+  }
   if (!existsSync(join(staging, "node_modules", "@deepseek-ai", "dsh", "package.json"))) {
     throw new Error("staged @deepseek-ai/dsh package.json missing");
   }

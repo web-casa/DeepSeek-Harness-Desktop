@@ -4,8 +4,9 @@
 // Checks:
 //   * x64 and arm64 .msix packages exist
 //   * package identity matches the reserved Partner Center identity
-//   * the main executable and staged runtime are inside the package
+//   * the main executable and complete staged runtime are inside the package
 //   * the dsharness:// protocol and runFullTrust capability are declared
+//   * the Store input is intentionally unsigned and architecture-bound
 //
 //   node scripts/verify-msix.ts
 
@@ -13,6 +14,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoRoot, fail, ok } from "./lib/common.ts";
+import { normalizeMsixEntryName } from "./lib/msix.ts";
 
 const PACKAGE_NAME = "53660AlanM.DSHDesktopCommunity";
 const PUBLISHER = "CN=84AC3716-04E0-4D67-8951-0D3E51674CA0";
@@ -87,16 +89,26 @@ foreach ($entry in $zip.Entries) {
 
 for (const target of targets) {
   const msix = target.packages[0];
-  const entries = readZipEntries(msix);
-  const names = new Set(entries.map((e) => e.name.replace(/\\/g, "/")));
+  const entries = readZipEntries(msix).map((entry) => ({
+    ...entry,
+    name: normalizeMsixEntryName(entry.name),
+  }));
+  const names = new Set(entries.map((entry) => entry.name));
+  const lowerNames = new Set([...names].map((name) => name.toLowerCase()));
   const manifest = entries.find((e) => e.name === "AppxManifest.xml")?.content ?? "";
   for (const required of [
     "deepseek-harness-desktop.exe",
     "runtime/node.exe",
     "runtime/sidecar.exe",
+    "runtime/harness/package.json",
     "runtime/harness/runtime-manifest.json",
+    "runtime/harness/node_modules/@deepseek-ai/dsh/package.json",
+    "runtime/harness/node_modules/@deepseek-ai/dsh/lib/bin.js",
+    "runtime/harness/node_modules/pnpm/bin/pnpm.cjs",
+    `runtime/harness/node_modules/node-pty/prebuilds/win32-${target.arch}/conpty.node`,
+    "AppxBlockMap.xml",
   ]) {
-    if (!names.has(required)) fail(`${msix} is missing ${required}`);
+    if (!lowerNames.has(required.toLowerCase())) fail(`${msix} is missing ${required}`);
   }
   if (!manifest.includes(`Name="${PACKAGE_NAME}"`)) {
     fail(`${msix} manifest identity name mismatch`);
@@ -104,13 +116,19 @@ for (const target of targets) {
   if (!manifest.includes(`Publisher="${PUBLISHER}"`)) {
     fail(`${msix} manifest publisher mismatch`);
   }
+  if (!manifest.includes(`ProcessorArchitecture="${target.arch}"`)) {
+    fail(`${msix} manifest architecture is not ${target.arch}`);
+  }
   if (!manifest.includes(`Name="${PROTOCOL}"`) || !manifest.includes("windows.protocol")) {
     fail(`${msix} manifest is missing the ${PROTOCOL}:// protocol extension`);
   }
   if (!manifest.includes('Name="runFullTrust"')) {
     fail(`${msix} manifest is missing runFullTrust`);
   }
-  ok(`${msix} verified (${names.size} entries, identity OK, protocol OK)`);
+  if (lowerNames.has("appxsignature.p7x")) {
+    fail(`${msix} unexpectedly contains a signature; pfx:null Store inputs must remain unsigned`);
+  }
+  ok(`${msix} verified (${names.size} entries, identity/arch/protocol OK, unsigned Store input)`);
 }
 
 if (process.argv.includes("--self-test")) {

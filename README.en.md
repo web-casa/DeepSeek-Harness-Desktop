@@ -1,6 +1,6 @@
 # DSH Desktop
 
-Packages the official DeepSeek Harness as a native Windows / macOS app, with
+Packages the official DeepSeek Harness as a native Windows / macOS / Linux app, with
 the Harness **plugin ecosystem** ready to go. Not a fork: the Harness ships
 intact; the desktop layer only handles lifecycle and the security boundary.
 
@@ -9,7 +9,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Version | v0.2.8 · Windows x64 NSIS / macOS arm64 DMG · unsigned preview · [中文](README.md) |
+| Version | v0.2.8 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · unsigned preview · [中文](README.md) |
 
 > ⚠️ **macOS users**: the Apple developer certificate is still being
 > applied for, so the app is unsigned. If Gatekeeper blocks the first
@@ -19,6 +19,16 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 > ```
 > (prefix with `sudo` if it reports a permission error.) This step should
 > disappear in the next release once signing + notarization land.
+
+| Platform | GitHub Release packages |
+|---|---|
+| Windows x64 | NSIS `*-setup.exe`, WiX `.msi` |
+| macOS | arm64 and x64 `.dmg` |
+| Linux | x64 and arm64 `.AppImage`, `.deb`, `.rpm`, `.flatpak` |
+
+Every public installer has a same-name `.sha256` sidecar. The x64/arm64
+Microsoft Store MSIX packages remain separate, unsigned Partner Center
+workflow artifacts. They are Store-signing inputs, not public sideload files.
 
 ## Features
 
@@ -126,7 +136,7 @@ pnpm tauri dev                                    # desktop dev mode
 | Rust | `cargo nextest` (sidecar 35 + Tauri 35, also run on a Windows host) · llvm-cov ≥50%/25% · `clippy -D warnings` |
 | Supply chain | `cargo deny` · `cargo vet --locked` (70 full + 2 delta + exemptions) · `npm audit`/`pnpm audit` block high |
 | Security scan | CodeQL (rust/js-ts/actions) · Dependency Review |
-| Bundles | `verify-bundle` + `verify-signing` (fail-closed) + SHA-256 |
+| Bundles | one `verify-bundle` contract across 7 public formats + fail-closed Windows/macOS signing checks + per-package SHA-256 |
 | Release | 5-minute load soak · updater artifacts + `latest.json` |
 
 ### Layout
@@ -140,9 +150,10 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
 
 ## Release & versioning
 
-- CI: pushes/PRs run quality gates + three-platform smoke; a `v*` tag runs
-  the full pipeline (gates → soak → bundle → content/signing assertions →
-  draft release + `latest.json`).
+- CI: pushes/PRs run quality gates + three-platform smoke; a `v*` tag builds
+  five native targets (Windows x64, macOS x64/arm64, Linux x64/arm64) plus
+  Store MSIX x64/arm64, then gates the complete inventory before creating the
+  draft release and `latest.json`.
 - Microsoft Store: `v*` tags also build x64/arm64 MSIX packages
   (`build-msix` job; Store mode disables in-app updates and restricts plugins
   to the cordis.run reviewed list). MSIX artifacts are workflow artifacts for
@@ -153,6 +164,7 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   v0.2.4 is the current release, and the v0.2.3 draft is obsolete and will
   not be published).
 - Known limits: unsigned (manual SmartScreen/Gatekeeper approval); macOS
-  updater pending signing; Linux is dev-only.
+  updater pending signing; Linux packages currently have SHA-256 sidecars but
+  no separate package-repository signature.
 - License: MIT; the bundled Harness and every dependency license ship in
   `runtime/harness/licenses/`.
