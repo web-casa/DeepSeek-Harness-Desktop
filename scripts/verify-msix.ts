@@ -14,6 +14,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoRoot, fail, ok } from "./lib/common.ts";
+import { normalizeMsixEntryName } from "./lib/msix.ts";
 
 const PACKAGE_NAME = "53660AlanM.DSHDesktopCommunity";
 const PUBLISHER = "CN=84AC3716-04E0-4D67-8951-0D3E51674CA0";
@@ -88,8 +89,11 @@ foreach ($entry in $zip.Entries) {
 
 for (const target of targets) {
   const msix = target.packages[0];
-  const entries = readZipEntries(msix);
-  const names = new Set(entries.map((e) => e.name.replace(/\\/g, "/")));
+  const entries = readZipEntries(msix).map((entry) => ({
+    ...entry,
+    name: normalizeMsixEntryName(entry.name),
+  }));
+  const names = new Set(entries.map((entry) => entry.name));
   const lowerNames = new Set([...names].map((name) => name.toLowerCase()));
   const manifest = entries.find((e) => e.name === "AppxManifest.xml")?.content ?? "";
   for (const required of [
