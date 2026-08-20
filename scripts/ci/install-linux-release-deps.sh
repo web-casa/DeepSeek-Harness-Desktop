@@ -22,7 +22,7 @@ apt_options=(
 sudo apt-get "${apt_options[@]}" update
 sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y \
   appstream cpio file flatpak flatpak-builder libayatana-appindicator3-dev \
-  librsvg2-dev libwebkit2gtk-4.1-dev ostree patchelf rpm
+  librsvg2-dev libwebkit2gtk-4.1-dev ostree patchelf rpm xdg-utils
 
 flatpak remote-add --user --if-not-exists \
   flathub https://dl.flathub.org/repo/flathub.flatpakrepo
