@@ -9,6 +9,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readlinkSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -25,6 +26,7 @@ import {
   type PublicBundle,
   type ReleaseArch,
 } from "./lib/release-artifacts.ts";
+import { DMG_TOOL_TIMEOUT_MS } from "./lib/macos-dmg.ts";
 import { FLATPAK_RUNTIME_REPO, flatpakMetadataProblems } from "./lib/flatpak.ts";
 
 type RuntimePlatform = "win32" | "darwin" | "linux";
@@ -408,18 +410,40 @@ function attachDmg(artifact: string): string {
   const mount = join(tmpDir, `dmg-mount-${process.pid}`);
   rmSync(mount, { recursive: true, force: true });
   mkdirSync(mount, { recursive: true });
-  run(
-    "hdiutil",
-    ["attach", "-nobrowse", "-readonly", "-mountpoint", mount, artifact],
-    "DMG attach",
-  );
+  try {
+    run(
+      "hdiutil",
+      ["attach", "-nobrowse", "-readonly", "-mountpoint", mount, artifact],
+      "DMG attach",
+      { timeout: DMG_TOOL_TIMEOUT_MS, killSignal: "SIGKILL" },
+    );
+  } catch (error) {
+    spawnSync("hdiutil", ["detach", "-force", mount], {
+      encoding: "utf8",
+      timeout: DMG_TOOL_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    });
+    try {
+      rmSync(mount, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.warn(
+        `⚠ failed to clean a partial DMG mount after attach failure: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+      );
+    }
+    throw error;
+  }
   return mount;
 }
 
 function detachDmg(mount: string): void {
-  let result = spawnSync("hdiutil", ["detach", mount], { encoding: "utf8" });
+  const options = {
+    encoding: "utf8" as const,
+    timeout: DMG_TOOL_TIMEOUT_MS,
+    killSignal: "SIGKILL" as const,
+  };
+  let result = spawnSync("hdiutil", ["detach", mount], options);
   if (result.status !== 0) {
-    result = spawnSync("hdiutil", ["detach", "-force", mount], { encoding: "utf8" });
+    result = spawnSync("hdiutil", ["detach", "-force", mount], options);
   }
   if (result.status === 0) rmSync(mount, { recursive: true, force: true });
   else console.warn(`⚠ hdiutil detach failed for ${mount}: ${result.stderr}`);
@@ -452,6 +476,17 @@ function verifyDmg(artifact: string, arch: ReleaseArch): void {
   try {
     const appRoot = join(mount, `${productName}.app`);
     if (!existsSync(appRoot)) throw new Error(`${productName}.app is missing from DMG`);
+    const applicationsLink = join(mount, "Applications");
+    const applicationsMetadata = lstatSync(applicationsLink);
+    if (!applicationsMetadata.isSymbolicLink() || readlinkSync(applicationsLink) !== "/Applications") {
+      throw new Error("DMG Applications entry must be a symlink to /Applications");
+    }
+    run(
+      "codesign",
+      ["--verify", "--deep", "--strict", "--verbose=2", appRoot],
+      "DMG-contained app codesign verification",
+      { timeout: DMG_TOOL_TIMEOUT_MS, killSignal: "SIGKILL" },
+    );
     verifyRuntimeTree(
       join(appRoot, "Contents", "MacOS", "deepseek-harness-desktop"),
       join(appRoot, "Contents", "Resources", "runtime"),

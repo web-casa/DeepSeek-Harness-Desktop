@@ -28,8 +28,20 @@ test("native matrix uses current architecture-specific hosted runners", () => {
   for (const row of rows.filter((candidate) =>
     String(candidate.target).startsWith("macos-"),
   )) {
-    assert.equal(row.tauriBundles, "dmg,app");
+    assert.equal(row.tauriBundles, "app");
   }
+});
+
+test("manual native selection is exact and keeps notarization aligned", () => {
+  assert.deepEqual(
+    githubNativeMatrix("macos-x64").include.map((row) => row.target),
+    ["macos-x64"],
+  );
+  assert.deepEqual(
+    githubMacosNotarizationMatrix("macos-x64").include.map((row) => row.target),
+    ["macos-x64"],
+  );
+  assert.throws(() => githubNativeMatrix("macos-unreviewed"), /unknown native release target/);
 });
 
 test("macOS notarization handoff is private and derived from the native matrix", () => {
@@ -175,7 +187,8 @@ test("macOS release signs runtime, uploads once, then waits in a separate job", 
   const importIndex = workflow.indexOf("run: node scripts/import-apple-certificate.ts");
   const nestedIndex = workflow.indexOf("run: node scripts/sign-macos-runtime.ts");
   const postSignSmokeIndex = workflow.indexOf("name: Runtime smoke (post-sign)");
-  const bundleIndex = workflow.indexOf("name: Bundle application (macOS, signed; notarization deferred)");
+  const bundleIndex = workflow.indexOf("name: Bundle macOS app (signed; notarization deferred)");
+  const dmgIndex = workflow.indexOf("name: Build macOS DMG without Finder automation");
   const preVerifyIndex = workflow.indexOf("name: Verify signed DMG before notarization");
   const preSubmitCleanupIndex = workflow.indexOf(
     "name: Remove job-scoped macOS signing keychain before submission",
@@ -190,7 +203,8 @@ test("macOS release signs runtime, uploads once, then waits in a separate job", 
   assert.equal(nestedIndex > importIndex, true);
   assert.equal(postSignSmokeIndex > nestedIndex, true);
   assert.equal(bundleIndex > postSignSmokeIndex, true);
-  assert.equal(preVerifyIndex > bundleIndex, true);
+  assert.equal(dmgIndex > bundleIndex, true);
+  assert.equal(preVerifyIndex > dmgIndex, true);
   assert.equal(preSubmitCleanupIndex > preVerifyIndex, true);
   assert.equal(submitIndex > preSubmitCleanupIndex, true);
   assert.equal(submitIndex > bundleIndex, true);
@@ -200,6 +214,13 @@ test("macOS release signs runtime, uploads once, then waits in a separate job", 
   assert.equal(cleanupIndex > bundleIndex, true);
   assert.match(workflow, /run: node scripts\/macos-notarization\.ts submit/);
   assert.match(workflow, /run: node scripts\/macos-notarization\.ts wait/);
+  assert.match(workflow, /run: node scripts\/build-macos-dmg\.ts --arch/);
+  assert.match(workflow, /native_target:/);
+  assert.match(workflow, /--github-matrix --target/);
+
+  const bundleVerifier = readFileSync(new URL("../verify-bundle.ts", import.meta.url), "utf8");
+  assert.match(bundleVerifier, /DMG-contained app codesign verification/);
+  assert.match(bundleVerifier, /readlinkSync\(applicationsLink\) !== "\/Applications"/);
 
   // Tauri must use the already-imported identity. Passing the PKCS#12 again
   // creates a separate process-scoped keychain that the nested signer cannot

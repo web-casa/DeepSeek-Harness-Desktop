@@ -11,9 +11,9 @@ export type PublicBundle =
   | "rpm"
   | "flatpak";
 
-// `app` is an internal macOS bundle target used only to materialize the
-// signed updater tripwire. It is never a public release asset; users receive
-// the DMG.
+// `app` is an internal macOS bundle target used to materialize the signed app
+// and updater tripwire. The public DMG is built separately without Finder
+// automation; users never receive the raw app bundle.
 export type TauriBundle = Exclude<PublicBundle, "flatpak"> | "app";
 
 export interface BundleSpec {
@@ -112,7 +112,7 @@ export const NATIVE_RELEASE_TARGETS: readonly NativeReleaseTarget[] = [
     os: "macos-15",
     arch: "arm64",
     bundles: ["dmg"],
-    tauriBundles: ["dmg", "app"],
+    tauriBundles: ["app"],
     artifact: "deepseek-harness-desktop-macos-arm64",
     uploadPaths: [
       ...artifactPaths(["dmg"]),
@@ -131,7 +131,7 @@ export const NATIVE_RELEASE_TARGETS: readonly NativeReleaseTarget[] = [
     os: "macos-15-intel",
     arch: "x64",
     bundles: ["dmg"],
-    tauriBundles: ["dmg", "app"],
+    tauriBundles: ["app"],
     artifact: "deepseek-harness-desktop-macos-x64",
     uploadPaths: [
       ...artifactPaths(["dmg"]),
@@ -209,6 +209,9 @@ export function releasePlanProblems(): string[] {
     if (target.id.startsWith("macos-") && !target.tauriBundles.includes("app")) {
       problems.push(`${target.id}: macOS updater tripwire requires the internal app bundle`);
     }
+    if (target.id.startsWith("macos-") && target.tauriBundles.join(",") !== "app") {
+      problems.push(`${target.id}: macOS Tauri bundles must be app-only; DMG uses the bounded builder`);
+    }
     if (target.id.startsWith("macos-")) {
       if (!target.notarizationArtifact?.startsWith("dsh-macos-notarization-")) {
         problems.push(`${target.id}: macOS target is missing a private notarization artifact`);
@@ -239,9 +242,16 @@ export function releasePlanProblems(): string[] {
   return problems;
 }
 
-export function githubNativeMatrix(): { include: Record<string, unknown>[] } {
+function selectedNativeTargets(selection = "all"): readonly NativeReleaseTarget[] {
+  if (selection === "all") return NATIVE_RELEASE_TARGETS;
+  const selected = targetById(selection);
+  if (!selected) throw new Error(`unknown native release target: ${selection}`);
+  return [selected];
+}
+
+export function githubNativeMatrix(selection = "all"): { include: Record<string, unknown>[] } {
   return {
-    include: NATIVE_RELEASE_TARGETS.map((target) => ({
+    include: selectedNativeTargets(selection).map((target) => ({
       target: target.id,
       os: target.os,
       arch: target.arch,
@@ -256,9 +266,11 @@ export function githubNativeMatrix(): { include: Record<string, unknown>[] } {
   };
 }
 
-export function githubMacosNotarizationMatrix(): { include: Record<string, unknown>[] } {
+export function githubMacosNotarizationMatrix(
+  selection = "all",
+): { include: Record<string, unknown>[] } {
   return {
-    include: NATIVE_RELEASE_TARGETS.filter((target) => target.id.startsWith("macos-")).map(
+    include: selectedNativeTargets(selection).filter((target) => target.id.startsWith("macos-")).map(
       (target) => ({
         target: target.id,
         os: target.os,
