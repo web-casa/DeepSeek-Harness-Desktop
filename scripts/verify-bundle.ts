@@ -577,7 +577,10 @@ function verifyFlatpak(artifact: string, arch: ReleaseArch): void {
     ok(`Flatpak metadata identifies ${appIdentifier}`);
     const metainfoPath = join(
       checkout,
-      "export",
+      // AppStream metadata belongs to the installed /app tree. Flatpak may
+      // additionally synthesize an export copy, but that is version-dependent
+      // and is absent on current GitHub-hosted Linux runners.
+      "files",
       "share",
       "metainfo",
       `${appIdentifier}.metainfo.xml`,
