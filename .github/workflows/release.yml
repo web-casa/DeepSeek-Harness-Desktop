@@ -865,7 +865,8 @@ jobs:
               throw "MSI protocol command does not point to an installed binary: $command"
             }
             $installedBinary = Get-Item -LiteralPath $registeredPath
-            if ($installedBinary.Name -ine 'deepseek-harness-desktop.exe') {
+            $installedFileName = [System.IO.Path]::GetFileName($installedBinary.FullName)
+            if ($installedFileName -ine 'deepseek-harness-desktop.exe') {
               throw "MSI protocol command points to unexpected executable $($installedBinary.FullName)"
             }
             Write-Host "MSI installed $($installedBinary.FullName)"

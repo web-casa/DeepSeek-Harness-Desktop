@@ -155,7 +155,11 @@ test("MSI smoke accepts a valid 8.3 registry path but verifies the real file", (
   assert.match(workflow, /Test-Path -LiteralPath \$registeredPath -PathType Leaf/);
   assert.match(
     workflow,
-    /\$installedBinary\.Name -ine 'deepseek-harness-desktop\.exe'/,
+    /\[System\.IO\.Path\]::GetFileName\(\$installedBinary\.FullName\)/,
+  );
+  assert.match(
+    workflow,
+    /\$installedFileName -ine 'deepseek-harness-desktop\.exe'/,
   );
   assert.doesNotMatch(
     workflow,
