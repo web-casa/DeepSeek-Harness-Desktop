@@ -12,8 +12,10 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-pub const PRIVATE_DIR_MODE: u32 = 0o700;
-pub const PRIVATE_FILE_MODE: u32 = 0o600;
+#[cfg(unix)]
+const PRIVATE_DIR_MODE: u32 = 0o700;
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 pub fn ensure_private_dir(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
