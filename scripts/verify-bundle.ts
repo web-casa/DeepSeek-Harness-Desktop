@@ -6,11 +6,9 @@
 // dsharness deep-link registration, and a fully materialized Harness tree.
 
 import {
-  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -111,46 +109,18 @@ function run(
   return result.stdout ?? "";
 }
 
-function runToFile(command: string, args: string[], output: string, what: string): void {
-  const outputFd = openSync(output, "w", 0o600);
-  try {
-    const result = spawnSync(command, args, {
-      encoding: "utf8",
-      maxBuffer: 128 * 1024 * 1024,
-      stdio: ["ignore", outputFd, "pipe"],
-    });
-    if (result.status !== 0) {
-      throw new Error(
-        `${what} failed (exit ${result.status}, ${result.error?.message ?? "no spawn error"}):\n${commandOutput(result.stderr)}`,
-      );
+function assertSafeArchiveListing(listing: string, label: string): void {
+  for (const rawEntry of listing.split(/\r?\n/)) {
+    if (!rawEntry) continue;
+    const entry = rawEntry.replace(/^\.\//, "");
+    if (
+      entry.startsWith("/") ||
+      entry.startsWith("\\") ||
+      /^[A-Za-z]:/.test(entry) ||
+      entry.split(/[\\/]/).includes("..")
+    ) {
+      throw new Error(`${label} contains unsafe path: ${JSON.stringify(rawEntry)}`);
     }
-  } finally {
-    closeSync(outputFd);
-  }
-}
-
-function runFromFile(
-  command: string,
-  args: string[],
-  input: string,
-  what: string,
-  cwd: string,
-): void {
-  const inputFd = openSync(input, "r");
-  try {
-    const result = spawnSync(command, args, {
-      cwd,
-      encoding: "utf8",
-      maxBuffer: 128 * 1024 * 1024,
-      stdio: [inputFd, "pipe", "pipe"],
-    });
-    if (result.status !== 0) {
-      throw new Error(
-        `${what} failed (exit ${result.status}, ${result.error?.message ?? "no spawn error"}):\n${commandOutput(result.stdout, result.stderr)}`,
-      );
-    }
-  } finally {
-    closeSync(inputFd);
   }
 }
 
@@ -528,21 +498,17 @@ function verifyRpm(artifact: string, arch: ReleaseArch): void {
   mkdirSync(extraction, { recursive: true });
   try {
     run("rpm", ["-K", artifact], "RPM payload digest verification");
-
-    // Avoid `rpm2cpio | cpio`: on hosted Ubuntu 22.04 both commands can
-    // extract the complete payload yet the pipe intermittently exits 1.
-    // Materializing the intermediate stream reports each process separately
-    // and still fails closed on either conversion or extraction failure.
-    // Keep the archive outside the extraction root so an RPM entry named
-    // payload.cpio can neither collide with nor mutate the open input file.
-    const archive = join(scratch, "payload.cpio");
-    runToFile("rpm2cpio", [artifact], archive, "RPM payload conversion");
-    runFromFile(
-      "cpio",
-      ["-idm", "--quiet", "--no-absolute-filenames"],
-      archive,
+    // Ubuntu 22.04's rpm2cpio 4.17 writes almost the complete payload and
+    // then exits 1 for these large Tauri packages without a diagnostic.
+    // libarchive reads the RPM directly and reports extraction failures
+    // reliably. Validate every member name first so extraction remains
+    // confined to the fresh scratch directory even for a malformed package.
+    const listing = run("bsdtar", ["-tf", artifact], "RPM payload listing");
+    assertSafeArchiveListing(listing, "RPM payload");
+    run(
+      "bsdtar",
+      ["-xf", artifact, "-C", extraction, "--no-same-owner"],
       "RPM payload extraction",
-      extraction,
     );
     verifyLinuxLayout(extraction, "usr", arch);
   } finally {
@@ -658,6 +624,16 @@ function runSelfTest(): void {
   if (diagnostic !== "stdout detail\nstderr detail") {
     fail(`self-test: command diagnostics dropped a stream: ${diagnostic}`);
   }
+  assertSafeArchiveListing("./usr/bin/app\n./usr/lib/app/runtime/node\n", "safe fixture");
+  for (const unsafe of ["../../escape", "/tmp/escape", "C:/escape", "dir\\..\\escape"]) {
+    let rejected = false;
+    try {
+      assertSafeArchiveListing(`${unsafe}\n`, "unsafe fixture");
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) fail(`self-test: unsafe archive entry accepted: ${unsafe}`);
+  }
 
   const fixture = [
     "7-Zip 24.09 : Copyright",
@@ -693,7 +669,7 @@ function runSelfTest(): void {
     rmSync(executable, { force: true });
     rmSync(plain, { force: true });
   }
-  ok("self-test: bundle parser, diagnostics, and executable checks pass");
+  ok("self-test: bundle parser, diagnostics, archive paths, and executable checks pass");
 }
 
 if (process.argv.includes("--self-test")) {

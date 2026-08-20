@@ -224,10 +224,9 @@ jobs:
           XDG_CACHE_HOME: ${{ runner.temp }}/dsh-cache
           GITHUB_TOKEN: ${{ github.token }}
 
-      # Tauri imports APPLE_CERTIFICATE itself. Windows instead needs the PFX
-      # in the runner certificate store and its thumbprint in the build config.
-      # Both paths remain optional, but become fail-closed once their primary
-      # certificate secret is configured.
+      # Both platform signing paths remain optional, but become fail-closed
+      # once their primary certificate secret is configured. macOS uses the
+      # job-scoped keychain below; Windows imports its PFX into the user store.
       - name: Import Windows Authenticode certificate
         if: runner.os == 'Windows'
         shell: pwsh
@@ -298,6 +297,28 @@ jobs:
           fi
           echo "APPLE_SIGNING_CONFIGURED=1" >> "$GITHUB_ENV"
 
+      # Tauri signs the app executable and conventional nested-code folders,
+      # but our bundled Node/Harness lives under Contents/Resources. Import
+      # the identity early, preserve the compliant upstream Node signature,
+      # and sign every other Mach-O resource before Tauri signs/notarizes the
+      # outer app and DMG.
+      - name: Import macOS Developer ID certificate
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: node scripts/import-apple-certificate.ts
+
+      - name: Sign nested macOS runtime
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node scripts/sign-macos-runtime.ts
+
+      - name: Runtime smoke (post-sign)
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
+        run: node scripts/verify-runtime.ts
+
       - name: Bundle application (macOS, unsigned)
         if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '0'
         run: pnpm tauri build --bundles ${{ matrix.tauriBundles }}
@@ -311,8 +332,10 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # The certificate is already in APPLE_KEYCHAIN_PATH and its identity
+          # is exported through GITHUB_ENV. Omitting APPLE_CERTIFICATE here
+          # prevents Tauri from hiding a duplicate import in a private
+          # process-scoped keychain.
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -373,6 +396,11 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.paths }}
           if-no-files-found: error
+
+      - name: Remove job-scoped macOS signing keychain
+        if: runner.os == 'macOS' && always() && env.APPLE_KEYCHAIN_PATH != ''
+        shell: bash
+        run: security delete-keychain "$APPLE_KEYCHAIN_PATH"
 
   build-msix:
     name: Build MSIX ${{ matrix.arch }}
