@@ -9,6 +9,15 @@ on:
         type: string
         required: false
         description: "Tag/branch to build & verify (defaults to the default branch). Does not publish."
+      native_target:
+        type: choice
+        required: false
+        default: all
+        options:
+          - all
+          - macos-x64
+          - macos-arm64
+        description: "Limit a manual verification to one macOS target; tag releases always build all targets."
       preset_slug:
         type: string
         required: false
@@ -64,9 +73,9 @@ jobs:
         id: matrix
         run: |
           {
-            echo "native=$(node scripts/release-plan.ts --github-matrix)"
+            echo "native=$(node scripts/release-plan.ts --github-matrix --target '${{ github.event.inputs.native_target || 'all' }}')"
             echo "msix=$(node scripts/release-plan.ts --github-msix-matrix)"
-            echo "macos_notarization=$(node scripts/release-plan.ts --github-macos-notarization-matrix)"
+            echo "macos_notarization=$(node scripts/release-plan.ts --github-macos-notarization-matrix --target '${{ github.event.inputs.native_target || 'all' }}')"
           } >> "$GITHUB_OUTPUT"
 
   # The desktop deliberately refuses CDN redirects for remote preset archives.
@@ -133,6 +142,7 @@ jobs:
   # the platform builds, so the gate costs no extra wall time.
   soak:
     name: Heartbeat load soak (Linux, 5min)
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.native_target == 'all'
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -302,8 +312,9 @@ jobs:
       # Tauri signs the app executable and conventional nested-code folders,
       # but our bundled Node/Harness lives under Contents/Resources. Import
       # the identity early, preserve the compliant upstream Node signature,
-      # and sign every other Mach-O resource before Tauri signs the outer app
-      # and DMG. Notarization is deliberately deferred to the handoff below.
+      # and sign every other Mach-O resource before Tauri signs the outer app.
+      # The bounded builder below signs the DMG; notarization is deferred to
+      # the Submission-ID handoff.
       - name: Import macOS Developer ID certificate
         if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
         env:
@@ -321,7 +332,7 @@ jobs:
         if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
         run: node scripts/verify-runtime.ts
 
-      - name: Bundle application (macOS, unsigned)
+      - name: Bundle macOS app (unsigned)
         if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '0'
         run: pnpm tauri build --bundles ${{ matrix.tauriBundles }}
         env:
@@ -329,14 +340,23 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # Deliberately omit every notarization credential here. Tauri signs the
-      # app and DMG with APPLE_SIGNING_IDENTITY but cannot enter its built-in
-      # unbounded `notarytool --wait` path. Submission is the next step.
-      - name: Bundle application (macOS, signed; notarization deferred)
+      # app with APPLE_SIGNING_IDENTITY but cannot enter its built-in unbounded
+      # `notarytool --wait` path. DMG construction and submission follow.
+      - name: Bundle macOS app (signed; notarization deferred)
         if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
         run: pnpm tauri build --bundles ${{ matrix.tauriBundles }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # Tauri's styled DMG path mounts a writable image and drives Finder via
+      # AppleScript. Hosted Intel runners can leave diskimages-helper blocked
+      # there for tens of minutes. Build the already-signed app into a
+      # compressed image directly: no mount, Finder, AppleScript, or detach.
+      - name: Build macOS DMG without Finder automation
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: node scripts/build-macos-dmg.ts --arch ${{ matrix.arch }}
 
       - name: Verify signed DMG before notarization
         if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
@@ -539,7 +559,8 @@ jobs:
       always() &&
       needs.release-plan.result == 'success' &&
       needs.quality.result == 'success' &&
-      needs.tag-gate.result != 'failure'
+      needs.tag-gate.result != 'failure' &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.native_target == 'all')
     needs: [quality, tag-gate, release-plan]
     strategy:
       fail-fast: false
@@ -663,7 +684,10 @@ jobs:
             needs.windows-smoke-source.result == 'success'
           ) ||
           (
-            (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) &&
+            (
+              (github.event_name == 'workflow_dispatch' && github.event.inputs.native_target == 'all') ||
+              (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+            ) &&
             github.event.inputs.windows_smoke_source_run_id == '' &&
             needs.build.result == 'success'
           )
@@ -787,7 +811,10 @@ jobs:
             needs.windows-smoke-source.result == 'success'
           ) ||
           (
-            (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) &&
+            (
+              (github.event_name == 'workflow_dispatch' && github.event.inputs.native_target == 'all') ||
+              (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+            ) &&
             github.event.inputs.windows_smoke_source_run_id == '' &&
             needs.build.result == 'success'
           )
@@ -874,7 +901,16 @@ jobs:
 
   macos-deep-link-smoke:
     name: macOS deep-link installer smoke
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && needs.build.result == 'success' && needs.notarize-macos.result == 'success' }}
+    if: >-
+      ${{
+        always() &&
+        (
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.native_target != 'macos-x64') ||
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        ) &&
+        needs.build.result == 'success' &&
+        needs.notarize-macos.result == 'success'
+      }}
     needs: [build, notarize-macos]
     runs-on: macos-15
     timeout-minutes: 15

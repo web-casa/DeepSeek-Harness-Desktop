@@ -41,7 +41,9 @@ git push origin v0.2.1
 3. `build` ×5（Windows x64 EXE+MSI、macOS x64/arm64 DMG、Linux
    x64/arm64 AppImage+DEB+RPM+Flatpak）：下载 Node（SHA-256）
    → prepare-harness（441+ 许可证 + 零链接断言）→ 构建 sidecar → 冒烟 →
-   `tauri build`（Flatpak 从同一 DEB 导入）→ **verify-bundle**（包元数据、
+   `tauri build`（macOS 只产生已签名 `.app`，DMG 由无 Finder 自动化的
+   有界 `hdiutil -srcfolder` 路径生成；Flatpak 从同一 DEB 导入）→
+   **verify-bundle**（包元数据、
    二进制架构、必需文件、scoped 许可证
    绊线、零符号链接、执行位、无 quarantine）→ **verify-signing**（见下）→
    SHA-256 checksum → 上传制品。
@@ -138,7 +140,11 @@ Desktop 工作区直接改为公开发布。
 - draft 阶段发现问题：删除 draft + tag 后重新打 tag（tag 重新指向新提交）。
 - 已发布：永不覆盖资产；bump patch 版本重新发布，旧版标注。
 - workflow_dispatch（不发布）可用于在**不打 tag** 的情况下全流程演练构建
-  与验证（`tag` 输入为空时构建默认分支）。
+  与验证（`tag` 输入为空时构建默认分支）。`native_target`
+  默认为 `all`；选 `macos-x64` 或 `macos-arm64` 时只跑对应的构建、
+  Developer ID 签名、Submission-ID 公证与产物复验，并跳过 MSIX、
+  Windows installer smoke 和 5 分钟 soak。此通道用于发布前低成本验证
+  macOS 打包/公证修复，不会创建 Release。
 
 ### 6a. Apple 公证超时续跑
 
