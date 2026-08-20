@@ -87,6 +87,7 @@ test("macOS release signs arbitrary runtime code before the outer app", () => {
   assert.equal(postSignSmokeIndex > nestedIndex, true);
   assert.equal(bundleIndex > postSignSmokeIndex, true);
   assert.equal(cleanupIndex > bundleIndex, true);
+  assert.match(workflow, /run: node scripts\/build-macos-release\.ts/);
 
   // Tauri must use the already-imported identity. Passing the PKCS#12 again
   // creates a separate process-scoped keychain that the nested signer cannot
