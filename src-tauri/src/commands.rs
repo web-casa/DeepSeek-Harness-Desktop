@@ -4,6 +4,7 @@
 //! only the local "bootstrap" window has the `allow-*` grants; the remote
 //! Harness WebView has an empty capability set and cannot invoke anything.
 
+use crate::diagnostics::redact;
 use crate::harness::{
     child_alive, open_harness_window, publish_snapshot, request_restart, send_raw,
     snapshot_payload, Runtime, CMD_ID_SHUTDOWN,
@@ -12,7 +13,7 @@ use dsh_sidecar::platform::{PlatformChild, SpawnSpec};
 use serde_json::Value;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
 pub fn get_status(runtime: State<'_, Runtime>) -> Value {
@@ -40,7 +41,9 @@ pub fn get_diagnostics(runtime: State<'_, Runtime>) -> Value {
         "pid": s.pid,
         "lastError": s.last_error.as_deref().map(|e| redact(e, &dsh_home)),
         "versions": s.versions,
-        "dshHome": s.dsh_home,
+        // Clipboard diagnostics are frequently pasted into issue trackers.
+        // Preserve whether DSH_HOME resolved without exposing its local path.
+        "dshHome": s.dsh_home.as_ref().map(|_| "<DSH_HOME>"),
         "platform": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
         "logsTail": logs_tail,
     })
@@ -200,135 +203,8 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Diagnostics export (best-effort redaction) and app quit.
-// ---------------------------------------------------------------------------
-
-/// Mask the most common secret shapes. Best effort only: harness logs can
-/// contain arbitrary tool output, so this must never be described as "safe".
-///
-/// Content is copied char-by-char; the byte view is used ONLY to recognize
-/// the ASCII secret prefixes, and it is only consulted at char boundaries,
-/// so multi-byte UTF-8 (e.g. Chinese log lines) passes through intact.
-/// The `[n..]` slices after a mask are safe because the counted token bytes
-/// are ASCII: the slice always lands on a char boundary.
-fn redact(text: &str, dsh_home: &str) -> String {
-    // Guard the empty case: `str::replace("", …)` interleaves the mask
-    // between every character instead of matching nothing.
-    let out = if dsh_home.is_empty() {
-        text.to_owned()
-    } else {
-        text.replace(dsh_home, "<DSH_HOME>")
-    };
-    let mut result = String::with_capacity(out.len());
-    let mut rest = out.as_str();
-    while !rest.is_empty() {
-        let bytes = rest.as_bytes();
-        // sk- + 16+ alphanumerics
-        if bytes.starts_with(b"sk-") {
-            let j = bytes
-                .iter()
-                .skip(3)
-                .take_while(|b| b.is_ascii_alphanumeric())
-                .count();
-            if j >= 16 {
-                result.push_str("sk-***");
-                rest = &rest[3 + j..];
-                continue;
-            }
-        }
-        // Bearer <token>
-        if bytes.starts_with(b"Bearer ") {
-            let j = bytes
-                .iter()
-                .skip(7)
-                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
-                .count();
-            if j >= 8 {
-                result.push_str("Bearer ***");
-                rest = &rest[7 + j..];
-                continue;
-            }
-        }
-        // AKIA + 12+ uppercase/digits (AWS access key id)
-        if bytes.starts_with(b"AKIA") {
-            let j = bytes
-                .iter()
-                .skip(4)
-                .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-                .count();
-            if j >= 12 {
-                result.push_str("AKIA***");
-                rest = &rest[4 + j..];
-                continue;
-            }
-        }
-        // Plain content: copy whole chars, never split UTF-8.
-        match rest.chars().next() {
-            Some(ch) => {
-                result.push(ch);
-                rest = &rest[ch.len_utf8()..];
-            }
-            None => break, // rest was just checked non-empty; unreachable
-        }
-    }
-    result
-}
-
-/// Write a diagnostics zip (status/versions/log tail) to a user-chosen path.
-/// Logs come from the sidecar's in-memory ring ONLY — DSH_HOME disk files
-/// (sessions etc.) are deliberately out of scope.
-#[tauri::command]
-pub async fn export_diagnostics(app: AppHandle, runtime: State<'_, Runtime>) -> Result<(), String> {
-    use std::io::Write;
-    use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
-    app.dialog()
-        .file()
-        .add_filter("ZIP", &["zip"])
-        .set_file_name("dsd-diagnostics.zip")
-        .save_file(move |path| {
-            let _ = tx.send(path.map(|p| p.into_path().unwrap_or_default()));
-        });
-    let Some(path) = rx.recv().map_err(|e| e.to_string())? else {
-        return Err("save dialog cancelled".to_string());
-    };
-
-    // Build the payload under the lock, then DROP the guard before the slow
-    // zip write: holding it across disk I/O would stall the watcher's
-    // publish_snapshot (status/tray updates) on a slow disk.
-    let (payload, dsh_home) = {
-        let s = runtime
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dsh_home = s.dsh_home.clone().unwrap_or_default();
-        let tail_start = s.logs.len().saturating_sub(500);
-        let payload = serde_json::json!({
-            "generator": "deepseek-harness-desktop",
-            "status": s.status,
-            "pid": s.pid,
-            "versions": s.versions,
-            "platform": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
-            "lastError": s.last_error,
-            "logsTail": s.logs[tail_start..].iter().map(|(stream, line)| {
-                serde_json::json!({ "stream": stream, "line": redact(line, &dsh_home) })
-            }).collect::<Vec<_>>(),
-        });
-        (payload, dsh_home)
-    };
-    let mut text = serde_json::to_string_pretty(&payload).unwrap_or_default();
-    text = redact(&text, &dsh_home);
-
-    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default();
-    zip.start_file("diagnostics.json", options)
-        .map_err(|e| e.to_string())?;
-    zip.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-    zip.finish().map_err(|e| e.to_string())?;
-    Ok(())
-}
+// Diagnostic export lives in `diagnostics.rs`; this module only exposes the
+// lightweight clipboard snapshot above and the application quit command.
 
 /// Exit the whole desktop app (graceful shutdown runs in RunEvent::Exit).
 #[tauri::command]
@@ -482,6 +358,10 @@ pub async fn market_install_plugin(
         plugins.busy.store(false, Ordering::SeqCst);
         return Err("runtime paths are not resolved yet".to_string());
     };
+    if let Err(error) = ensure_no_plugin_recovery(&runtime) {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err(error);
+    }
     if let Err(error) = crate::plugins::pre_disable_market_plugin(&paths.dsh_home, &candidate) {
         plugins.busy.store(false, Ordering::SeqCst);
         return Err(error);
@@ -534,12 +414,190 @@ pub async fn activate_market_plugin(
                 .to_string(),
         );
     }
+    if let Err(error) = ensure_no_plugin_recovery(&runtime) {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err(error);
+    }
     let result = runtime
         .paths()
         .ok_or_else(|| "runtime paths are not resolved yet".to_string())
         .and_then(|paths| crate::plugins::activate_market_plugin(&paths.dsh_home, &candidate));
     plugins.busy.store(false, Ordering::SeqCst);
     result
+}
+
+// ---------------------------------------------------------------------------
+// Journaled plugin startup recovery.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn get_plugin_recovery(runtime: State<'_, Runtime>) -> Result<Value, String> {
+    let paths = runtime
+        .paths()
+        .ok_or_else(|| "runtime paths are not resolved yet".to_string())?;
+    let (logs, terminal) = {
+        let state = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (state.logs.clone(), state.terminal_startup_failure)
+    };
+    let overview = crate::recovery::overview(&paths.dsh_home, &logs, terminal)?;
+    serde_json::to_value(overview)
+        .map_err(|error| format!("cannot serialize plugin recovery overview: {error}"))
+}
+
+#[tauri::command]
+pub fn begin_plugin_recovery(
+    app: AppHandle,
+    package_name: String,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+) -> Result<Value, String> {
+    let plugins = plugins.inner().clone();
+    if plugins.busy.swap(true, Ordering::SeqCst) {
+        return Err("an operation is already running".to_string());
+    }
+    let result = (|| {
+        let paths = runtime
+            .paths()
+            .ok_or_else(|| "runtime paths are not resolved yet".to_string())?;
+        let (logs, terminal) = {
+            let state = runtime
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (state.logs.clone(), state.terminal_startup_failure)
+        };
+        let transaction = crate::recovery::begin(&paths.dsh_home, &logs, terminal, &package_name)?;
+        if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
+            observability.record(
+                "plugin_recovery_pre_disabled",
+                serde_json::json!({ "marketManaged": transaction.market_managed }),
+            );
+        }
+        serde_json::to_value(transaction)
+            .map_err(|error| format!("cannot serialize plugin recovery transaction: {error}"))
+    })();
+    plugins.busy.store(false, Ordering::SeqCst);
+    let transaction = result?;
+    request_restart(&app).map_err(|error| {
+        format!("plugin was safely disabled, but Harness restart failed: {error}")
+    })?;
+    Ok(transaction)
+}
+
+#[tauri::command]
+pub async fn rollback_plugin_recovery(
+    app: AppHandle,
+    transaction_id: String,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
+) -> Result<(), String> {
+    let plugins = plugins.inner().clone();
+    if plugins.busy.swap(true, Ordering::SeqCst) {
+        return Err("an operation is already running".to_string());
+    }
+    let paths = match runtime.paths() {
+        Some(paths) => paths,
+        None => {
+            plugins.busy.store(false, Ordering::SeqCst);
+            return Err("runtime paths are not resolved yet".to_string());
+        }
+    };
+    let receipt = match crate::recovery::rollback_receipt(&paths.dsh_home, &transaction_id) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            plugins.busy.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+    };
+    if let Some(receipt) = receipt {
+        let dsh_version = runtime
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .versions
+            .harness
+            .clone();
+        let candidate = match market.prepare_install(&receipt.slug, &dsh_version).await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                plugins.busy.store(false, Ordering::SeqCst);
+                return Err(format!(
+                    "market-managed plugin cannot be re-enabled without live approval: {error}"
+                ));
+            }
+        };
+        if !receipt.matches(&candidate) {
+            plugins.busy.store(false, Ordering::SeqCst);
+            return Err(
+                "market entry changed; recovery rollback cannot re-enable the recorded package"
+                    .to_string(),
+            );
+        }
+        if let Err(error) =
+            crate::plugins::verify_market_installation(&paths.dsh_home, &candidate, true)
+        {
+            plugins.busy.store(false, Ordering::SeqCst);
+            return Err(format!(
+                "market-managed plugin failed local integrity revalidation: {error}"
+            ));
+        }
+    } else if crate::build_info::STORE_BUILD {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err(
+            "Microsoft Store recovery cannot re-enable a plugin without a live market receipt"
+                .to_string(),
+        );
+    }
+    if let Err(error) = crate::recovery::rollback(&paths.dsh_home, &transaction_id) {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err(error);
+    }
+    if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
+        observability.record("plugin_recovery_rolled_back", serde_json::json!({}));
+    }
+    let restart_result = request_restart(&app);
+    plugins.busy.store(false, Ordering::SeqCst);
+    restart_result
+}
+
+#[tauri::command]
+pub fn finalize_plugin_recovery(
+    app: AppHandle,
+    transaction_id: String,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+) -> Result<(), String> {
+    let plugins = plugins.inner().clone();
+    if plugins.busy.swap(true, Ordering::SeqCst) {
+        return Err("an operation is already running".to_string());
+    }
+    let result = runtime
+        .paths()
+        .ok_or_else(|| "runtime paths are not resolved yet".to_string())
+        .and_then(|paths| crate::recovery::finalize(&paths.dsh_home, &transaction_id));
+    plugins.busy.store(false, Ordering::SeqCst);
+    result?;
+    if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
+        observability.record("plugin_recovery_finalized", serde_json::json!({}));
+    }
+    Ok(())
+}
+
+fn ensure_no_plugin_recovery(runtime: &Runtime) -> Result<(), String> {
+    let Some(paths) = runtime.paths() else {
+        return Err("runtime paths are not resolved yet".to_string());
+    };
+    if crate::recovery::has_active_transaction(&paths.dsh_home)? {
+        return Err(
+            "finish or roll back the active plugin recovery before another plugin mutation"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1138,7 +1196,7 @@ fn run_plugin_spec(
             flush(pending);
         }
     }
-    let exit = loop {
+    let mut exit = loop {
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => flush(&mut pending),
@@ -1182,6 +1240,17 @@ fn run_plugin_spec(
         }
     };
     *plugins.child.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    if let Err(error) = crate::plugins::reconcile_active_market_receipts(&paths.dsh_home) {
+        handle_line(
+            &mut tail,
+            &mut pending,
+            &mut flush,
+            "verify".to_string(),
+            format!("plugin operation completed, but market provenance cleanup failed: {error}"),
+        );
+        flush(&mut pending);
+        exit = Some(1);
+    }
     plugins.busy.store(false, Ordering::SeqCst);
     let _ = app.emit(
         "plugin-done",
@@ -1404,6 +1473,10 @@ fn spawn_plugin_spec(
 ) -> Result<(), String> {
     if plugins.busy.swap(true, Ordering::SeqCst) {
         return Err("an operation is already running".to_string());
+    }
+    if let Err(error) = ensure_no_plugin_recovery(runtime) {
+        plugins.busy.store(false, Ordering::SeqCst);
+        return Err(error);
     }
     let Some(paths) = runtime.paths() else {
         plugins.busy.store(false, Ordering::SeqCst);

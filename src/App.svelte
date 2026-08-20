@@ -12,6 +12,7 @@
     checkUpdate,
     installUpdateAndRestart,
     exportDiagnostics,
+    cancelDiagnosticsExport,
     quitApp,
     listUserPresets,
     previewPreset,
@@ -23,6 +24,10 @@
     installPlugin,
     uninstallPlugin,
     cancelPluginOp,
+    getPluginRecovery,
+    beginPluginRecovery,
+    rollbackPluginRecovery,
+    finalizePluginRecovery,
     getPendingPluginInstall,
     dismissPendingPluginInstall,
     onEvent,
@@ -58,6 +63,8 @@
     type Versions,
     type PluginEntry,
     type PluginInstallRequest,
+    type PluginRecoveryCandidate,
+    type PluginRecoveryOverview,
   } from "./lib/api";
 
   let status = $state<Status>("idle");
@@ -75,6 +82,7 @@
   let logs = $state<[string, string][]>([]);
   let inTauri = $state(true);
   let busy = $state(false);
+  let diagnosticsBusy = $state(false);
   let logsOpen = $state(false);
   let toast = $state<string | null>(null);
   // Suppresses the brief "已停止" flash while a user-initiated restart
@@ -106,6 +114,8 @@
   let marketCount = $state<number | null>(null);
   let marketNextCursor = $state<string | null>(null);
   let marketHasMore = $state(false);
+  let marketOffline = $state(false);
+  let marketOfflineFetchedAt = $state<number | null>(null);
   let marketBusy = $state(false);
   let marketError = $state<string | null>(null);
   let marketPreparing = $state(false);
@@ -114,6 +124,13 @@
   let marketDetailBusy = $state(false);
   let marketImages = $state<string[]>([]);
   let sideloadPath = $state<string | null>(null);
+  let recoveryOverview = $state<PluginRecoveryOverview | null>(null);
+  let recoveryBusy = $state(false);
+  let recoveryError = $state<string | null>(null);
+  let recoveryConfirm = $state<{
+    action: "disable" | "rollback" | "finalize";
+    candidate?: PluginRecoveryCandidate;
+  } | null>(null);
 
   const STATUS_TEXT: Record<Status, string> = {
     idle: "等待启动",
@@ -246,6 +263,8 @@
         "desktop",
       );
       const received = res.items ?? [];
+      marketOffline = res.cache?.status === "offline";
+      marketOfflineFetchedAt = marketOffline ? res.cache?.fetchedAtMs ?? null : null;
       if (reset) {
         marketItems = received;
       } else {
@@ -264,7 +283,7 @@
   }
 
   async function doMarketDetail(slug: string) {
-    if (marketDetailBusy) return;
+    if (marketDetailBusy || marketOffline) return;
     marketDetailBusy = true;
     marketImages = [];
     try {
@@ -288,7 +307,7 @@
   }
 
   async function prepareMarketInstall(slug: string) {
-    if (pluginBusy || marketPreparing) return;
+    if (pluginBusy || marketPreparing || marketOffline || recoveryOverview?.transaction) return;
     marketPreparing = true;
     marketError = null;
     try {
@@ -302,7 +321,7 @@
   }
 
   async function doMarketInstall(item: MarketPluginSummary) {
-    if (item.installable !== true) return;
+    if (marketOffline || item.installable !== true) return;
     await prepareMarketInstall(item.slug);
   }
 
@@ -328,6 +347,7 @@
   async function doActivateMarketPlugin(plugin: PluginEntry) {
     if (
       pluginBusy ||
+      recoveryOverview?.transaction ||
       plugin.state !== "pending" ||
       !plugin.slug ||
       !plugin.entryRevision
@@ -356,7 +376,7 @@
   }
 
   async function confirmSideloadInstall() {
-    if (!sideloadPath || pluginBusy) return;
+    if (!sideloadPath || pluginBusy || recoveryOverview?.transaction) return;
     const path = sideloadPath;
     sideloadPath = null;
     pluginBusy = true;
@@ -485,11 +505,23 @@
   }
 
   async function doExportDiagnostics() {
+    diagnosticsBusy = true;
     try {
-      await exportDiagnostics();
-      showToast("诊断信息已导出");
+      const saved = await exportDiagnostics();
+      if (saved) showToast("诊断信息已导出");
     } catch (e) {
-      showToast(`导出失败：${e}`);
+      if (String(e).includes("cancelled")) showToast("已取消诊断导出");
+      else showToast(`导出失败：${e}`);
+    } finally {
+      diagnosticsBusy = false;
+    }
+  }
+
+  async function doCancelDiagnosticsExport() {
+    try {
+      if (await cancelDiagnosticsExport()) showToast("正在取消诊断导出…");
+    } catch (e) {
+      showToast(`取消失败：${e}`);
     }
   }
 
@@ -640,8 +672,44 @@
     }
   }
 
+  async function refreshRecovery() {
+    try {
+      recoveryOverview = await getPluginRecovery();
+      recoveryError = null;
+    } catch (e) {
+      recoveryError = `插件恢复状态不可用：${e}`;
+    }
+  }
+
+  async function confirmRecoveryAction() {
+    const confirmation = recoveryConfirm;
+    if (!confirmation || recoveryBusy) return;
+    const transaction = recoveryOverview?.transaction;
+    recoveryConfirm = null;
+    recoveryBusy = true;
+    recoveryError = null;
+    try {
+      if (confirmation.action === "disable" && confirmation.candidate) {
+        await beginPluginRecovery(confirmation.candidate.packageName);
+        showToast(`已精确禁用 ${confirmation.candidate.packageName}，正在验证重启`);
+      } else if (confirmation.action === "rollback" && transaction) {
+        await rollbackPluginRecovery(transaction.transactionId);
+        showToast(`已回滚 ${transaction.packageName} 的隔离，正在重新启动`);
+      } else if (confirmation.action === "finalize" && transaction) {
+        await finalizePluginRecovery(transaction.transactionId);
+        showToast(`已保留 ${transaction.packageName} 的隔离状态`);
+      }
+      await refreshRecovery();
+      await refreshPlugins();
+    } catch (e) {
+      recoveryError = `插件恢复操作失败：${e}`;
+      await refreshRecovery();
+    }
+    recoveryBusy = false;
+  }
+
   function startPluginOp(name: string, op: "install" | "uninstall") {
-    if (pluginBusy || !name.trim()) return;
+    if (pluginBusy || recoveryOverview?.transaction || !name.trim()) return;
     pluginBusy = true;
     pluginOperation = "generic";
     pluginError = null;
@@ -706,6 +774,8 @@
     }
     refreshPresets();
     refreshPlugins();
+    refreshRecovery();
+    if (inTauri) void doMarketSearch(true);
     // Silent boot-time update check: only inform, never prompt.
     if (!storeBuild) {
       try {
@@ -724,7 +794,10 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onEvent((p) => apply(p)).then((fn) => {
+    onEvent((p) => {
+      apply(p);
+      if (p.status === "crashed" || p.status === "running") void refreshRecovery();
+    }).then((fn) => {
       if (cancelled) fn();
       else unlistenFn = fn;
     });
@@ -964,14 +1037,79 @@
         </button>
         {#if status === "crashed"}
           <button class="ghost" onclick={copyDiagnostics}>复制诊断信息</button>
-          <button class="ghost" onclick={doExportDiagnostics}>导出诊断</button>
+          <button class="ghost" onclick={doExportDiagnostics} disabled={diagnosticsBusy}>
+            {diagnosticsBusy ? "正在导出…" : "导出诊断"}
+          </button>
+          {#if diagnosticsBusy}
+            <button class="ghost" onclick={doCancelDiagnosticsExport}>取消导出</button>
+          {/if}
           <button class="danger-ghost" onclick={doQuitApp}>退出应用</button>
         {/if}
       {:else}
         <button class="ghost" disabled>正在启动…</button>
       {/if}
     </div>
+    {#if status === "crashed"}
+      <p class="privacy-note">
+        诊断包仅收集受限的 Desktop 生命周期证据和脱敏日志尾部，不包含会话或工作区文件；脱敏并非绝对，请在分享前检查内容。
+      </p>
+    {/if}
   </div>
+
+  {#if recoveryError || recoveryOverview?.transaction || (recoveryOverview?.candidates.length ?? 0) > 0}
+    <div class="card recovery-card">
+      <div class="update-row">
+        <span class="update-title">安全插件恢复</span>
+        {#if recoveryBusy}<span class="plugin-busy"><span class="spinner"></span> 处理中…</span>{/if}
+      </div>
+      {#if recoveryError}
+        <div class="notice-box">{recoveryError}</div>
+      {/if}
+      {#if recoveryOverview?.transaction}
+        {@const transaction = recoveryOverview.transaction}
+        <div class="preset-row">
+          <span>
+            <span class="preset-name">{transaction.packageName}</span>
+            <span class="badge">{transaction.marketManaged ? "市场来源" : "用户来源"}</span>
+            <span class="badge">
+              {transaction.phase === "isolated" ? "已验证隔离" : "已禁用，等待健康启动"}
+            </span>
+          </span>
+          <button
+            class="ghost"
+            onclick={() => (recoveryConfirm = { action: "rollback" })}
+            disabled={recoveryBusy}
+          >回滚并重新启用</button>
+          <button
+            class="primary"
+            onclick={() => (recoveryConfirm = { action: "finalize" })}
+            disabled={recoveryBusy || transaction.phase !== "isolated"}
+          >保留隔离</button>
+        </div>
+        <div class="trust-note">
+          回滚仅在 profile 仍与备份事务精确一致时执行；市场插件还必须通过当前线上 blocked、deprecated、兼容性和来源校验。
+        </div>
+      {:else if recoveryOverview?.terminalStartupFailure}
+        <div class="trust-note">
+          Desktop 从启动错误中识别到以下候选；日志只提供线索，Rust 已再次确认包同时存在于 dependencies 与激活 bundles。不会自动修改。
+        </div>
+        {#each recoveryOverview.candidates as candidate (candidate.packageName)}
+          <div class="preset-row">
+            <span>
+              <span class="preset-name">{candidate.packageName}</span>
+              <span class="badge">{candidate.versionSpec}</span>
+              <span class="badge">{candidate.signals.join(" · ")}</span>
+            </span>
+            <button
+              class="danger-ghost"
+              onclick={() => (recoveryConfirm = { action: "disable", candidate })}
+              disabled={recoveryBusy || pluginBusy}
+            >审阅并隔离</button>
+          </div>
+        {/each}
+      {/if}
+    </div>
+  {/if}
 
   <button class="logs-toggle" onclick={() => (logsOpen = !logsOpen)}>
     <span>{logsOpen ? "▾" : "▸"}</span>
@@ -1084,7 +1222,7 @@
     <div class="update-row">
       <span class="update-title">插件市场</span>
       {#if !storeBuild}
-        <button class="ghost" onclick={doPickSideload}>离线安装 .tgz</button>
+        <button class="ghost" onclick={doPickSideload} disabled={recoveryOverview?.transaction != null}>离线安装 .tgz</button>
       {/if}
     </div>
     <div class="plugin-row">
@@ -1111,6 +1249,11 @@
     {#if marketError}
       <div class="notice-box">{marketError}</div>
     {/if}
+    {#if marketOffline}
+      <div class="notice-box">
+        当前显示离线缓存{marketOfflineFetchedAt ? `（缓存时间 ${new Date(marketOfflineFetchedAt).toLocaleString()}）` : ""}。离线条目仅供浏览；详情、翻页和安装均已禁用，请联网后重新搜索。
+      </div>
+    {/if}
     {#if marketItems.length > 0}
       {#if marketCount !== null}
         <div class="preset-issues">当前筛选共 {marketCount} 个条目；按 cursor 顺序加载。</div>
@@ -1124,12 +1267,12 @@
             {#if item.category}<span class="badge">{item.category}</span>{/if}
             <span class="badge">{item.platforms.includes("desktop") ? "desktop" : "web-only"}</span>
           </span>
-          <button class="ghost" onclick={() => doMarketDetail(item.slug)} disabled={marketDetailBusy}>详情</button>
+          <button class="ghost" onclick={() => doMarketDetail(item.slug)} disabled={marketDetailBusy || marketOffline}>详情</button>
           {#if item.installable === true}
             <button
               class="primary"
               onclick={() => doMarketInstall(item)}
-              disabled={pluginBusy || marketPreparing}
+              disabled={pluginBusy || marketPreparing || marketOffline || recoveryOverview?.transaction != null}
             >{marketPreparing ? "校验中…" : "安装"}</button>
           {:else}
             <button class="ghost" disabled title={item.installReason ?? "该条目不可安装"}>
@@ -1176,7 +1319,7 @@
           type="text"
           placeholder="npm 包名，如 @cordisjs/plugin-example"
           bind:value={pluginName}
-          disabled={pluginBusy}
+          disabled={pluginBusy || recoveryOverview?.transaction != null}
           spellcheck="false"
           onkeydown={(e) => {
             if (e.key === "Enter") startPluginOp(pluginName, "install");
@@ -1186,7 +1329,7 @@
           <span class="plugin-busy"><span class="spinner"></span> 操作中…</span>
           <button class="danger-ghost" onclick={doCancelPluginOp}>取消</button>
         {:else}
-          <button class="primary" onclick={() => startPluginOp(pluginName, "install")} disabled={!pluginName.trim()}>
+          <button class="primary" onclick={() => startPluginOp(pluginName, "install")} disabled={!pluginName.trim() || recoveryOverview?.transaction != null}>
             安装
           </button>
         {/if}
@@ -1208,11 +1351,11 @@
             <span class="badge">{pluginStateText(p.state)}</span>
           </span>
           {#if p.state === "pending" && p.slug && p.entryRevision}
-            <button class="primary" onclick={() => doActivateMarketPlugin(p)} disabled={pluginBusy}>
+            <button class="primary" onclick={() => doActivateMarketPlugin(p)} disabled={pluginBusy || recoveryOverview?.transaction != null}>
               Activate
             </button>
           {/if}
-          <button class="ghost" onclick={() => startPluginOp(p.name, "uninstall")} disabled={pluginBusy}>卸载</button>
+          <button class="ghost" onclick={() => startPluginOp(p.name, "uninstall")} disabled={pluginBusy || recoveryOverview?.transaction != null}>卸载</button>
         </div>
       {/each}
     {:else}
@@ -1247,6 +1390,40 @@
     </div>
   </footer>
 </div>
+
+{#if recoveryConfirm}
+  <div class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="安全插件恢复确认">
+      <div class="modal-title">
+        {recoveryConfirm.action === "disable"
+          ? "确认隔离插件？"
+          : recoveryConfirm.action === "rollback"
+            ? "确认回滚隔离？"
+            : "确认保留隔离？"}
+      </div>
+      <div class="modal-name">
+        {recoveryConfirm.candidate?.packageName ?? recoveryOverview?.transaction?.packageName ?? "未知插件"}
+      </div>
+      <div class="modal-warn">
+        {#if recoveryConfirm.action === "disable"}
+          将先私有备份 package.json，再仅从 dsh.profile.bundles 精确移除此包并重启验证；不会卸载依赖或删除插件文件。失败时保留可审计事务与回滚入口。
+        {:else if recoveryConfirm.action === "rollback"}
+          将仅在当前 profile 与隔离结果逐字节一致时恢复备份并重启。市场插件必须在线重新通过安装门禁；回滚可能重新引入启动故障。
+        {:else}
+          当前插件将保持禁用，Desktop 会删除本次恢复备份。依赖和插件文件仍保留，可由你后续手动管理。
+        {/if}
+      </div>
+      <div class="modal-actions">
+        <button
+          class={recoveryConfirm.action === "finalize" ? "primary" : "danger-ghost"}
+          onclick={confirmRecoveryAction}
+          disabled={recoveryBusy}
+        >确认执行</button>
+        <button class="ghost" onclick={() => (recoveryConfirm = null)} disabled={recoveryBusy}>取消</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if remotePresetRequest}
   <div class="modal-backdrop">

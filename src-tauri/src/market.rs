@@ -11,8 +11,10 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::Manager;
 use url::Url;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -127,6 +129,15 @@ struct MarketSearchResponse {
     count: u32,
     #[serde(default)]
     page: MarketPage,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    cache: Option<MarketCacheMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketCacheMetadata {
+    status: &'static str,
+    fetched_at_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +174,9 @@ const STALE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const IMAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const JSON_MAX_BYTES: usize = 1024 * 1024;
 const CACHE_MAX_ENTRIES: usize = 64;
+const HOME_CACHE_SCHEMA: u32 = 1;
+const HOME_CACHE_LIMIT: u32 = 30;
+const HOME_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const APPROVED_NPM_REGISTRY_HOSTS: &[&str] = &["registry.npmjs.org"];
 
 pub fn is_valid_market_slug(slug: &str) -> bool {
@@ -209,8 +223,40 @@ fn image_url_allowed(url: &Url) -> bool {
 #[derive(Debug, Clone)]
 struct Cached {
     at: Instant,
+    fetched_at_ms: u64,
     value: Value,
     etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheDisposition {
+    Fresh,
+    Fetched,
+    Revalidated,
+    Offline,
+}
+
+struct CachedJson {
+    value: Value,
+    etag: Option<String>,
+    disposition: CacheDisposition,
+    fetched_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiskHomeCache {
+    schema_version: u32,
+    origin: String,
+    fetched_at_ms: u64,
+    etag: Option<String>,
+    catalog_revision: Option<String>,
+    response: Value,
+}
+
+struct HomeDiskState {
+    path: PathBuf,
+    cached: Option<DiskHomeCache>,
 }
 
 /// Market client state. Managed once and shared across Tauri commands.
@@ -219,16 +265,33 @@ pub struct MarketClient {
     http: reqwest::Client,
     search_cache: Mutex<HashMap<String, Cached>>,
     detail_cache: Mutex<HashMap<String, Cached>>,
+    home_disk: Mutex<Option<HomeDiskState>>,
 }
 
 impl MarketClient {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(app: &tauri::AppHandle) -> Result<Self, String> {
         let base_url =
             std::env::var("CORDIS_RUN_API").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        Self::with_base_url(base_url)
+        let canonical = base_url.trim_end_matches('/') == DEFAULT_BASE_URL;
+        let cache_path = if !cfg!(debug_assertions) && canonical {
+            Some(
+                app.path()
+                    .app_data_dir()
+                    .map_err(|e| format!("cannot resolve market cache directory: {e}"))?
+                    .join("desktop-state/market/home-v1.json"),
+            )
+        } else {
+            None
+        };
+        Self::with_configuration(base_url, cache_path)
     }
 
+    #[cfg(test)]
     fn with_base_url(base_url: String) -> Result<Self, String> {
+        Self::with_configuration(base_url, None)
+    }
+
+    fn with_configuration(base_url: String, cache_path: Option<PathBuf>) -> Result<Self, String> {
         let parsed =
             Url::parse(&base_url).map_err(|e| format!("invalid CORDIS_RUN_API URL: {e}"))?;
         if !base_url_allowed(&parsed) {
@@ -243,25 +306,36 @@ impl MarketClient {
             .user_agent(format!("dsh-desktop/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| format!("market client init failed: {e}"))?;
+        let normalized_origin = base_url.trim_end_matches('/').to_string();
+        let home_disk = cache_path.map(|path| HomeDiskState {
+            cached: load_disk_home_cache(&path, &normalized_origin),
+            path,
+        });
         Ok(MarketClient {
             base_url,
             http,
             search_cache: Mutex::new(HashMap::new()),
             detail_cache: Mutex::new(HashMap::new()),
+            home_disk: Mutex::new(home_disk),
         })
+    }
+
+    #[cfg(test)]
+    fn with_home_cache(base_url: String, path: PathBuf) -> Result<Self, String> {
+        Self::with_configuration(base_url, Some(path))
     }
 
     fn cache_fresh(
         cache: &Mutex<HashMap<String, Cached>>,
         key: &str,
         ttl: Duration,
-    ) -> Option<Value> {
+    ) -> Option<Cached> {
         let cache = cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.get(key).and_then(|entry| {
             if entry.at.elapsed() < ttl {
-                Some(entry.value.clone())
+                Some(entry.clone())
             } else {
                 None
             }
@@ -301,13 +375,14 @@ impl MarketClient {
             key.to_string(),
             Cached {
                 at: Instant::now(),
+                fetched_at_ms: unix_time_ms(),
                 value,
                 etag,
             },
         );
     }
 
-    fn cache_revalidated(cache: &Mutex<HashMap<String, Cached>>, key: &str) -> Option<Value> {
+    fn cache_revalidated(cache: &Mutex<HashMap<String, Cached>>, key: &str) -> Option<Cached> {
         let mut cache = cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -316,7 +391,8 @@ impl MarketClient {
             return None;
         }
         entry.at = Instant::now();
-        Some(entry.value.clone())
+        entry.fetched_at_ms = unix_time_ms();
+        Some(entry.clone())
     }
 
     /// Fetch JSON with a conditional request once a cached representation is
@@ -331,10 +407,15 @@ impl MarketClient {
         url: Url,
         label: &str,
         force_revalidate: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<CachedJson, String> {
         if !force_revalidate {
             if let Some(fresh) = Self::cache_fresh(cache, key, ttl) {
-                return Ok(fresh);
+                return Ok(CachedJson {
+                    value: fresh.value,
+                    etag: fresh.etag,
+                    disposition: CacheDisposition::Fresh,
+                    fetched_at_ms: fresh.fetched_at_ms,
+                });
             }
         }
 
@@ -351,17 +432,28 @@ impl MarketClient {
                 // conditionally revalidated 304) detail response. Returning
                 // a stale candidate here would let a revoked revision cross
                 // the confirmation boundary after a network failure.
-                if !force_revalidate {
+                if !force_revalidate && is_transport_failure(&error) {
                     if let Some(stale) = previous {
-                        return Ok(stale.value);
+                        return Ok(CachedJson {
+                            value: stale.value,
+                            etag: stale.etag,
+                            disposition: CacheDisposition::Offline,
+                            fetched_at_ms: stale.fetched_at_ms,
+                        });
                     }
                 }
                 return Err(format!("{label} request failed: {error}"));
             }
         };
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-            return Self::cache_revalidated(cache, key)
-                .ok_or_else(|| format!("{label} returned HTTP 304 without a cached response"));
+            let cached = Self::cache_revalidated(cache, key)
+                .ok_or_else(|| format!("{label} returned HTTP 304 without a cached response"))?;
+            return Ok(CachedJson {
+                value: cached.value,
+                etag: cached.etag,
+                disposition: CacheDisposition::Revalidated,
+                fetched_at_ms: cached.fetched_at_ms,
+            });
         }
 
         let status = response.status();
@@ -376,8 +468,68 @@ impl MarketClient {
         }
         let json = serde_json::from_slice::<Value>(&body)
             .map_err(|e| format!("{label} response was not JSON: {e}"))?;
-        Self::cache_put(cache, key, json.clone(), etag);
-        Ok(json)
+        Self::cache_put(cache, key, json.clone(), etag.clone());
+        Ok(CachedJson {
+            value: json,
+            etag,
+            disposition: CacheDisposition::Fetched,
+            fetched_at_ms: unix_time_ms(),
+        })
+    }
+
+    fn seed_home_from_disk(&self, key: &str) {
+        let envelope = self
+            .home_disk
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|state| state.cached.clone());
+        let Some(envelope) = envelope else {
+            return;
+        };
+        let mut cache = self
+            .search_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.contains_key(key) {
+            return;
+        }
+        let stale_at = Instant::now()
+            .checked_sub(SEARCH_TTL)
+            .unwrap_or_else(Instant::now);
+        cache.insert(
+            key.to_string(),
+            Cached {
+                at: stale_at,
+                fetched_at_ms: envelope.fetched_at_ms,
+                value: envelope.response,
+                etag: envelope.etag,
+            },
+        );
+    }
+
+    fn persist_home(&self, raw: &Value, etag: Option<String>, catalog_revision: Option<String>) {
+        let mut disk = self
+            .home_disk
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(state) = disk.as_mut() else {
+            return;
+        };
+        let envelope = DiskHomeCache {
+            schema_version: HOME_CACHE_SCHEMA,
+            origin: self.base_url.trim_end_matches('/').to_string(),
+            fetched_at_ms: unix_time_ms(),
+            etag,
+            catalog_revision,
+            response: raw.clone(),
+        };
+        let Ok(bytes) = serde_json::to_vec(&envelope) else {
+            return;
+        };
+        if crate::secure_fs::atomic_write(&state.path, &bytes, JSON_MAX_BYTES).is_ok() {
+            state.cached = Some(envelope);
+        }
     }
 
     pub async fn search(
@@ -404,6 +556,13 @@ impl MarketClient {
                 dsh_version
             )
         );
+        let is_home = query.is_empty()
+            && category.is_none_or(str::is_empty)
+            && cursor.is_none_or(str::is_empty)
+            && limit == HOME_CACHE_LIMIT;
+        if is_home {
+            self.seed_home_from_disk(&cache_key);
+        }
         let url = format!("{}/plugins", self.base_url.trim_end_matches('/'));
         let mut url = Url::parse(&url).map_err(|e| format!("bad market base URL: {e}"))?;
         url.query_pairs_mut()
@@ -418,7 +577,7 @@ impl MarketClient {
             url.query_pairs_mut().append_pair("category", category);
         }
 
-        let raw = self
+        let outcome = self
             .cached_json(
                 &self.search_cache,
                 &cache_key,
@@ -428,8 +587,17 @@ impl MarketClient {
                 false,
             )
             .await?;
-        let mut parsed: MarketSearchResponse = serde_json::from_value(raw)
+        let raw = outcome.value;
+        let mut parsed: MarketSearchResponse = serde_json::from_value(raw.clone())
             .map_err(|e| format!("market search response did not match the v4 DTO: {e}"))?;
+        if is_home
+            && matches!(
+                outcome.disposition,
+                CacheDisposition::Fetched | CacheDisposition::Revalidated
+            )
+        {
+            self.persist_home(&raw, outcome.etag.clone(), parsed.catalog_revision.clone());
+        }
         for item in &mut parsed.items {
             annotate_installability(item, dsh_version);
         }
@@ -438,6 +606,21 @@ impl MarketClient {
         parsed
             .items
             .retain(|item| item.platforms.iter().any(|value| value == platform));
+        if outcome.disposition == CacheDisposition::Offline {
+            for item in &mut parsed.items {
+                item.installable = false;
+                item.install_reason = Some(
+                    "offline cached catalog entries are display-only; reconnect to install"
+                        .to_string(),
+                );
+            }
+            parsed.page.cursor = None;
+            parsed.page.has_more = false;
+            parsed.cache = Some(MarketCacheMetadata {
+                status: "offline",
+                fetched_at_ms: outcome.fetched_at_ms,
+            });
+        }
         serde_json::to_value(parsed)
             .map_err(|e| format!("market search response serialization failed: {e}"))
     }
@@ -461,7 +644,8 @@ impl MarketClient {
                 "market detail",
                 force_revalidate,
             )
-            .await?;
+            .await?
+            .value;
         serde_json::from_value(raw)
             .map_err(|e| format!("market detail response did not match the v4 DTO: {e}"))
     }
@@ -511,6 +695,43 @@ impl MarketClient {
         let data_url = format!("data:{content_type};base64,{}", base64_encode(&bytes));
         Ok(serde_json::json!({ "dataUrl": data_url }))
     }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn is_transport_failure(error: &reqwest::Error) -> bool {
+    error.is_connect()
+        || error.is_timeout()
+        || (error.is_request() && !error.is_builder() && !error.is_redirect())
+}
+
+fn load_disk_home_cache(path: &std::path::Path, expected_origin: &str) -> Option<DiskHomeCache> {
+    let bytes = crate::secure_fs::read_bounded(path, JSON_MAX_BYTES as u64)
+        .ok()
+        .flatten()?;
+    let envelope: DiskHomeCache = serde_json::from_slice(&bytes).ok()?;
+    let now = unix_time_ms();
+    let max_age_ms = HOME_CACHE_MAX_AGE.as_millis().min(u128::from(u64::MAX)) as u64;
+    if envelope.schema_version != HOME_CACHE_SCHEMA
+        || envelope.origin != expected_origin
+        || envelope.fetched_at_ms > now
+        || now.saturating_sub(envelope.fetched_at_ms) > max_age_ms
+    {
+        return None;
+    }
+    let parsed: MarketSearchResponse = serde_json::from_value(envelope.response.clone()).ok()?;
+    if parsed.page.limit != HOME_CACHE_LIMIT
+        || parsed.catalog_revision != envelope.catalog_revision
+        || parsed.cache.is_some()
+    {
+        return None;
+    }
+    Some(envelope)
 }
 
 fn format_api_error(label: &str, status: reqwest::StatusCode, body: &[u8]) -> String {
@@ -787,6 +1008,26 @@ mod tests {
         .expect("valid fixture entry")
     }
 
+    fn home_response_body() -> String {
+        serde_json::json!({
+            "schemaVersion": 4,
+            "catalogRevision": "catalog-1",
+            "items": [serde_json::to_value(valid_entry()).expect("serialize entry")],
+            "count": 1,
+            "page": {"cursor": "opaque-next", "hasMore": true, "limit": HOME_CACHE_LIMIT}
+        })
+        .to_string()
+    }
+
+    fn cache_path(name: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "dshd-market-cache-{name}-{}",
+                crate::secure_fs::random_suffix().expect("cache test id")
+            ))
+            .join("home-v1.json")
+    }
+
     fn response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
         let mut out = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -1028,6 +1269,133 @@ mod tests {
         assert!(requests[1]
             .to_ascii_lowercase()
             .contains("if-none-match: \"fixture-v1\""));
+    }
+
+    #[test]
+    fn disk_home_cache_revalidates_with_etag_across_restart() {
+        let body = home_response_body();
+        let (base, worker) = test_server(vec![
+            response(
+                "200 OK",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("ETag", "\"home-v1\""),
+                ],
+                &body,
+            ),
+            response("304 Not Modified", &[("ETag", "\"home-v1\"")], ""),
+        ]);
+        let path = cache_path("revalidate");
+        let first =
+            MarketClient::with_home_cache(base.clone(), path.clone()).expect("first client");
+        let first_result = tauri::async_runtime::block_on(first.search(
+            "",
+            None,
+            Some(HOME_CACHE_LIMIT),
+            None,
+            "0.1.0-rc.7",
+        ));
+        assert!(first_result.is_ok());
+        assert!(path.is_file());
+        drop(first);
+
+        let second = MarketClient::with_home_cache(base, path.clone()).expect("second client");
+        let second_result = tauri::async_runtime::block_on(second.search(
+            "",
+            None,
+            Some(HOME_CACHE_LIMIT),
+            None,
+            "0.1.0-rc.7",
+        ))
+        .expect("304 should reuse persistent cache");
+        assert_eq!(second_result["items"][0]["slug"], "fixture-plugin");
+        assert!(second_result.get("cache").is_none());
+        let requests = worker.join().expect("fixture worker");
+        assert!(requests[1]
+            .to_ascii_lowercase()
+            .contains("if-none-match: \"home-v1\""));
+        std::fs::remove_dir_all(path.parent().expect("cache parent")).expect("remove cache");
+    }
+
+    #[test]
+    fn disk_home_transport_failure_is_display_only_and_has_no_pagination() {
+        let body = home_response_body();
+        let (base, worker) = test_server_disconnects_after_first_response(response(
+            "200 OK",
+            &[
+                ("Content-Type", "application/json"),
+                ("ETag", "\"home-v1\""),
+            ],
+            &body,
+        ));
+        let path = cache_path("offline");
+        let first =
+            MarketClient::with_home_cache(base.clone(), path.clone()).expect("first client");
+        tauri::async_runtime::block_on(first.search(
+            "",
+            None,
+            Some(HOME_CACHE_LIMIT),
+            None,
+            "0.1.0-rc.7",
+        ))
+        .expect("populate disk cache");
+        drop(first);
+
+        let second = MarketClient::with_home_cache(base, path.clone()).expect("second client");
+        let offline = tauri::async_runtime::block_on(second.search(
+            "",
+            None,
+            Some(HOME_CACHE_LIMIT),
+            None,
+            "0.1.0-rc.7",
+        ))
+        .expect("transport failure should use disk cache");
+        assert_eq!(offline["cache"]["status"], "offline");
+        assert_eq!(offline["items"][0]["installable"], false);
+        assert!(offline["items"][0]["installReason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("display-only")));
+        assert_eq!(offline["page"]["hasMore"], false);
+        assert!(offline["page"]["cursor"].is_null());
+        worker.join().expect("fixture worker");
+        std::fs::remove_dir_all(path.parent().expect("cache parent")).expect("remove cache");
+    }
+
+    #[test]
+    fn corrupt_expired_or_wrong_origin_disk_cache_is_ignored() {
+        let path = cache_path("invalid");
+        let parent = path.parent().expect("cache parent");
+        crate::secure_fs::ensure_private_dir(parent).expect("cache dir");
+        std::fs::write(&path, b"not-json").expect("corrupt cache");
+        assert!(load_disk_home_cache(&path, "https://cordis.run/api/v1").is_none());
+
+        let response: Value = serde_json::from_str(&home_response_body()).expect("home response");
+        let expired = DiskHomeCache {
+            schema_version: HOME_CACHE_SCHEMA,
+            origin: "https://cordis.run/api/v1".to_string(),
+            fetched_at_ms: unix_time_ms()
+                .saturating_sub(HOME_CACHE_MAX_AGE.as_millis() as u64)
+                .saturating_sub(1),
+            etag: Some("\"old\"".to_string()),
+            catalog_revision: Some("catalog-1".to_string()),
+            response: response.clone(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&expired).expect("expired JSON"))
+            .expect("expired cache");
+        assert!(load_disk_home_cache(&path, "https://cordis.run/api/v1").is_none());
+
+        let wrong_origin = DiskHomeCache {
+            fetched_at_ms: unix_time_ms(),
+            origin: "https://evil.example/api/v1".to_string(),
+            ..expired
+        };
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&wrong_origin).expect("wrong-origin JSON"),
+        )
+        .expect("wrong-origin cache");
+        assert!(load_disk_home_cache(&path, "https://cordis.run/api/v1").is_none());
+        std::fs::remove_dir_all(parent).expect("remove cache");
     }
 
     #[test]

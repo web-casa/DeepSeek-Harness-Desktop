@@ -18,6 +18,7 @@ import {
   info,
   assertNpmInAuditedRange,
 } from "./lib/common.ts";
+import { repositoryCommandContractProblems } from "./lib/command-contract.ts";
 
 const PLATFORM_KEYS = ["win32-x64", "win32-arm64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
 // Case-insensitive: the checksums we publish are lowercase, but a manual edit
@@ -48,6 +49,13 @@ function cargoDepVersion(path: string, dep: string): string {
 }
 
 const manifest = readManifest();
+
+// --- deny: command/capability contract ------------------------------------
+const commandContractProblems = repositoryCommandContractProblems(repoRoot);
+if (commandContractProblems.length > 0) {
+  fail(`command permission contract drift:\n- ${commandContractProblems.join("\n- ")}`);
+}
+ok("command permission contract aligned; Harness capability remains empty");
 
 // --- deny: version alignment ---------------------------------------------
 const desktopVersion = manifest.desktopVersion;
