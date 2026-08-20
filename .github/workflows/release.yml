@@ -263,8 +263,50 @@ jobs:
             Remove-Item -LiteralPath $encoded, $pfx -Force -ErrorAction SilentlyContinue
           }
 
-      - name: Bundle application (macOS)
+      # Do not pass empty APPLE_* variables to Tauri: the CLI treats the
+      # presence of APPLE_CERTIFICATE as a request to import a PKCS#12 even
+      # when GitHub resolved the missing secret to an empty string.
+      - name: Detect macOS signing configuration
         if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            if [[ -n "$APPLE_CERTIFICATE_PASSWORD" || -n "$APPLE_ID" || -n "$APPLE_PASSWORD" || -n "$APPLE_TEAM_ID" ]]; then
+              echo "::error::partial Apple signing configuration: APPLE_CERTIFICATE is missing"
+              exit 1
+            fi
+            echo "APPLE_SIGNING_CONFIGURED=0" >> "$GITHUB_ENV"
+            echo "Apple signing is not configured; building an intentionally unsigned DMG."
+            exit 0
+          fi
+
+          missing=()
+          [[ -n "$APPLE_CERTIFICATE_PASSWORD" ]] || missing+=(APPLE_CERTIFICATE_PASSWORD)
+          [[ -n "$APPLE_ID" ]] || missing+=(APPLE_ID)
+          [[ -n "$APPLE_PASSWORD" ]] || missing+=(APPLE_PASSWORD)
+          [[ -n "$APPLE_TEAM_ID" ]] || missing+=(APPLE_TEAM_ID)
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::partial Apple signing configuration; missing: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          echo "APPLE_SIGNING_CONFIGURED=1" >> "$GITHUB_ENV"
+
+      - name: Bundle application (macOS, unsigned)
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '0'
+        run: pnpm tauri build --bundles ${{ matrix.tauriBundles }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Bundle application (macOS, signed and notarized)
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_CONFIGURED == '1'
         run: pnpm tauri build --bundles ${{ matrix.tauriBundles }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
