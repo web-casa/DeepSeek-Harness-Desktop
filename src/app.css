@@ -223,6 +223,14 @@ h1 {
   flex-wrap: wrap;
 }
 
+.privacy-note {
+  margin: 10px 0 0;
+  max-width: 720px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
 button {
   font: inherit;
   font-size: 12.5px;

@@ -134,6 +134,9 @@ jobs:
       - name: Scripts unit tests (node:test, zero-dep)
         run: pnpm test:scripts
 
+      - name: Command permission contract
+        run: pnpm verify:command-contract
+
       # The ONLY blocking npm-side vulnerability gates: dependency-review is
       # org-gated (continue-on-error), so the two lockfiles get their own
       # audits. --audit-level=high keeps triage noise down.

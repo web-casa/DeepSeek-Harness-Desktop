@@ -19,6 +19,7 @@
     "release:preflight": "node scripts/release-preflight.ts",
     "icons": "node scripts/gen-icon.ts && tauri icon src-tauri/icons/icon-source.png --output src-tauri/icons",
     "test:scripts": "node --test \"scripts/lib/*.test.ts\"",
+    "verify:command-contract": "node scripts/verify-command-contract.ts",
     "verify:cordis-preset": "node scripts/verify-cordis-preset-download.ts",
     "verify:cordis-market": "node scripts/verify-cordis-market-api.ts",
     "tauri:windows:build": "tauri-windows-bundle build --runner pnpm",

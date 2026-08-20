@@ -8,11 +8,15 @@ mod build_info;
 mod commands;
 mod curated_plugins;
 mod deep_link;
+mod diagnostics;
 mod harness;
 mod market;
+mod observability;
 mod paths;
 mod plugins;
 mod preset;
+mod recovery;
+mod secure_fs;
 mod tray;
 
 fn main() {
@@ -93,6 +97,13 @@ fn main() {
                 .build(),
         )
         .setup(|app| {
+            // Observability is independent from DSH_HOME and must exist before
+            // Harness resolution so initialization failures are still visible.
+            // Failure to persist evidence does not block the application.
+            let observability =
+                std::sync::Arc::new(observability::Observability::new(app.handle()));
+            app.manage(observability);
+            app.manage(std::sync::Arc::new(diagnostics::DiagnosticExporter::new()));
             // Tray first: harness init failure paths publish snapshots that
             // must reach the tray status line.
             tray::init(&app.handle().clone());
@@ -110,7 +121,7 @@ fn main() {
             app.manage(deep_link::PendingPluginInstall::default());
             app.manage(deep_link::PendingRemotePreset::default());
             app.manage(deep_link::InstallArbiter::default());
-            let market = market::MarketClient::new()
+            let market = market::MarketClient::new(app.handle())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             app.manage(std::sync::Arc::new(market));
             deep_link::init(app.handle());
@@ -138,7 +149,8 @@ fn main() {
             commands::open_harness,
             commands::check_update,
             commands::install_update_and_restart,
-            commands::export_diagnostics,
+            diagnostics::export_diagnostics,
+            diagnostics::cancel_diagnostics_export,
             commands::quit_app,
             commands::list_user_presets,
             commands::preview_preset,
@@ -150,6 +162,10 @@ fn main() {
             commands::install_plugin,
             commands::uninstall_plugin,
             commands::cancel_plugin_op,
+            commands::get_plugin_recovery,
+            commands::begin_plugin_recovery,
+            commands::rollback_plugin_recovery,
+            commands::finalize_plugin_recovery,
             commands::get_pending_plugin_install,
             commands::dismiss_pending_plugin_install,
             commands::get_pending_remote_preset,
@@ -189,6 +205,10 @@ fn main() {
             }
         }
         tauri::RunEvent::Exit => {
+            let observability = app
+                .state::<std::sync::Arc<observability::Observability>>()
+                .clone();
+            observability.record("desktop_shutdown_started", serde_json::json!({}));
             // Kill a running `dsh plugin` tree first: it is a separate
             // process group / Job Object from the sidecar's Harness tree,
             // and on unix it would be orphaned once the shell exits.
@@ -200,6 +220,10 @@ fn main() {
             // and the Windows Job Object guarantees cleanup even if we
             // crash. This is the polite path.
             harness::shutdown_blocking(app);
+            observability.record("desktop_shutdown_completed", serde_json::json!({}));
+            if let Err(error) = observability.mark_clean() {
+                eprintln!("failed to finalize Desktop run evidence: {error}");
+            }
         }
         _ => {}
     });

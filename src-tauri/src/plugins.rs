@@ -202,6 +202,7 @@ pub fn ensure_pnpm_shim(dsh_home: &Path, node: &Path, pnpm_cjs: &Path) -> Result
 // disabled) and maintain this narrowly scoped, Desktop-owned pending record.
 
 const MARKET_PENDING_FILE: &str = "market-pending.json";
+const MARKET_ACTIVE_FILE: &str = "market-active.json";
 const MARKET_PENDING_MAX_BYTES: u64 = 256 * 1024;
 const PROFILE_LOCK_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -232,7 +233,7 @@ impl From<&crate::market::MarketInstallCandidate> for MarketPendingPlugin {
 }
 
 impl MarketPendingPlugin {
-    fn matches(&self, candidate: &crate::market::MarketInstallCandidate) -> bool {
+    pub(crate) fn matches(&self, candidate: &crate::market::MarketInstallCandidate) -> bool {
         self.slug == candidate.slug
             && self.entry_revision == candidate.entry_revision
             && self.package_name == candidate.package_name
@@ -245,6 +246,12 @@ impl MarketPendingPlugin {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct MarketPendingFile {
+    #[serde(default)]
+    plugins: BTreeMap<String, MarketPendingPlugin>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct MarketActiveFile {
     #[serde(default)]
     plugins: BTreeMap<String, MarketPendingPlugin>,
 }
@@ -274,7 +281,7 @@ fn checked_real_dir(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn market_tools_dir(dsh_home: &Path) -> Result<PathBuf, String> {
+pub(crate) fn market_tools_dir(dsh_home: &Path) -> Result<PathBuf, String> {
     checked_real_dir(dsh_home, "DSH_HOME")?;
     let tools = dsh_home.join(".desktop-tools");
     match std::fs::symlink_metadata(&tools) {
@@ -326,6 +333,87 @@ fn load_pending(dsh_home: &Path) -> Result<MarketPendingFile, String> {
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read market pending state: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("invalid market pending state: {e}"))
+}
+
+fn active_path(dsh_home: &Path) -> Result<PathBuf, String> {
+    Ok(market_tools_dir(dsh_home)?.join(MARKET_ACTIVE_FILE))
+}
+
+fn load_active(dsh_home: &Path) -> Result<MarketActiveFile, String> {
+    let path = active_path(dsh_home)?;
+    let Some(bytes) = crate::secure_fs::read_bounded(&path, MARKET_PENDING_MAX_BYTES)? else {
+        return Ok(MarketActiveFile::default());
+    };
+    serde_json::from_slice(&bytes).map_err(|e| format!("invalid active market receipt: {e}"))
+}
+
+fn write_active(dsh_home: &Path, active: &MarketActiveFile) -> Result<(), String> {
+    let path = active_path(dsh_home)?;
+    let bytes = serde_json::to_vec_pretty(active)
+        .map_err(|e| format!("cannot serialize active market receipt: {e}"))?;
+    crate::secure_fs::atomic_write(&path, &bytes, MARKET_PENDING_MAX_BYTES as usize)
+        .map_err(|e| format!("cannot write active market receipt: {e}"))
+}
+
+fn receipt_matches_active_profile(
+    manifest: &Value,
+    package_name: &str,
+    receipt: &MarketPendingPlugin,
+) -> Result<bool, String> {
+    Ok(receipt.package_name == package_name
+        && profile_dependencies(manifest)?
+            .get(package_name)
+            .and_then(Value::as_str)
+            == Some(receipt.tarball.as_str())
+        && profile_bundles(manifest)?.contains(package_name))
+}
+
+pub(crate) fn active_market_receipt(
+    dsh_home: &Path,
+    package_name: &str,
+) -> Result<Option<MarketPendingPlugin>, String> {
+    let active = load_active(dsh_home)?;
+    let Some(receipt) = active.plugins.get(package_name) else {
+        return Ok(None);
+    };
+    let (_, manifest) = read_profile_manifest(dsh_home)?;
+    Ok(receipt_matches_active_profile(&manifest, package_name, receipt)?.then(|| receipt.clone()))
+}
+
+/// Reconcile durable market provenance after the official plugin CLI may have
+/// removed, replaced, or reactivated dependencies. Only a currently active
+/// bundle whose saved source is the exact reviewed tarball retains authority
+/// to request a market-gated recovery rollback.
+pub(crate) fn reconcile_active_market_receipts(dsh_home: &Path) -> Result<(), String> {
+    let mut active = load_active(dsh_home)?;
+    if active.plugins.is_empty() {
+        return Ok(());
+    }
+    let (_, manifest) = read_profile_manifest(dsh_home)?;
+    let dependencies = profile_dependencies(&manifest)?;
+    let bundles = profile_bundles(&manifest)?;
+    let before = active.plugins.len();
+    active.plugins.retain(|package_name, receipt| {
+        receipt.package_name == *package_name
+            && dependencies.get(package_name).and_then(Value::as_str)
+                == Some(receipt.tarball.as_str())
+            && bundles.contains(package_name.as_str())
+    });
+    if active.plugins.len() != before {
+        write_active(dsh_home, &active)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_active_market_receipt(
+    dsh_home: &Path,
+    package_name: &str,
+) -> Result<(), String> {
+    let mut active = load_active(dsh_home)?;
+    if active.plugins.remove(package_name).is_some() {
+        write_active(dsh_home, &active)?;
+    }
+    Ok(())
 }
 
 /// Replace a same-directory temporary file without ever following the
@@ -419,7 +507,7 @@ fn write_pending(dsh_home: &Path, pending: &MarketPendingFile) -> Result<(), Str
     Ok(())
 }
 
-fn profile_dir(dsh_home: &Path) -> Result<PathBuf, String> {
+pub(crate) fn profile_dir(dsh_home: &Path) -> Result<PathBuf, String> {
     checked_real_dir(dsh_home, "DSH_HOME")?;
     let profiles = dsh_home.join("profiles");
     checked_real_dir(&profiles, "profiles directory")?;
@@ -441,7 +529,7 @@ pub fn market_profile_dir(dsh_home: &Path) -> Result<PathBuf, String> {
     profile_dir(dsh_home)
 }
 
-fn read_profile_manifest(dsh_home: &Path) -> Result<(PathBuf, Value), String> {
+pub(crate) fn read_profile_manifest(dsh_home: &Path) -> Result<(PathBuf, Value), String> {
     let profile = profile_dir(dsh_home)?;
     let manifest = profile.join("package.json");
     let text = std::fs::read_to_string(&manifest)
@@ -454,15 +542,20 @@ fn read_profile_manifest(dsh_home: &Path) -> Result<(PathBuf, Value), String> {
     Ok((profile, value))
 }
 
-fn write_profile_manifest(profile: &Path, value: &Value) -> Result<(), String> {
+pub(crate) fn write_profile_manifest(profile: &Path, value: &Value) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| format!("cannot serialize web profile package.json: {e}"))?;
+    bytes.push(b'\n');
+    write_profile_bytes(profile, &bytes)
+}
+
+pub(crate) fn write_profile_bytes(profile: &Path, bytes: &[u8]) -> Result<(), String> {
     let path = profile.join("package.json");
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|e| format!("cannot inspect web profile package.json: {e}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("web profile package.json must be a regular file".to_string());
     }
-    let text = serde_json::to_string_pretty(value)
-        .map_err(|e| format!("cannot serialize web profile package.json: {e}"))?;
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -477,10 +570,8 @@ fn write_profile_manifest(profile: &Path, value: &Value) -> Result<(), String> {
         .create_new(true)
         .open(&temp)
         .map_err(|e| format!("cannot create web profile package.json temp file: {e}"))?;
-    file.write_all(text.as_bytes())
+    file.write_all(bytes)
         .map_err(|e| format!("cannot write web profile package.json: {e}"))?;
-    file.write_all(b"\n")
-        .map_err(|e| format!("cannot finalize web profile package.json: {e}"))?;
     file.sync_all()
         .map_err(|e| format!("cannot sync web profile package.json: {e}"))?;
     #[cfg(unix)]
@@ -491,7 +582,7 @@ fn write_profile_manifest(profile: &Path, value: &Value) -> Result<(), String> {
     replace_existing_file(&temp, &path, "web profile package.json")
 }
 
-fn profile_bundles_mut(value: &mut Value) -> Result<&mut Vec<Value>, String> {
+pub(crate) fn profile_bundles_mut(value: &mut Value) -> Result<&mut Vec<Value>, String> {
     value
         .get_mut("dsh")
         .and_then(Value::as_object_mut)
@@ -502,7 +593,7 @@ fn profile_bundles_mut(value: &mut Value) -> Result<&mut Vec<Value>, String> {
         .ok_or_else(|| "web profile package.json has no dsh.profile.bundles array".to_string())
 }
 
-fn profile_bundles(value: &Value) -> Result<HashSet<&str>, String> {
+pub(crate) fn profile_bundles(value: &Value) -> Result<HashSet<&str>, String> {
     let values = value
         .get("dsh")
         .and_then(Value::as_object)
@@ -521,7 +612,9 @@ fn profile_bundles(value: &Value) -> Result<HashSet<&str>, String> {
         .collect()
 }
 
-fn profile_dependencies(value: &Value) -> Result<&serde_json::Map<String, Value>, String> {
+pub(crate) fn profile_dependencies(
+    value: &Value,
+) -> Result<&serde_json::Map<String, Value>, String> {
     value
         .get("dependencies")
         .and_then(Value::as_object)
@@ -543,7 +636,8 @@ pub fn pre_disable_market_plugin(
         }
     }
     bundles.retain(|bundle| bundle.as_str() != Some(candidate.package_name.as_str()));
-    write_profile_manifest(&profile, &manifest)
+    write_profile_manifest(&profile, &manifest)?;
+    remove_active_market_receipt(dsh_home, &candidate.package_name)
 }
 
 fn lockfile_package_key(line: &str) -> Option<&str> {
@@ -687,7 +781,7 @@ fn lockfile_integrity(profile: &Path, package_name: &str, version: &str) -> Resu
 /// Verify all installation facts pnpm materialized. No build script can run
 /// in the market pnpm invocation, and normal pending verification requires
 /// the profile to stay pre-disabled throughout this check.
-fn verify_market_installation(
+pub(crate) fn verify_market_installation(
     dsh_home: &Path,
     candidate: &crate::market::MarketInstallCandidate,
     require_inactive: bool,
@@ -784,6 +878,17 @@ pub fn activate_market_plugin(
     // process crash. In that recovery case accept the already-active bundle
     // after re-verifying its exact source, then clean up the marker below.
     verify_market_installation(dsh_home, candidate, false)?;
+
+    // Persist rollback provenance before enabling the bundle. Inactive or
+    // source-mismatched receipts are ignored and pruned by mutation paths; the
+    // reverse ordering could leave an active market plugin that recovery
+    // cannot revalidate.
+    let mut active = load_active(dsh_home)?;
+    active.plugins.insert(
+        candidate.package_name.clone(),
+        MarketPendingPlugin::from(candidate),
+    );
+    write_active(dsh_home, &active)?;
 
     let (profile, mut manifest) = read_profile_manifest(dsh_home)?;
     let bundles = profile_bundles_mut(&mut manifest)?;
@@ -914,6 +1019,63 @@ impl Default for PluginRunner {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_market_receipt_round_trips_for_recovery_provenance() {
+        let home = std::env::temp_dir().join(format!(
+            "dshd-active-receipt-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        let receipt = MarketPendingPlugin::from(&candidate);
+        let mut active = MarketActiveFile::default();
+        active
+            .plugins
+            .insert(receipt.package_name.clone(), receipt.clone());
+        write_active(&home, &active).unwrap();
+        assert_eq!(
+            active_market_receipt(&home, "fixture-plugin")
+                .unwrap()
+                .map(|value| value.entry_revision),
+            Some("revision-1".to_string())
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn active_market_receipts_are_pruned_after_deactivation_or_source_replacement() {
+        let home = std::env::temp_dir().join(format!(
+            "dshd-active-receipt-prune-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        let receipt = MarketPendingPlugin::from(&candidate);
+        let mut active = MarketActiveFile::default();
+        active
+            .plugins
+            .insert(receipt.package_name.clone(), receipt.clone());
+        write_active(&home, &active).unwrap();
+
+        let (profile, mut manifest) = read_profile_manifest(&home).unwrap();
+        manifest["dependencies"][&candidate.package_name] = Value::String("2.0.0".to_string());
+        write_profile_manifest(&profile, &manifest).unwrap();
+        assert!(active_market_receipt(&home, &candidate.package_name)
+            .unwrap()
+            .is_none());
+        reconcile_active_market_receipts(&home).unwrap();
+        assert!(load_active(&home).unwrap().plugins.is_empty());
+
+        setup_market_profile(&home, &candidate);
+        active.plugins.insert(receipt.package_name.clone(), receipt);
+        write_active(&home, &active).unwrap();
+        pre_disable_market_plugin(&home, &candidate).unwrap();
+        assert!(load_active(&home).unwrap().plugins.is_empty());
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn package_names_accept_reject() {

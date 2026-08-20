@@ -45,6 +45,10 @@ pub struct SharedState {
     pub logs: Vec<(String, String)>,
     pub versions: Versions,
     pub dsh_home: Option<String>,
+    /// True only when startup reached a terminal failure boundary (init
+    /// failure, final retry exhaustion, or sidecar death while starting).
+    /// Recovery mutations are forbidden for ordinary post-start crashes.
+    pub terminal_startup_failure: bool,
 }
 
 impl Runtime {
@@ -274,7 +278,18 @@ fn apply_state_event(
                     .get("error")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown sidecar error");
+                let startup = matches!(
+                    state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .status,
+                    Status::Idle | Status::Starting
+                );
                 set_error(state, msg.to_string());
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .terminal_startup_failure = startup;
             }
         }
         "sidecar" => {
@@ -287,10 +302,11 @@ fn apply_state_event(
             }
         }
         "starting" => {
-            state
+            let mut state = state
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .status = Status::Starting;
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.status = Status::Starting;
+            state.terminal_startup_failure = false;
         }
         "ready" => {
             let url = ev
@@ -316,6 +332,7 @@ fn apply_state_event(
                 s.status = Status::Running;
                 s.url = Some(url.clone());
                 s.last_error = None;
+                s.terminal_startup_failure = false;
             }
             // A successful boot resets the crash counter.
             restart_attempts.store(0, Ordering::SeqCst);
@@ -383,6 +400,10 @@ fn apply_state_event(
                         describe()
                     ),
                 );
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .terminal_startup_failure = true;
             }
         }
         "error" => {
@@ -456,7 +477,56 @@ fn handle_event(
             }
         }
     }
+    record_lifecycle_event(app, ev);
+    if ev.get("type").and_then(Value::as_str) == Some("ready")
+        && ev
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(is_valid_readiness_url)
+    {
+        if let Some(runtime) = app.try_state::<Runtime>() {
+            if let Some(paths) = runtime.paths() {
+                if let Err(error) = crate::recovery::commit_after_ready(&paths.dsh_home) {
+                    log_line(
+                        state,
+                        "desktop",
+                        &format!("plugin recovery commit failed: {error}"),
+                    );
+                }
+            }
+        }
+    }
     publish_snapshot(app, state);
+}
+
+fn record_lifecycle_event(app: &AppHandle, event: &Value) {
+    let Some(kind) = event.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    // Persist only fixed shell-owned fields. In particular, never persist an
+    // error message, ready URL, stdout/stderr line, or arbitrary event value.
+    let details = match kind {
+        "sidecar" => {
+            serde_json::json!({ "protocol": event.get("protocol").and_then(Value::as_u64) })
+        }
+        "starting" | "stopping" | "stopped" => serde_json::json!({}),
+        "ready" => {
+            let valid = event
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(is_valid_readiness_url);
+            if !valid {
+                return;
+            }
+            serde_json::json!({ "validated": true })
+        }
+        "crashed" => serde_json::json!({ "exitCode": event.get("code").and_then(Value::as_i64) }),
+        "error" => serde_json::json!({ "reported": true }),
+        _ => return,
+    };
+    if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
+        observability.record(&format!("harness_{kind}"), details);
+    }
 }
 
 /// Single snapshot publication channel: emits to the bootstrap window AND
@@ -532,6 +602,10 @@ struct RuntimeArcs {
 fn fail_init(app: &AppHandle, arcs: RuntimeArcs, paths: Option<RuntimePaths>, message: String) {
     let state = Arc::new(Mutex::new(SharedState::default()));
     set_error(&state, message);
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .terminal_startup_failure = true;
     app.manage(Runtime {
         state: state.clone(),
         stdin: arcs.stdin,
@@ -543,6 +617,9 @@ fn fail_init(app: &AppHandle, arcs: RuntimeArcs, paths: Option<RuntimePaths>, me
         restart_gen: arcs.restart_gen,
     });
     // fail_init historically emitted nothing — the tray/UI must see it too.
+    if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
+        observability.record("harness_initialization_failed", serde_json::json!({}));
+    }
     publish_snapshot(app, &state);
 }
 
@@ -557,6 +634,10 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
+
+    if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
+        observability.record("sidecar_spawn_requested", serde_json::json!({}));
+    }
 
     let (mut child, stdin, stdout, stderr) = match spawn_result {
         Ok(mut c) => {
@@ -629,12 +710,22 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
                         let mut s = state_c
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let failed_while_starting = s.status == Status::Starting;
                         s.last_error = Some(format!("sidecar 进程意外退出 (code {code})"));
                         s.status = Status::Crashed;
                         s.pid = None;
                         s.url = None;
+                        s.terminal_startup_failure = failed_while_starting;
                     }
                     publish_snapshot(&app_c, &state_c);
+                    if let Some(observability) =
+                        app_c.try_state::<Arc<crate::observability::Observability>>()
+                    {
+                        observability.record(
+                            "sidecar_exited_unexpectedly",
+                            serde_json::json!({ "exitCodeKnown": status.code().is_some() }),
+                        );
+                    }
                 }
                 return;
             }
@@ -708,11 +799,12 @@ fn start_harness(runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> 
         "env": { "DSH_HOME": paths.dsh_home, "DSH_TELEMETRY_DISABLED": "1" },
     });
     send_raw(runtime, &cmd)?;
-    runtime
+    let mut state = runtime
         .state
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .status = Status::Starting;
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.terminal_startup_failure = false;
+    state.status = Status::Starting;
     Ok(())
 }
 
@@ -811,11 +903,19 @@ pub fn init(app: &AppHandle) {
 
     if let Err(e) = launch_sidecar(app, &runtime, &paths) {
         set_error(&state, e);
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .terminal_startup_failure = true;
         publish_snapshot(app, &state);
         return;
     }
     if let Err(e) = start_harness(&runtime, &paths) {
         set_error(&state, e);
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .terminal_startup_failure = true;
         publish_snapshot(app, &state);
     }
 }
@@ -841,6 +941,7 @@ pub fn request_restart(app: &AppHandle) -> Result<(), String> {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             s.last_error = Some(e.clone());
             s.status = Status::Crashed;
+            s.terminal_startup_failure = false;
         } else {
             reset_restart_attempts(&runtime);
             let mut s = runtime
@@ -848,6 +949,7 @@ pub fn request_restart(app: &AppHandle) -> Result<(), String> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             s.last_error = None;
+            s.terminal_startup_failure = false;
         }
         publish_snapshot(app, &runtime.state);
         return result;
@@ -864,6 +966,7 @@ pub fn request_restart(app: &AppHandle) -> Result<(), String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         s.last_error = Some(e.clone());
         s.status = Status::Crashed;
+        s.terminal_startup_failure = false;
     } else {
         reset_restart_attempts(&runtime);
         let mut s = runtime
@@ -872,6 +975,7 @@ pub fn request_restart(app: &AppHandle) -> Result<(), String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         s.last_error = None;
         s.status = Status::Starting;
+        s.terminal_startup_failure = false;
     }
     publish_snapshot(app, &runtime.state);
     result
@@ -1005,6 +1109,10 @@ mod tests {
     #[test]
     fn ready_event_sets_running_and_requests_window() {
         let (state, shutting_down, attempts) = fresh();
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .terminal_startup_failure = true;
         attempts.store(2, Ordering::SeqCst);
         let effects = apply_state_event(
             &state,
@@ -1018,6 +1126,7 @@ mod tests {
         assert_eq!(s.status, Status::Running);
         assert_eq!(s.url.as_deref(), Some("http://127.0.0.1:41234"));
         assert_eq!(s.last_error, None);
+        assert!(!s.terminal_startup_failure);
         drop(s);
         assert_eq!(attempts.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -1054,6 +1163,7 @@ mod tests {
         assert_eq!(s.status, Status::Starting);
         assert_eq!(s.url, None);
         assert_eq!(s.pid, None);
+        assert!(!s.terminal_startup_failure);
         drop(s);
         assert_eq!(effects, vec![SideEffect::ScheduleAutoRestart(1)]);
     }
@@ -1073,6 +1183,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(s.status, Status::Crashed);
         assert!(s.last_error.as_deref().unwrap().contains("停止自动重启"));
+        assert!(s.terminal_startup_failure);
         drop(s);
         assert!(effects.is_empty());
     }
@@ -1197,8 +1308,29 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(s.status, Status::Crashed);
         assert_eq!(s.last_error.as_deref(), Some("nothing to restart"));
+        assert!(s.terminal_startup_failure);
         drop(s);
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn failed_non_startup_ack_never_authorizes_recovery() {
+        let (state, shutting_down, attempts) = fresh();
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status = Status::Running;
+        apply_state_event(
+            &state,
+            &shutting_down,
+            &attempts,
+            &json!({"type":"ack","id":101,"ok":false,"error":"shutdown refused"}),
+        );
+        let state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(state.status, Status::Crashed);
+        assert!(!state.terminal_startup_failure);
     }
 
     #[test]

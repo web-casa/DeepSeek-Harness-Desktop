@@ -54,7 +54,9 @@ export interface UpdateInfo {
 export const checkUpdate = (): Promise<UpdateInfo> => invoke("check_update");
 export const installUpdateAndRestart = (): Promise<void> =>
   invoke("install_update_and_restart");
-export const exportDiagnostics = (): Promise<void> => invoke("export_diagnostics");
+export const exportDiagnostics = (): Promise<boolean> => invoke("export_diagnostics");
+export const cancelDiagnosticsExport = (): Promise<boolean> =>
+  invoke("cancel_diagnostics_export");
 export const quitApp = (): Promise<void> => invoke("quit_app");
 
 export interface PresetPreview {
@@ -124,6 +126,44 @@ export const installPlugin = (name: string): Promise<void> =>
 export const uninstallPlugin = (name: string): Promise<void> =>
   invoke("uninstall_plugin", { name });
 export const cancelPluginOp = (): Promise<void> => invoke("cancel_plugin_op");
+
+export type PluginRecoveryPhase =
+  | "prepared"
+  | "disabledAwaitingBoot"
+  | "isolated"
+  | "rollbackPrepared";
+
+export interface PluginRecoveryCandidate {
+  packageName: string;
+  versionSpec: string;
+  signals: string[];
+  marketManaged: boolean;
+}
+
+export interface PluginRecoveryTransaction {
+  transactionId: string;
+  packageName: string;
+  phase: PluginRecoveryPhase;
+  signals: string[];
+  marketManaged: boolean;
+}
+
+export interface PluginRecoveryOverview {
+  terminalStartupFailure: boolean;
+  candidates: PluginRecoveryCandidate[];
+  transaction?: PluginRecoveryTransaction | null;
+}
+
+export const getPluginRecovery = (): Promise<PluginRecoveryOverview> =>
+  invoke("get_plugin_recovery");
+export const beginPluginRecovery = (
+  packageName: string,
+): Promise<PluginRecoveryTransaction> =>
+  invoke("begin_plugin_recovery", { packageName });
+export const rollbackPluginRecovery = (transactionId: string): Promise<void> =>
+  invoke("rollback_plugin_recovery", { transactionId });
+export const finalizePluginRecovery = (transactionId: string): Promise<void> =>
+  invoke("finalize_plugin_recovery", { transactionId });
 
 
 export interface MarketPluginSource {
@@ -203,6 +243,10 @@ export interface MarketSearchResult {
   items: MarketPluginSummary[];
   count: number;
   page: MarketSearchPage;
+  cache?: {
+    status: "offline";
+    fetchedAtMs: number;
+  };
 }
 
 export const marketSearch = (
