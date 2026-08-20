@@ -21,6 +21,7 @@
     "test:scripts": "node --test \"scripts/lib/*.test.ts\"",
     "verify:cordis-preset": "node scripts/verify-cordis-preset-download.ts",
     "verify:cordis-market": "node scripts/verify-cordis-market-api.ts",
+    "verify:cordis-desktop-e2e": "node scripts/verify-cordis-desktop-lifecycle.ts",
     "tauri:windows:build": "tauri-windows-bundle build --runner pnpm",
     "verify:sideload": "node scripts/verify-sideload.ts"
   },

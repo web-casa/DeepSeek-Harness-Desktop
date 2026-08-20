@@ -59,6 +59,11 @@ git push origin v0.2.1
 归档检查与用户确认。默认公开样本是 `code`；在手动演练中可通过
 `preset_slug` 输入（或本地 `CORDIS_PRESET_SLUG`）选择另一个合法 slug。
 
+已存在审核公开市场条目时，发布负责人还可按 README「cordis.run 生产生命周期
+E2E（显式手动）」执行一次真实 Desktop bootstrap IPC 联调。它必须显式 opt-in，
+在临时 `DSH_HOME` 中验证 pending/Activate/restart，不属于普通 CI，也不改变
+Microsoft Store 的审核 allowlist。
+
 ### 3b. Microsoft Store MSIX 构建
 
 `build-msix` job 与双平台 build 并行，仅发布/演练时运行：

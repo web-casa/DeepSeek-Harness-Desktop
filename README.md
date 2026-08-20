@@ -117,6 +117,26 @@ CORDIS_MARKET_PROBE_SLUG=<reviewed-public-slug> pnpm verify:cordis-market
 Microsoft Store 构建仍只允许 `src-tauri/store-curated-plugins.json` 的审核快照；
 通过生产 probe 不等于获得 Store allowlist 权限。
 
+### cordis.run 生产生命周期 E2E（显式手动）
+
+下面的命令是真实 Desktop bootstrap IPC 联调，不是普通 CI：它使用生产 API，但把
+`DSH_HOME`、pnpm store 和安装结果全部放进临时目录，结束后清理。它要求 Linux 的
+`tauri-driver`、`WebKitWebDriver` 和 `xvfb-run`，并强制 web 分发；不会改动
+`store-curated-plugins.json`，也不会在 Microsoft Store 模式下运行。
+
+```bash
+pnpm runtime:all
+pnpm tauri build --debug --no-bundle
+CORDIS_DESKTOP_PRODUCTION_E2E=1 \
+  CORDIS_DESKTOP_E2E_APP="$PWD/target/debug/deepseek-harness-desktop" \
+  pnpm verify:cordis-desktop-e2e
+```
+
+默认条目是已审核公开的 `dsh-plugin-pkgseek`。测试会证明 stale revision 拒绝、
+`pre-disable → pnpm --ignore-scripts → lockfile integrity → pending`、显式 Activate
+和 Harness 重启后的 active 状态；缺少显式环境变量或将 `CORDIS_RUN_API` 指向非生产
+地址时会拒绝执行。
+
 > `~/.cargo` 不可写时：`export CARGO_HOME=<repo>/.tmp/cargo-home`。
 
 ### 质量门

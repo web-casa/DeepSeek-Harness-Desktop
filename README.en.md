@@ -116,6 +116,28 @@ pnpm test:scripts                                 # node:test unit suite (zero d
 pnpm tauri dev                                    # desktop dev mode
 ```
 
+### Explicit production Cordis lifecycle E2E
+
+This is a manual bootstrap-IPC test, not ordinary CI. It reads the production
+API but creates an isolated temporary `DSH_HOME`, pnpm store, and install
+state which it removes on exit. On Linux it requires `tauri-driver`,
+`WebKitWebDriver`, and `xvfb-run`; it asserts the web distribution and never
+changes `store-curated-plugins.json` or exercises a Microsoft Store build.
+
+```bash
+pnpm runtime:all
+pnpm tauri build --debug --no-bundle
+CORDIS_DESKTOP_PRODUCTION_E2E=1 \
+  CORDIS_DESKTOP_E2E_APP="$PWD/target/debug/deepseek-harness-desktop" \
+  pnpm verify:cordis-desktop-e2e
+```
+
+The default reviewed public entry is `dsh-plugin-pkgseek`. The test proves
+stale-revision refusal, `pre-disable → pnpm --ignore-scripts → lockfile
+integrity → pending`, explicit Activate, and active state after a Harness
+restart. It refuses to run without the explicit opt-in or with a non-production
+`CORDIS_RUN_API` override.
+
 > Read-only `~/.cargo`? `export CARGO_HOME=<repo>/.tmp/cargo-home`.
 
 ### Quality gates
