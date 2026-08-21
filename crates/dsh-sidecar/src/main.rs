@@ -39,7 +39,7 @@ use dsh_sidecar::platform::{self, PlatformChild, SpawnSpec};
 use serde_json::{json, Value};
 use std::io::{BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -48,6 +48,11 @@ const TICK: Duration = Duration::from_millis(100);
 const FORCE_GRACE: Duration = Duration::from_secs(5);
 const MAX_LINE: usize = 8192;
 const MAX_COMMAND_LINE: usize = 64 * 1024;
+/// Bound child-output memory while still allowing short bursts. Readers block
+/// on this queue once full, propagating backpressure into the OS pipe.
+const LINE_CHANNEL_CAPACITY: usize = 256;
+/// Yield to heartbeat/command handling after each output burst.
+const MAX_LINE_BATCH: usize = 64;
 
 /// Pure truncation oracle retained for the property tests. Production output
 /// uses `for_each_bounded_line`, which applies the cap while reading rather
@@ -336,7 +341,7 @@ struct Running {
 }
 
 impl Running {
-    fn spawn(spec: &SpawnSpec, tx: &Sender<LineEvent>) -> Result<Self, String> {
+    fn spawn(spec: &SpawnSpec, tx: &SyncSender<LineEvent>) -> Result<Self, String> {
         let gen = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         // OsString snapshot: `std::env::vars()` would panic on non-UTF-8 env.
         // RAW on purpose — the sanitizer lives inside PlatformChild::spawn.
@@ -404,7 +409,8 @@ fn main() {
 
     emit(json!({"type":"sidecar","version":env!("CARGO_PKG_VERSION")}));
 
-    let (line_tx, line_rx): (Sender<LineEvent>, Receiver<LineEvent>) = channel();
+    let (line_tx, line_rx): (SyncSender<LineEvent>, Receiver<LineEvent>) =
+        sync_channel(LINE_CHANNEL_CAPACITY);
     let (cmd_tx, cmd_rx): (Sender<String>, Receiver<String>) = channel();
     // Hang reports from heartbeat watchers; the payload is the generation of
     // the child the watcher was probing, so a stale watcher's verdict can
@@ -476,6 +482,53 @@ fn main() {
                 state = "stopped";
                 url = None;
                 emit(json!({"type":"stopped","code":null,"pid":null}));
+            }
+        }};
+    }
+
+    macro_rules! handle_line_event {
+        ($event:expr) => {{
+            let (gen, stream, line) = $event;
+            if gen == current_gen {
+                if let Some(u) = extract_local_url(&line) {
+                    if state == "starting" {
+                        url = Some(u.clone());
+                        state = "running";
+                        ready_deadline = None;
+                        emit(json!({"type":"ready","url":u}));
+                        // Arm the liveness watcher for THIS generation. It
+                        // exits on the first of: disabled (stop/shutdown),
+                        // generation change (restart/respawn), or a hang
+                        // verdict (reported via hb_tx with its generation).
+                        if !hb_interval.is_zero() {
+                            hb_enabled.store(true, Ordering::Relaxed);
+                            let my_gen = current_gen;
+                            let url_c = u.clone();
+                            let gen_c = Arc::clone(&hb_gen);
+                            let enabled_c = Arc::clone(&hb_enabled);
+                            let tx = hb_tx.clone();
+                            let interval = hb_interval;
+                            let read_timeout = hb_read_timeout;
+                            let limit = hb_fail_limit;
+                            thread::spawn(move || {
+                                let mut hb = Heartbeat::new(limit);
+                                loop {
+                                    thread::sleep(interval);
+                                    if !enabled_c.load(Ordering::Relaxed)
+                                        || gen_c.load(Ordering::Relaxed) != my_gen
+                                    {
+                                        return;
+                                    }
+                                    if hb.observe(http_probe(&url_c, read_timeout)) {
+                                        let _ = tx.send(my_gen);
+                                        return;
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+                emit(json!({"type":"log","stream":stream,"line":line}));
             }
         }};
     }
@@ -592,48 +645,15 @@ fn main() {
 
         // 3. Pump child output lines.
         match line_rx.recv_timeout(TICK) {
-            Ok((gen, stream, line)) if gen == current_gen => {
-                if let Some(u) = extract_local_url(&line) {
-                    if state == "starting" {
-                        url = Some(u.clone());
-                        state = "running";
-                        ready_deadline = None;
-                        emit(json!({"type":"ready","url":u}));
-                        // Arm the liveness watcher for THIS generation. It
-                        // exits on the first of: disabled (stop/shutdown),
-                        // generation change (restart/respawn), or a hang
-                        // verdict (reported via hb_tx with its generation).
-                        if !hb_interval.is_zero() {
-                            hb_enabled.store(true, Ordering::Relaxed);
-                            let my_gen = current_gen;
-                            let url_c = u.clone();
-                            let gen_c = Arc::clone(&hb_gen);
-                            let enabled_c = Arc::clone(&hb_enabled);
-                            let tx = hb_tx.clone();
-                            let interval = hb_interval;
-                            let read_timeout = hb_read_timeout;
-                            let limit = hb_fail_limit;
-                            thread::spawn(move || {
-                                let mut hb = Heartbeat::new(limit);
-                                loop {
-                                    thread::sleep(interval);
-                                    if !enabled_c.load(Ordering::Relaxed)
-                                        || gen_c.load(Ordering::Relaxed) != my_gen
-                                    {
-                                        return;
-                                    }
-                                    if hb.observe(http_probe(&url_c, read_timeout)) {
-                                        let _ = tx.send(my_gen);
-                                        return;
-                                    }
-                                }
-                            });
-                        }
+            Ok(event) => {
+                handle_line_event!(event);
+                for _ in 1..MAX_LINE_BATCH {
+                    match line_rx.try_recv() {
+                        Ok(event) => handle_line_event!(event),
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     }
                 }
-                emit(json!({"type":"log","stream":stream,"line":line}));
             }
-            Ok(_) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // Pipes closed while the child is still un-reaped: nothing to read.
@@ -1048,6 +1068,8 @@ mod tests {
     mod platform_tests {
         use super::*;
         use platform::{PlatformChild, SpawnSpec};
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command as ProcessCommand, Stdio};
         use std::time::{Duration, Instant};
 
         fn spec(command: &str) -> SpawnSpec {
@@ -1153,6 +1175,103 @@ mod tests {
             let status =
                 wait_exit(&mut child, Duration::from_secs(10)).expect("child did not exit");
             assert_eq!(status.code(), Some(0));
+        }
+
+        /// Re-exec helper for `abrupt_parent_death_kills_the_process_tree`.
+        /// It intentionally remains alive until the outer test sends SIGKILL,
+        /// proving cleanup does not depend on Drop or a signal handler.
+        #[test]
+        fn abrupt_parent_death_helper() {
+            if std::env::var_os("DSH_PARENT_DEATH_HELPER").is_none() {
+                return;
+            }
+            let mut child = PlatformChild::spawn(
+                &spec("sleep 60 & echo DSH_TREE_PIDS=$$,$!; wait"),
+                &proc_env(),
+            )
+            .unwrap();
+            let stdout = child.child.stdout.take().expect("child stdout");
+            let mut reader = BufReader::new(stdout);
+            let mut marker = String::new();
+            reader.read_line(&mut marker).expect("read child pids");
+            print!("{marker}");
+            std::io::stdout().flush().expect("flush child pids");
+            std::thread::sleep(Duration::from_secs(60));
+        }
+
+        #[test]
+        fn abrupt_parent_death_kills_the_process_tree() {
+            const HELPER: &str = "tests::platform_tests::abrupt_parent_death_helper";
+            let mut helper = ProcessCommand::new(std::env::current_exe().unwrap())
+                .args(["--exact", HELPER, "--nocapture"])
+                .env("DSH_PARENT_DEATH_HELPER", "1")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let stdout = helper.stdout.take().expect("helper stdout");
+            let (marker_tx, marker_rx) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Some(raw) = line.strip_prefix("DSH_TREE_PIDS=") {
+                        let pids = raw.split_once(',').and_then(|(leader, descendant)| {
+                            Some((leader.parse::<i32>().ok()?, descendant.parse::<i32>().ok()?))
+                        });
+                        if let Some(pids) = pids {
+                            let _ = marker_tx.send(pids);
+                        }
+                        return;
+                    }
+                }
+            });
+            let pids = marker_rx.recv_timeout(Duration::from_secs(10)).ok();
+            if pids.is_none() {
+                let _ = helper.kill();
+                let _ = helper.wait();
+            }
+            let (leader, descendant) = pids.expect("helper did not report child pids");
+
+            unsafe {
+                libc::kill(helper.id() as i32, libc::SIGKILL);
+            }
+            let _ = helper.wait();
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline
+                && (process_is_live(leader) || process_is_live(descendant))
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let leader_live = process_is_live(leader);
+            let descendant_live = process_is_live(descendant);
+            if leader_live || descendant_live {
+                unsafe {
+                    libc::kill(leader, libc::SIGKILL);
+                    libc::kill(descendant, libc::SIGKILL);
+                }
+            }
+            assert!(!leader_live, "process-group leader survived parent SIGKILL");
+            assert!(
+                !descendant_live,
+                "Harness descendant survived parent SIGKILL"
+            );
+        }
+
+        fn process_is_live(pid: i32) -> bool {
+            let output = ProcessCommand::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    let state = String::from_utf8_lossy(&output.stdout);
+                    let state = state.trim();
+                    !state.is_empty() && !state.starts_with('Z')
+                }
+                _ => unsafe {
+                    libc::kill(pid, 0) == 0
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+                },
+            }
         }
     }
 

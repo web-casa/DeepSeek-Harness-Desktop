@@ -120,10 +120,11 @@ Dependabot 对 harness 的 ignore 不作用于 security updates：若收到
 
 ```bash
 pnpm check && pnpm check:scripts          # 前端 + 脚本类型
+pnpm test:scripts && pnpm test:frontend   # 脚本 + 前端安全逻辑单测
 cargo nextest run --manifest-path crates/dsh-sidecar/Cargo.toml
 cargo nextest run --manifest-path src-tauri/Cargo.toml
 cargo llvm-cov nextest --manifest-path crates/dsh-sidecar/Cargo.toml --fail-under-lines 50
-cargo llvm-cov nextest --manifest-path src-tauri/Cargo.toml --fail-under-lines 25
+cargo llvm-cov nextest --manifest-path src-tauri/Cargo.toml --fail-under-lines 55
 cargo fmt --check --manifest-path <crate> && cargo clippy --manifest-path <crate> --all-targets -- -D warnings
 cargo deny --manifest-path <crate> check && cargo vet --locked
 node scripts/verify-runtime.ts            # 冒烟（含 --runtime-dir 重定位）

@@ -66,6 +66,12 @@
     type PluginRecoveryCandidate,
     type PluginRecoveryOverview,
   } from "./lib/api";
+  import {
+    arbitratePluginRequest,
+    arbitrateRemotePresetRequest,
+    type InstallSurfaceSnapshot,
+  } from "./lib/install-arbitration";
+  import { trapDialog } from "./lib/dialog-trap";
 
   let status = $state<Status>("idle");
   let url = $state<string | null>(null);
@@ -174,27 +180,32 @@
     }, 2600);
   }
 
+  function installSurfaceSnapshot(): InstallSurfaceSnapshot {
+    return {
+      plugin: pluginInstallRequest,
+      remotePresetRequestId: remotePresetRequest?.requestId ?? null,
+      localPresetPreview: presetPreview !== null,
+      marketConfirmation: marketConfirm !== null,
+      marketPreparing,
+    };
+  }
+
   function presentPluginInstallRequest(request: PluginInstallRequest) {
     // The confirmation dialog is the security control: never let a second
-    // deep link replace the package the user is currently reading. Same
-    // request is idempotent; a different one is ignored with a visible note.
-    if (pluginInstallRequest) {
-      if (
-        pluginInstallRequest.name !== request.name ||
-        pluginInstallRequest.source !== request.source ||
-        pluginInstallRequest.slug !== request.slug
-      ) {
-        showToast("已有待确认的安装请求，新请求已忽略");
-      }
+    // deep link replace the package the user is currently reading. Keep this
+    // decision in a pure, directly tested arbiter; this function only maps
+    // the result to Rust-slot cleanup and UI state.
+    const decision = arbitratePluginRequest(installSurfaceSnapshot(), request);
+    if (decision.action === "keep-current") {
+      if (decision.notify) showToast("已有待确认的安装请求，新请求已忽略");
       return;
     }
-    if (marketConfirm || marketPreparing) {
-      showToast("已有市场安装确认正在进行，插件安装请求已忽略");
-      void dismissPendingPluginInstall().catch(() => {});
-      return;
-    }
-    if (remotePresetRequest || presetPreview) {
-      showToast("已有待处理的预设请求，插件安装请求已忽略");
+    if (decision.action === "dismiss-incoming") {
+      showToast(
+        decision.conflict === "market"
+          ? "已有市场安装确认正在进行，插件安装请求已忽略"
+          : "已有待处理的预设请求，插件安装请求已忽略",
+      );
       // A local file-preview does not own the Rust install arbiter. A plugin
       // deep link can therefore arrive while it is open; rejecting only in
       // the UI would leave the pending slot + arbiter held until a reload.
@@ -205,16 +216,16 @@
   }
 
   function presentRemotePresetRequest(request: RemotePresetRequest) {
-    if (pluginInstallRequest || presetPreview || marketConfirm || marketPreparing) {
-      showToast("已有待处理的安装请求，预设请求已忽略");
-      void dismissRemotePreset(request.requestId).catch(() => {});
-      return;
-    }
-    if (
-      remotePresetRequest &&
-      remotePresetRequest.requestId !== request.requestId
-    ) {
-      showToast("已有待处理的预设请求，新请求已忽略");
+    const decision = arbitrateRemotePresetRequest(
+      installSurfaceSnapshot(),
+      request.requestId,
+    );
+    if (decision.action === "dismiss-incoming") {
+      showToast(
+        decision.conflict === "preset"
+          ? "已有待处理的预设请求，新请求已忽略"
+          : "已有待处理的安装请求，预设请求已忽略",
+      );
       void dismissRemotePreset(request.requestId).catch(() => {});
       return;
     }
@@ -1458,7 +1469,17 @@
 
 {#if recoveryConfirm}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="安全插件恢复确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="安全插件恢复确认"
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => (recoveryConfirm = null),
+        escapeDisabled: recoveryBusy,
+      }}
+    >
       <div class="modal-title">
         {recoveryConfirm.action === "disable"
           ? "确认隔离插件？"
@@ -1492,7 +1513,18 @@
 
 {#if remotePresetRequest}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="预设一键安装确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="预设一键安装确认"
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => void doRemotePresetDismiss(),
+        escapeDisabled:
+          remotePresetDownloading || remotePresetRequest.stage === "installing",
+      }}
+    >
       <div class="modal-title">安装 Cordis 预设？</div>
       <div class="modal-meta">
         关联页面（未验证与预设内容的对应关系）：<button
@@ -1540,7 +1572,14 @@
 
 {#if marketDetail}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="插件详情">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="插件详情"
+      tabindex="-1"
+      use:trapDialog={{ onEscape: () => (marketDetail = null) }}
+    >
       <div class="modal-title">{marketDetail.name}</div>
       <div class="modal-name">{marketPackageName(marketDetail)}</div>
       <div class="modal-meta">{marketDescriptionText(marketDetail.description)}</div>
@@ -1565,7 +1604,17 @@
 
 {#if marketConfirm}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="安装 Cordis 插件确认"
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => (marketConfirm = null),
+        escapeDisabled: pluginBusy,
+      }}
+    >
       <div class="modal-title">安装 Cordis 插件？</div>
       <div class="modal-name">{marketConfirm.packageName} v{marketConfirm.version}</div>
       <div class="modal-meta">
@@ -1589,7 +1638,17 @@
 
 {#if sideloadPath && !storeBuild}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="离线插件安装确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="离线插件安装确认"
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => (sideloadPath = null),
+        escapeDisabled: pluginBusy,
+      }}
+    >
       <div class="modal-title">离线安装插件？</div>
       <div class="modal-name">{sideloadPath}</div>
       <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将通过 `dsh plugin add` 安装该 .tgz。</div>
@@ -1603,7 +1662,14 @@
 
 {#if pluginInstallRequest}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="安装 Cordis 插件确认"
+      tabindex="-1"
+      use:trapDialog={{ onEscape: () => void dismissPluginInstallRequest() }}
+    >
       <div class="modal-title">安装 Cordis 插件？</div>
       <div class="modal-name">链接声明的包：{pluginInstallRequest.name}</div>
       <div class="modal-meta">

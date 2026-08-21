@@ -40,3 +40,16 @@ test("Flatpak uses native architecture vocabulary", () => {
   assert.equal(flatpakArch("x64"), "x86_64");
   assert.equal(flatpakArch("arm64"), "aarch64");
 });
+
+test("Flatpak runtime and SDK branches are commit-pinned per architecture", () => {
+  const installer = readFileSync(
+    join(repoRoot, "scripts", "ci", "install-linux-release-deps.sh"),
+    "utf8",
+  );
+  assert.equal(installer.match(/^\s*platform_commit=[a-f0-9]{64}$/gm)?.length, 2);
+  assert.equal(installer.match(/^\s*sdk_commit=[a-f0-9]{64}$/gm)?.length, 2);
+  assert.match(installer, /actual_platform=.*--show-commit org\.gnome\.Platform\/\/49/);
+  assert.match(installer, /actual_sdk=.*--show-commit org\.gnome\.Sdk\/\/49/);
+  assert.match(installer, /actual_platform.*!=.*platform_commit/s);
+  assert.match(installer, /actual_sdk.*!=.*sdk_commit/s);
+});

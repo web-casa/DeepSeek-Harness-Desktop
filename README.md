@@ -86,7 +86,7 @@ dsh-sidecar（Rust，无重依赖）
 ```bash
 pnpm install && pnpm check && pnpm check:scripts   # 依赖 + 类型检查
 pnpm runtime:all && pnpm runtime:verify           # 准备运行时 + 端到端冒烟
-pnpm test:scripts                                 # node:test 单测（零依赖）
+pnpm test:scripts && pnpm test:frontend           # 脚本 + 前端安全逻辑单测（零依赖）
 pnpm tauri dev                                    # 桌面开发模式
 ```
 
@@ -131,9 +131,9 @@ Microsoft Store 构建仍只允许 `src-tauri/store-curated-plugins.json` 的审
 | 层 | 门禁 |
 |---|---|
 | 前端 | `tsc --noEmit` + `svelte-check` 0 error |
-| Rust | `cargo nextest`（sidecar 35 + Tauri 35，Windows 宿主亦实跑）· llvm-cov ≥50%/25% · `clippy -D warnings` |
+| Rust | `cargo nextest`（sidecar 与 Tauri，Windows 宿主亦实跑）· llvm-cov ≥50%/55% · `clippy -D warnings` |
 | 供应链 | `cargo deny` · `cargo vet --locked`（70 全审 + 2 delta + 豁免基线）· `npm audit`/`pnpm audit` 阻断 high |
-| 安全扫描 | CodeQL（rust/js-ts/actions）· Dependency Review |
+| 安全扫描 | CodeQL（rust/js-ts/actions）· Dependency Review（Graph 不可用时自动切换锁文件门禁） |
 | 安装包 | 7 种公开格式统一 `verify-bundle` + Windows/macOS `verify-signing`（fail-closed）+ 每包 SHA-256 |
 | 发布 | 5 分钟负载 soak · updater 产物与 `latest.json` |
 

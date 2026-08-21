@@ -187,6 +187,54 @@ test("tag publication tolerates only the intentional transitive smoke-source ski
   }
 });
 
+test("release shell never interpolates the attacker-controlled ref name", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  assert.equal(workflow.includes("--expect-tag ${{ github.ref_name }}"), false);
+  assert.equal(workflow.includes("--tag ${{ github.ref_name }}"), false);
+  assert.equal(workflow.includes("tag ${{ github.ref_name }} is not"), false);
+  assert.match(workflow, /RELEASE_TAG: \$\{\{ github\.ref_name \}\}/);
+  assert.match(workflow, /\^v\(0\|\[1-9\]\[0-9\]\*\)\\\./);
+  assert.match(workflow, /--expect-tag "\$RELEASE_TAG"/);
+  assert.match(workflow, /--tag "\$RELEASE_TAG"/);
+});
+
+test("dependency review is blocking with a graph-unavailable fallback", () => {
+  const dependencyWorkflow = readFileSync(
+    new URL("../../.github/workflows/dependency-review.yml", import.meta.url),
+    "utf8",
+  );
+  assert.equal(dependencyWorkflow.includes("continue-on-error"), false);
+  assert.match(dependencyWorkflow, /fail-on-severity: low/);
+  assert.match(
+    dependencyWorkflow,
+    /dependency-graph\/compare\/\$BASE_SHA\.\.\.\$HEAD_SHA/,
+  );
+  assert.match(dependencyWorkflow, /pnpm audit --audit-level low/);
+  assert.match(dependencyWorkflow, /npm audit --audit-level=low/);
+  assert.match(dependencyWorkflow, /cargo metadata --locked/);
+  assert.match(dependencyWorkflow, /cargo vet --locked/);
+  assert.match(dependencyWorkflow, /verify-js-licenses\.ts --format pnpm/);
+});
+
+test("release verifies external contracts before publishing", () => {
+  const releaseWorkflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(releaseWorkflow, /node scripts\/verify-cordis-market-api\.ts/);
+  const inventory = releaseWorkflow.indexOf(
+    "run: node scripts/verify-release-inventory.ts --directory artifacts",
+  );
+  const signatures = releaseWorkflow.indexOf(
+    "run: node scripts/verify-updater-signatures.ts --directory artifacts",
+  );
+  const publish = releaseWorkflow.indexOf("uses: softprops/action-gh-release@");
+  assert.equal(inventory > 0 && signatures > inventory && publish > signatures, true);
+});
+
 test("MSI smoke accepts a valid 8.3 registry path but verifies the real file", () => {
   const workflow = readFileSync(
     new URL("../../.github/workflows/release.yml", import.meta.url),

@@ -220,6 +220,31 @@ fn image_url_allowed(url: &Url) -> bool {
         && url.fragment().is_none()
 }
 
+fn canonical_image_content_type(header: &str) -> Option<&'static str> {
+    let media_type = header.split(';').next()?.trim();
+    if media_type.eq_ignore_ascii_case("image/png") {
+        Some("image/png")
+    } else if media_type.eq_ignore_ascii_case("image/jpeg") {
+        Some("image/jpeg")
+    } else if media_type.eq_ignore_ascii_case("image/webp") {
+        Some("image/webp")
+    } else if media_type.eq_ignore_ascii_case("image/gif") {
+        Some("image/gif")
+    } else {
+        None
+    }
+}
+
+fn image_magic_matches(content_type: &str, bytes: &[u8]) -> bool {
+    match content_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Cached {
     at: Instant,
@@ -686,12 +711,14 @@ impl MarketClient {
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
-        if !content_type.starts_with("image/") {
-            return Err("market image response is not an image".to_string());
-        }
+            .and_then(canonical_image_content_type)
+            .ok_or_else(|| {
+                "market image must be PNG, JPEG, WebP, or GIF (SVG is not accepted)".to_string()
+            })?;
         let bytes = read_limited_image_body(response).await?;
+        if !image_magic_matches(content_type, &bytes) {
+            return Err("market image bytes do not match the declared raster type".to_string());
+        }
         let data_url = format!("data:{content_type};base64,{}", base64_encode(&bytes));
         Ok(serde_json::json!({ "dataUrl": data_url }))
     }
@@ -1461,6 +1488,40 @@ mod tests {
         ));
         assert!(!image_url_allowed(
             &Url::parse("http://127.0.0.1/fixture.png").expect("url")
+        ));
+    }
+
+    #[test]
+    fn market_image_mime_types_are_an_exact_raster_allowlist() {
+        for (header, expected) in [
+            ("image/png", "image/png"),
+            ("IMAGE/JPEG", "image/jpeg"),
+            ("image/webp; charset=binary", "image/webp"),
+            (" image/gif ", "image/gif"),
+        ] {
+            assert_eq!(canonical_image_content_type(header), Some(expected));
+        }
+        for rejected in [
+            "image/svg+xml",
+            "image/avif",
+            "image/x-icon",
+            "image/pngevil",
+            "text/html",
+            "",
+        ] {
+            assert_eq!(canonical_image_content_type(rejected), None, "{rejected}");
+        }
+
+        assert!(image_magic_matches("image/png", b"\x89PNG\r\n\x1a\nrest"));
+        assert!(image_magic_matches("image/jpeg", b"\xff\xd8\xff\xe0rest"));
+        assert!(image_magic_matches("image/gif", b"GIF89arest"));
+        assert!(image_magic_matches(
+            "image/webp",
+            b"RIFF\x04\x00\x00\x00WEBPrest"
+        ));
+        assert!(!image_magic_matches(
+            "image/png",
+            b"<svg xmlns='http://www.w3.org/2000/svg'>"
         ));
     }
 
