@@ -126,6 +126,47 @@ pub fn quote_arg(arg: &str) -> String {
     out
 }
 
+/// Convert the two Win32 verbatim path forms that Node cannot use as a main
+/// entrypoint back to their ordinary DOS/UNC spelling.
+///
+/// Rust and Win32 APIs correctly accept `\\?\C:\…`, and Tauri can return it
+/// for a packaged resource directory. Node's `resolveMainPath`, however,
+/// currently reduces that form to `C:` and fails with `EISDIR`. Only canonical
+/// drive-absolute and UNC forms are converted; device/volume namespaces and
+/// malformed inputs keep their original spelling rather than broadening the
+/// path semantics of an untrusted start command.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn node_compatible_windows_path(path: &str) -> String {
+    const VERBATIM_PREFIX: &str = "\\\\?\\";
+    const VERBATIM_UNC_PREFIX: &str = "\\\\?\\UNC\\";
+
+    let strip_ascii_prefix = |prefix: &str| {
+        path.get(..prefix.len())
+            .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+            .map(|_| &path[prefix.len()..])
+    };
+
+    if let Some(rest) = strip_ascii_prefix(VERBATIM_UNC_PREFIX) {
+        let mut parts = rest.split(['\\', '/']).filter(|part| !part.is_empty());
+        if parts.next().is_some() && parts.next().is_some() {
+            return format!("\\\\{rest}");
+        }
+    }
+
+    if let Some(rest) = strip_ascii_prefix(VERBATIM_PREFIX) {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/')
+        {
+            return rest.to_string();
+        }
+    }
+
+    path.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Child environment hygiene: the sidecar inherits the parent's (Tauri shell's)
 // environment and forwards it to the bundled Node. A user launching the app
@@ -264,5 +305,35 @@ mod bounded_line_tests {
         })
         .unwrap();
         assert_eq!(lines, ["one"]);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod windows_node_path_tests {
+    use super::node_compatible_windows_path;
+
+    #[test]
+    fn converts_only_supported_verbatim_dos_and_unc_paths() {
+        assert_eq!(
+            node_compatible_windows_path(r"\\?\C:\Program Files\DSH Desktop\runtime\node.exe"),
+            r"C:\Program Files\DSH Desktop\runtime\node.exe"
+        );
+        assert_eq!(
+            node_compatible_windows_path(r"\\?\unc\server\share\DSH Desktop\bin.js"),
+            r"\\server\share\DSH Desktop\bin.js"
+        );
+    }
+
+    #[test]
+    fn leaves_noncanonical_verbatim_namespaces_unchanged() {
+        for path in [
+            r"C:\normal\runtime\node.exe",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\runtime\node.exe",
+            r"\\?\UNC\server",
+            r"\\?\C:",
+        ] {
+            assert_eq!(node_compatible_windows_path(path), path);
+        }
     }
 }

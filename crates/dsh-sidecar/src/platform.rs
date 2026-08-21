@@ -516,10 +516,32 @@ mod imp {
             spec: &SpawnSpec,
             _inherited: &[(std::ffi::OsString, std::ffi::OsString)],
         ) -> io::Result<Self> {
+            // Tauri may return its packaged resource directory as a Win32
+            // verbatim (`\\?\`) path. Win32 itself accepts that spelling, but
+            // Node 24's main-entry resolver does not: it attempts to lstat the
+            // bare drive name (`C:`) and exits before Harness can start. Keep
+            // the conversion at the Node launch boundary so Rust filesystem
+            // operations retain their original long-path-safe representation.
+            let node = crate::node_compatible_windows_path(&spec.node);
+            let script = crate::node_compatible_windows_path(&spec.script);
+            let cwd = crate::node_compatible_windows_path(&spec.cwd);
+            let env = spec
+                .env
+                .iter()
+                .map(|(key, value)| {
+                    let value = if key.eq_ignore_ascii_case("DSH_HOME") {
+                        crate::node_compatible_windows_path(value)
+                    } else {
+                        value.clone()
+                    };
+                    (key.clone(), value)
+                })
+                .collect::<Vec<_>>();
+
             // Command line: node <script> <args…>, quoted per Windows rules.
-            let mut cmdline = quote_arg(&spec.node);
+            let mut cmdline = quote_arg(&node);
             cmdline.push(' ');
-            cmdline.push_str(&quote_arg(&spec.script));
+            cmdline.push_str(&quote_arg(&script));
             for arg in &spec.args {
                 cmdline.push(' ');
                 cmdline.push_str(&quote_arg(arg));
@@ -527,8 +549,8 @@ mod imp {
             let mut cmdline_w: Vec<u16> = cmdline.encode_utf16().collect();
             cmdline_w.push(0);
 
-            let cwd_w: Vec<u16> = spec.cwd.encode_utf16().chain(std::iter::once(0)).collect();
-            let env_block = build_env_block(&spec.env)?;
+            let cwd_w: Vec<u16> = cwd.encode_utf16().chain(std::iter::once(0)).collect();
+            let env_block = build_env_block(&env)?;
             let mut env_block = env_block;
 
             // stdin: pipe whose write end we close immediately (child sees EOF),
