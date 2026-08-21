@@ -18,8 +18,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const JOURNAL_SCHEMA: u32 = 1;
 const JOURNAL_MAX_BYTES: usize = 64 * 1024;
 const PROFILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const INSTALLED_MANIFEST_MAX_BYTES: u64 = 256 * 1024;
 const MAX_SIGNAL_LINE_BYTES: usize = 16 * 1024;
 const MAX_SIGNAL_LINES: usize = 500;
+const MAX_ACTIVE_ROOTS_FOR_ATTRIBUTION: usize = 128;
+const MAX_DECLARED_DEPENDENCIES: usize = 512;
 
 // Every recovery file and profile transition belongs to one state machine.
 // The PluginRunner busy flag serializes user-triggered mutations, but readers
@@ -255,15 +258,55 @@ fn detect_candidates(
     dsh_home: &Path,
     logs: &[(String, String)],
 ) -> Result<Vec<RecoveryCandidate>, String> {
-    let (_, _, manifest) = read_recovery_manifest(dsh_home)?;
+    let (profile, _, manifest) = read_recovery_manifest(dsh_home)?;
     let dependencies = plugins::profile_dependencies(&manifest)?;
     let active = plugins::profile_bundles(&manifest)?;
     let signals = parse_signals(logs);
-    let mut candidates = Vec::new();
-    for (package_name, kinds) in signals {
-        if !active.contains(package_name.as_str()) {
-            continue;
+    let mut evidence: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    // A signal naming an active third-party root is the strongest available
+    // proof. Core packages are never recoverable: disabling one would mutate
+    // the Harness boot substrate rather than isolate a user plugin.
+    for (package_name, kinds) in &signals {
+        if is_recoverable_root(package_name, &active, dependencies) {
+            evidence.insert(package_name.clone(), kinds.clone());
         }
+    }
+
+    // Harness often reports the official leaf package or loader entry that
+    // failed, not the user-installed root bundle that brought it in. Attribute
+    // such a leaf only when exactly one active third-party root declares it.
+    // Installed package manifests are untrusted input, so every path and read
+    // is bounded and a malformed/ambiguous graph simply yields no candidate.
+    if let Some(owners) = dependency_owner_index(&profile, &active, dependencies) {
+        for (package_name, kinds) in signals {
+            if evidence.contains_key(&package_name) {
+                continue;
+            }
+            // Official/core leaves are shared by the shipped profile and by many
+            // third-party bundles. A declaration in one user root is therefore
+            // not proof that the root owns a core failure.
+            if is_core_package(&package_name) {
+                continue;
+            }
+            let Some(root_owners) = owners.get(&package_name) else {
+                continue;
+            };
+            if root_owners.len() != 1 {
+                continue;
+            }
+            let Some(root) = root_owners.iter().next() else {
+                continue;
+            };
+            let root_evidence = evidence.entry(root.clone()).or_default();
+            for kind in kinds {
+                root_evidence.insert(format!("dependency-owner:{kind}"));
+            }
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for (package_name, kinds) in evidence {
         let Some(version_spec) = dependencies.get(&package_name).and_then(Value::as_str) else {
             continue;
         };
@@ -271,11 +314,131 @@ fn detect_candidates(
             market_managed: plugins::active_market_receipt(dsh_home, &package_name)?.is_some(),
             package_name,
             version_spec: version_spec.to_string(),
-            signals: kinds.into_iter().collect(),
+            // Journal validation intentionally caps evidence. All signal names
+            // are static classifications; eight deterministic rows are enough
+            // to explain a candidate without allowing repeated log shapes to
+            // make the recovery transaction unreadable after it is written.
+            signals: kinds.into_iter().take(8).collect(),
         });
     }
     candidates.sort_by(|left, right| left.package_name.cmp(&right.package_name));
     Ok(candidates)
+}
+
+fn is_core_package(package_name: &str) -> bool {
+    package_name.starts_with("@deepseek-ai/") || package_name == "dshmarket"
+}
+
+fn is_recoverable_root(
+    package_name: &str,
+    active: &std::collections::HashSet<&str>,
+    dependencies: &serde_json::Map<String, Value>,
+) -> bool {
+    plugins::is_valid_package_name(package_name)
+        && !is_core_package(package_name)
+        && active.contains(package_name)
+        && dependencies
+            .get(package_name)
+            .and_then(Value::as_str)
+            .is_some_and(|spec| !spec.is_empty())
+}
+
+fn dependency_owner_index(
+    profile: &Path,
+    active: &std::collections::HashSet<&str>,
+    dependencies: &serde_json::Map<String, Value>,
+) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    // A leaf-to-root claim is safe only if every relevant root was inspected.
+    // Returning `None` on any failure is deliberately different from an empty
+    // map: a skipped root may also own a leaf and must never make another root
+    // appear uniquely responsible. Direct root evidence was collected above
+    // and remains usable when this conservative inference is unavailable.
+    let roots: Vec<&str> = active
+        .iter()
+        .copied()
+        .filter(|root| is_recoverable_root(root, active, dependencies))
+        .collect();
+    if roots.len() > MAX_ACTIVE_ROOTS_FOR_ATTRIBUTION {
+        return None;
+    }
+    let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    if roots.is_empty() {
+        return Some(owners);
+    }
+    let node_modules = profile.join("node_modules");
+    if checked_real_directory(&node_modules).is_err() {
+        return None;
+    }
+    for root in roots {
+        let declared = installed_dependency_names(&node_modules, root).ok()?;
+        for package_name in declared {
+            owners
+                .entry(package_name)
+                .or_default()
+                .insert(root.to_string());
+        }
+    }
+    Some(owners)
+}
+
+fn checked_real_directory(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect installed package directory: {error}"))?;
+    if secure_fs::is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err("installed package path is not a real directory".to_string());
+    }
+    Ok(())
+}
+
+fn installed_dependency_names(
+    node_modules: &Path,
+    package_name: &str,
+) -> Result<BTreeSet<String>, String> {
+    if !plugins::is_valid_package_name(package_name) {
+        return Err("installed package name is invalid".to_string());
+    }
+    let mut package_dir = node_modules.to_path_buf();
+    if let Some((scope, name)) = package_name.split_once('/') {
+        package_dir.push(scope);
+        checked_real_directory(&package_dir)?;
+        package_dir.push(name);
+    } else {
+        package_dir.push(package_name);
+    }
+    checked_real_directory(&package_dir)?;
+    let bytes = secure_fs::read_bounded(
+        &package_dir.join("package.json"),
+        INSTALLED_MANIFEST_MAX_BYTES,
+    )?
+    .ok_or_else(|| "installed package manifest is missing".to_string())?;
+    let manifest: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "installed package manifest is invalid JSON".to_string())?;
+    if manifest.get("name").and_then(Value::as_str) != Some(package_name) {
+        return Err("installed package manifest name does not match its path".to_string());
+    }
+
+    let mut declared = BTreeSet::new();
+    // Peer dependencies express a compatibility requirement, not ownership:
+    // the package can be supplied by the Harness or another root. Only
+    // materialized direct/optional dependency edges are attribution evidence.
+    for field in ["dependencies", "optionalDependencies"] {
+        let Some(value) = manifest.get(field) else {
+            continue;
+        };
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("installed package {field} is not an object"))?;
+        for (name, spec) in object {
+            if !plugins::is_valid_package_name(name) || spec.as_str().is_none_or(str::is_empty) {
+                return Err("installed package dependency declaration is invalid".to_string());
+            }
+            declared.insert(name.clone());
+            if declared.len() > MAX_DECLARED_DEPENDENCIES {
+                return Err("installed package declares too many dependencies".to_string());
+            }
+        }
+    }
+    Ok(declared)
 }
 
 fn parse_signals(logs: &[(String, String)]) -> BTreeMap<String, BTreeSet<String>> {
@@ -294,6 +457,32 @@ fn parse_signals(logs: &[(String, String)]) -> BTreeMap<String, BTreeSet<String>
         ] {
             if let Some(package_name) = quoted_after(line, prefix) {
                 add_signal(&mut found, package_name, kind);
+            }
+        }
+
+        for (prefix, kind) in [
+            ("failed to apply loader entry ", "loader-apply-failure"),
+            ("failed to import loader entry ", "loader-import-failure"),
+        ] {
+            if let Some(package_name) = parenthesized_after_ascii_case(line, prefix) {
+                add_signal(&mut found, package_name, kind);
+            }
+        }
+        for (prefix, kind) in [
+            ("cannot resolve profile bundle ", "unresolved-bundle"),
+            ("profile bundle ", "invalid-bundle"),
+        ] {
+            if let Some(package_name) = quoted_after_ascii_case(line, prefix) {
+                if kind != "invalid-bundle"
+                    || line.to_ascii_lowercase().contains("declares no dsh.bundle")
+                {
+                    add_signal(&mut found, package_name, kind);
+                }
+            }
+        }
+        if let Some(package_names) = list_after_ascii_case(line, "plugin(s) failed to load: ") {
+            for package_name in package_names.split(',').map(str::trim) {
+                add_signal(&mut found, package_name, "plugin-load-failure");
             }
         }
 
@@ -324,6 +513,38 @@ fn quoted_after<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     let start = line.find(prefix)? + prefix.len();
     let quote = prefix.chars().last()?;
     let value = line.get(start..)?.split(quote).next()?;
+    (!value.is_empty()).then_some(value)
+}
+
+fn quoted_after_ascii_case<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let lower = line.to_ascii_lowercase();
+    let start = lower.find(prefix)? + prefix.len();
+    let remaining = line.get(start..)?.trim_start();
+    let quote = remaining.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let value = remaining.get(quote.len_utf8()..)?.split(quote).next()?;
+    (!value.is_empty()).then_some(value)
+}
+
+fn parenthesized_after_ascii_case<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let lower = line.to_ascii_lowercase();
+    let start = lower.find(prefix)? + prefix.len();
+    let remaining = line.get(start..)?;
+    // Upstream formats this as `entry <id> (<package>): <detail>`. Select the
+    // parenthesis adjacent to the delimiter so parentheses inside an untrusted
+    // entry id cannot be mistaken for the package name.
+    let close = remaining.find("): ")?;
+    let open = remaining.get(..close)?.rfind('(')?;
+    let value = remaining.get(open + 1..close)?.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn list_after_ascii_case<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let lower = line.to_ascii_lowercase();
+    let start = lower.find(prefix)? + prefix.len();
+    let value = line.get(start..)?.split(';').next()?.trim();
     (!value.is_empty()).then_some(value)
 }
 
@@ -515,7 +736,7 @@ fn cleanup(paths: &RecoveryPaths) -> Result<(), String> {
     secure_fs::ensure_private_dir(&paths.active)?;
     for path in [&paths.journal, &paths.before, &paths.disabled] {
         match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Ok(metadata) if secure_fs::is_symlink_or_reparse(&metadata) || !metadata.is_file() => {
                 return Err("plugin recovery file is not a regular file".to_string())
             }
             Ok(_) => fs::remove_file(path)
@@ -550,7 +771,7 @@ mod tests {
             secure_fs::random_suffix().unwrap()
         ));
         let web = home.join("profiles/web");
-        fs::create_dir_all(web.join("node_modules/broken-plugin")).unwrap();
+        fs::create_dir_all(&web).unwrap();
         fs::write(
             web.join("package.json"),
             br#"{
@@ -570,6 +791,19 @@ mod tests {
 "#,
         )
         .unwrap();
+        // Attribution is deliberately complete-or-unavailable. Model the two
+        // active fixture roots as installed packages so unrelated missing
+        // manifests do not accidentally turn every leaf-attribution test
+        // into the incomplete-graph case.
+        for package_name in ["broken-plugin", "healthy-plugin"] {
+            let package_dir = web.join("node_modules").join(package_name);
+            fs::create_dir_all(&package_dir).unwrap();
+            fs::write(
+                package_dir.join("package.json"),
+                format!(r#"{{"name":"{package_name}","version":"1.0.0","dependencies":{{}}}}"#),
+            )
+            .unwrap();
+        }
         home
     }
 
@@ -612,6 +846,51 @@ mod tests {
         path
     }
 
+    fn add_active_root(home: &Path, package_name: &str) -> PathBuf {
+        let (profile, mut manifest) = plugins::read_profile_manifest(home).unwrap();
+        manifest["dependencies"][package_name] = Value::String("1.0.0".to_string());
+        plugins::profile_bundles_mut(&mut manifest)
+            .unwrap()
+            .push(Value::String(package_name.to_string()));
+        plugins::write_profile_manifest(&profile, &manifest).unwrap();
+
+        let mut package_dir = profile.join("node_modules");
+        if let Some((scope, name)) = package_name.split_once('/') {
+            package_dir.push(scope);
+            package_dir.push(name);
+        } else {
+            package_dir.push(package_name);
+        }
+        fs::create_dir_all(&package_dir).unwrap();
+        package_dir
+    }
+
+    fn write_installed_manifest(package_dir: &Path, package_name: &str, dependencies: &[&str]) {
+        let dependencies = dependencies
+            .iter()
+            .map(|name| ((*name).to_string(), Value::String("1.0.0".to_string())))
+            .collect::<serde_json::Map<_, _>>();
+        fs::write(
+            package_dir.join("package.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "name": package_name,
+                "version": "1.0.0",
+                "dependencies": dependencies
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn loader_logs(package_name: &str) -> Vec<(String, String)> {
+        vec![(
+            "stderr".to_string(),
+            format!(
+                "DSH entry failed: failed to apply loader entry settings ({package_name}): fixture failure"
+            ),
+        )]
+    }
+
     #[test]
     fn signals_are_typed_and_intersect_exact_active_dependencies() {
         let home = profile("detect");
@@ -619,6 +898,179 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].package_name, "broken-plugin");
         assert_eq!(candidates[0].signals, vec!["error-stack"]);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn uniquely_declared_leaf_is_attributed_to_its_active_root() {
+        let home = profile("dependency-owner");
+        let root = add_active_root(&home, "community-bundle");
+        write_installed_manifest(&root, "community-bundle", &["community-loader-leaf"]);
+
+        let candidates = detect_candidates(&home, &loader_logs("community-loader-leaf")).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].package_name, "community-bundle");
+        assert_eq!(
+            candidates[0].signals,
+            vec!["dependency-owner:loader-apply-failure"]
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_leaf_owner_produces_no_recovery_candidate() {
+        let home = profile("ambiguous-owner");
+        for root_name in ["community-one", "community-two"] {
+            let root = add_active_root(&home, root_name);
+            write_installed_manifest(&root, root_name, &["shared-loader"]);
+        }
+        assert!(detect_candidates(&home, &loader_logs("shared-loader"))
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn incomplete_owner_inspection_never_makes_a_leaf_unique() {
+        let home = profile("incomplete-owner");
+        let readable = add_active_root(&home, "community-one");
+        write_installed_manifest(&readable, "community-one", &["shared-loader"]);
+        let unreadable = add_active_root(&home, "community-two");
+        fs::write(unreadable.join("package.json"), b"{").unwrap();
+
+        assert!(detect_candidates(&home, &loader_logs("shared-loader"))
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn direct_root_evidence_survives_incomplete_owner_inspection() {
+        let home = profile("incomplete-owner-direct");
+        let readable = add_active_root(&home, "community-one");
+        write_installed_manifest(&readable, "community-one", &["shared-loader"]);
+        let unreadable = add_active_root(&home, "community-two");
+        fs::write(unreadable.join("package.json"), b"{").unwrap();
+
+        let candidates = detect_candidates(&home, &loader_logs("community-one")).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].package_name, "community-one");
+        assert_eq!(candidates[0].signals, vec!["loader-apply-failure"]);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn core_and_peer_declarations_are_not_owner_evidence() {
+        let home = profile("non-owner-edges");
+        let root = add_active_root(&home, "community-bundle");
+        fs::write(
+            root.join("package.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "name": "community-bundle",
+                "version": "1.0.0",
+                "dependencies": {
+                    "@deepseek-ai/dsh-sdk-jsonrpc-server": "1.0.0"
+                },
+                "peerDependencies": {
+                    "peer-owned-elsewhere": "1.0.0"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut signals = loader_logs("@deepseek-ai/dsh-sdk-jsonrpc-server");
+        signals.extend(loader_logs("peer-owned-elsewhere"));
+        assert!(detect_candidates(&home, &signals).unwrap().is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn loader_entry_parentheses_use_the_package_slot() {
+        let parsed = parse_signals(&[(
+            "stderr".to_string(),
+            "failed to apply loader entry fake-id (wrong-package) (actual-package): failure"
+                .to_string(),
+        )]);
+        assert!(!parsed.contains_key("wrong-package"));
+        assert_eq!(
+            parsed
+                .get("actual-package")
+                .and_then(|kinds| kinds.iter().next())
+                .map(String::as_str),
+            Some("loader-apply-failure")
+        );
+    }
+
+    #[test]
+    fn core_and_path_like_signals_never_become_candidates() {
+        let home = profile("core-signal");
+        let core = add_active_root(&home, "@deepseek-ai/dsh-base");
+        write_installed_manifest(&core, "@deepseek-ai/dsh-base", &[]);
+        let signals = vec![
+            (
+                "stderr".to_string(),
+                "Cannot find module '../../outside'".to_string(),
+            ),
+            (
+                "stderr".to_string(),
+                "failed to apply loader entry base (@deepseek-ai/dsh-base): failure".to_string(),
+            ),
+        ];
+        assert!(detect_candidates(&home, &signals).unwrap().is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_or_oversized_owner_manifest_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let home = profile("unsafe-owner-manifest");
+        let symlinked = add_active_root(&home, "symlinked-root");
+        let outside = home.join("outside-package.json");
+        fs::write(
+            &outside,
+            br#"{"name":"symlinked-root","dependencies":{"leaf-one":"1.0.0"}}"#,
+        )
+        .unwrap();
+        symlink(&outside, symlinked.join("package.json")).unwrap();
+
+        let oversized = add_active_root(&home, "oversized-root");
+        fs::write(
+            oversized.join("package.json"),
+            vec![b' '; INSTALLED_MANIFEST_MAX_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        let mut signals = loader_logs("leaf-one");
+        signals.extend(loader_logs("leaf-two"));
+        assert!(detect_candidates(&home, &signals).unwrap().is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn inferred_roots_recover_sequentially_without_auto_activation() {
+        let home = profile("sequential-owners");
+        for (root_name, leaf_name) in [("community-one", "leaf-one"), ("community-two", "leaf-two")]
+        {
+            let root = add_active_root(&home, root_name);
+            write_installed_manifest(&root, root_name, &[leaf_name]);
+        }
+
+        let first_logs = loader_logs("leaf-one");
+        let first = begin(&home, &first_logs, true, "community-one").unwrap();
+        assert_eq!(first.phase, RecoveryPhase::DisabledAwaitingBoot);
+        commit_after_ready(&home).unwrap();
+        finalize(&home, &first.transaction_id).unwrap();
+
+        let second = detect_candidates(&home, &loader_logs("leaf-two")).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].package_name, "community-two");
+        let (_, manifest) = plugins::read_profile_manifest(&home).unwrap();
+        let bundles = plugins::profile_bundles(&manifest).unwrap();
+        assert!(!bundles.contains("community-one"));
+        assert!(bundles.contains("community-two"));
         fs::remove_dir_all(home).unwrap();
     }
 

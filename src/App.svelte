@@ -72,6 +72,7 @@
     type InstallSurfaceSnapshot,
   } from "./lib/install-arbitration";
   import { trapDialog } from "./lib/dialog-trap";
+  import { marketFailureText } from "./lib/market-error";
 
   let status = $state<Status>("idle");
   let url = $state<string | null>(null);
@@ -295,7 +296,7 @@
       marketNextCursor = res.page?.cursor ?? null;
       marketHasMore = res.page?.hasMore === true;
     } catch (e) {
-      marketError = "市场搜索失败：" + e;
+      marketError = marketFailureText("市场搜索失败", e);
     }
     marketBusy = false;
   }
@@ -319,7 +320,7 @@
       );
       marketImages = loaded.filter((src): src is string => src !== null);
     } catch (e) {
-      marketError = `插件详情加载失败：${e}`;
+      marketError = marketFailureText("插件详情加载失败", e);
     }
     marketDetailBusy = false;
   }
@@ -333,7 +334,7 @@
       // presents its current entryRevision for an explicit user confirmation.
       marketConfirm = await marketPrepareInstall(slug);
     } catch (e) {
-      marketError = "无法准备安装：" + e;
+      marketError = marketFailureText("无法准备安装", e);
     }
     marketPreparing = false;
   }
@@ -353,7 +354,7 @@
     pluginLogsOpen = true;
     void marketInstallPlugin(preview.slug, preview.entryRevision).catch((e) => {
       pluginBusy = false;
-      pluginError = "市场安装失败：" + e;
+      pluginError = marketFailureText("市场安装失败", e);
       pluginLogsOpen = true;
       void refreshPlugins();
     });
@@ -378,7 +379,7 @@
       showToast("已激活 " + plugin.name + "；请重启 Harness 后加载");
       await refreshPlugins();
     } catch (e) {
-      pluginError = "激活失败：" + e;
+      pluginError = marketFailureText("激活失败", e);
     }
     pluginBusy = false;
   }
