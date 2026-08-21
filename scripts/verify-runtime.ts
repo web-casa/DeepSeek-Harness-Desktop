@@ -59,6 +59,19 @@ requireFile(nodePath, "bundled node");
 const dshBin = join(harnessDir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
 requireFile(dshBin, "dsh entry (lib/bin.js)");
 
+// Tauri can return resource paths in Win32's `\\?\` (verbatim) form. Node
+// currently cannot resolve a main entrypoint in that form: it reduces it to
+// the bare drive (`C:`) and exits with EISDIR. Deliberately pass this form to
+// the real sidecar on Windows so the smoke test proves its launch boundary
+// converts only the Node-facing paths back to ordinary DOS/UNC notation.
+function nodeLaunchPath(path: string): string {
+  if (process.platform !== "win32") return path;
+  if (path.startsWith("\\\\?\\")) return path;
+  if (path.startsWith("\\\\")) return `\\\\?\\UNC\\${path.slice(2)}`;
+  if (/^[A-Za-z]:[\\/]/.test(path)) return `\\\\?\\${path}`;
+  runtimeFail(`Windows runtime path is not absolute: ${path}`);
+}
+
 // Fresh, isolated DSH_HOME for the smoke run.
 const dshHome = join(tmpDir, `smoke-dsh-home-${Date.now()}`);
 mkdirSync(dshHome, { recursive: true });
@@ -168,13 +181,13 @@ async function main(): Promise<void> {
   // --- boot -------------------------------------------------------------
   send({
     command: "start",
-    node: nodePath,
-    script: dshBin,
+    node: nodeLaunchPath(nodePath),
+    script: nodeLaunchPath(dshBin),
     args: ["web", "--no-open", "--host", "127.0.0.1", "--port", "0"],
-    cwd: harnessDir,
+    cwd: nodeLaunchPath(harnessDir),
     // Keep this env in lockstep with src-tauri/src/harness/mod.rs
     // (start_harness): the smoke must exercise the production contract.
-    env: { DSH_HOME: dshHome, DSH_TELEMETRY_DISABLED: "1" },
+    env: { DSH_HOME: nodeLaunchPath(dshHome), DSH_TELEMETRY_DISABLED: "1" },
   });
   info("waiting for readiness line…");
   const ready = await waitFor((e) => e.type === "ready", "ready", 180_000);
