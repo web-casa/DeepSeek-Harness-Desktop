@@ -48,9 +48,9 @@ jobs:
             200)
               echo 'available=true' >> "$GITHUB_OUTPUT"
               ;;
-            404)
+            403|404)
               echo 'available=false' >> "$GITHUB_OUTPUT"
-              echo '::warning::GitHub Dependency Graph is unavailable; using lockfile-native fail-closed gates.'
+              echo "::warning::GitHub Dependency Graph API returned $status; using lockfile-native fail-closed gates."
               ;;
             *)
               echo "Dependency Graph probe failed with HTTP ${status:-transport-error}" >&2

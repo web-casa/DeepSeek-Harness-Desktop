@@ -2,7 +2,15 @@
 // public inventory authenticates its adjacent artifact under the exact key
 // embedded in the desktop application.
 
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import { fail, info, ok } from "./lib/common.ts";
 import { expectedUpdaterSignatureCount } from "./lib/release-inventory.ts";
@@ -29,6 +37,23 @@ function walk(root: string): string[] {
   return files;
 }
 
+function readRegularFile(path: string): Buffer {
+  let descriptor: number;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    fail(`cannot securely open updater file ${path}: ${String(error)}`);
+  }
+  try {
+    if (!fstatSync(descriptor).isFile()) {
+      fail(`updater path is not a regular file: ${path}`);
+    }
+    return readFileSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 const directory = argument("--directory");
 if (!directory) fail("usage: node scripts/verify-updater-signatures.ts --directory <root>");
 
@@ -48,19 +73,10 @@ if (signatures.length !== expected) {
 
 for (const signaturePath of signatures) {
   const artifactPath = signaturePath.slice(0, -".sig".length);
-  let artifactStat;
-  try {
-    artifactStat = lstatSync(artifactPath);
-  } catch {
-    fail(`updater signature has no adjacent artifact: ${basename(signaturePath)}`);
-  }
-  if (!artifactStat.isFile() || artifactStat.isSymbolicLink()) {
-    fail(`updater artifact is not a regular file: ${artifactPath}`);
-  }
   try {
     verifyTauriUpdaterSignature(
-      readFileSync(artifactPath),
-      readFileSync(signaturePath, "utf8"),
+      readRegularFile(artifactPath),
+      readRegularFile(signaturePath).toString("utf8"),
       publicKey,
     );
   } catch (error) {

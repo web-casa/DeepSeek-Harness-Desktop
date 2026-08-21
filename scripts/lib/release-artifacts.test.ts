@@ -212,6 +212,7 @@ test("dependency review is blocking with a graph-unavailable fallback", () => {
     dependencyWorkflow,
     /dependency-graph\/compare\/\$BASE_SHA\.\.\.\$HEAD_SHA/,
   );
+  assert.match(dependencyWorkflow, /403\|404\)/);
   assert.match(dependencyWorkflow, /pnpm audit --audit-level low/);
   assert.match(dependencyWorkflow, /npm audit --audit-level=low/);
   assert.match(dependencyWorkflow, /cargo metadata --locked/);
