@@ -15,6 +15,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+const MAX_PLUGIN_LOG_LINE_BYTES: usize = 8 * 1024;
+
 #[tauri::command]
 pub fn get_status(runtime: State<'_, Runtime>) -> Value {
     snapshot_payload(&runtime.state)
@@ -1031,7 +1033,7 @@ fn run_plugin_spec(
     plugin_spec: String,
     op: &'static str,
 ) {
-    use std::io::{BufRead, BufReader};
+    use std::io::BufReader;
 
     let pnpm_cjs = paths
         .harness_dir
@@ -1151,11 +1153,11 @@ fn run_plugin_spec(
             if let Some(pipe) = pipe {
                 let tx = tx.clone();
                 std::thread::spawn(move || {
-                    for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                        if tx.send((stream.to_string(), line)).is_err() {
-                            break;
-                        }
-                    }
+                    let _ = dsh_sidecar::for_each_bounded_line(
+                        BufReader::new(pipe),
+                        MAX_PLUGIN_LOG_LINE_BYTES,
+                        |line| tx.send((stream.to_string(), line)).is_ok(),
+                    );
                 });
             }
         }
@@ -1272,7 +1274,7 @@ fn run_market_pnpm(
     plugins: Arc<crate::plugins::PluginRunner>,
     candidate: crate::market::MarketInstallCandidate,
 ) {
-    use std::io::{BufRead, BufReader};
+    use std::io::BufReader;
 
     let profile = match crate::plugins::market_profile_dir(&paths.dsh_home) {
         Ok(profile) => profile,
@@ -1365,11 +1367,11 @@ fn run_market_pnpm(
             if let Some(pipe) = pipe {
                 let tx = tx.clone();
                 std::thread::spawn(move || {
-                    for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                        if tx.send((stream.to_string(), line)).is_err() {
-                            break;
-                        }
-                    }
+                    let _ = dsh_sidecar::for_each_bounded_line(
+                        BufReader::new(pipe),
+                        MAX_PLUGIN_LOG_LINE_BYTES,
+                        |line| tx.send((stream.to_string(), line)).is_ok(),
+                    );
                 });
             }
         }
@@ -1632,37 +1634,10 @@ fn is_zip_content_type(value: Option<&reqwest::header::HeaderValue>) -> bool {
 }
 
 fn ensure_remote_tools_dir(dsh_home: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let tools = dsh_home.join(".desktop-tools");
-    match std::fs::symlink_metadata(&tools) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err("refusing to use symlinked .desktop-tools".to_string())
-        }
-        Ok(meta) if !meta.is_dir() => return Err(".desktop-tools is not a directory".to_string()),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(&tools).map_err(|e| format!("cannot create tools dir: {e}"))?;
-        }
-        Err(e) => return Err(format!("cannot inspect tools dir: {e}")),
-    }
+    let tools = crate::plugins::market_tools_dir(dsh_home)?;
     let root = tools.join("preset-remote");
-    match std::fs::symlink_metadata(&root) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err("refusing to use symlinked preset-remote".to_string())
-        }
-        Ok(meta) if !meta.is_dir() => return Err("preset-remote is not a directory".to_string()),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(&root)
-                .map_err(|e| format!("cannot create preset-remote dir: {e}"))?;
-        }
-        Err(e) => return Err(format!("cannot inspect preset-remote dir: {e}")),
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("cannot chmod preset-remote dir: {e}"))?;
-    }
+    crate::secure_fs::ensure_private_dir(&root)
+        .map_err(|e| format!("cannot prepare preset-remote dir: {e}"))?;
     Ok(root)
 }
 
@@ -1680,13 +1655,9 @@ fn create_remote_preset_dir(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("cannot inspect request dir: {e}")),
     }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create request dir: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("cannot chmod request dir: {e}"))?;
-    }
+    std::fs::create_dir(&dir).map_err(|e| format!("cannot create request dir: {e}"))?;
+    crate::secure_fs::ensure_private_dir(&dir)
+        .map_err(|e| format!("cannot protect request dir: {e}"))?;
     Ok((dir.clone(), dir.join("archive.dshpreset")))
 }
 
@@ -1971,17 +1942,17 @@ pub async fn confirm_remote_preset_download(
 
     {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&archive)
-            .map_err(|e| {
-                fail(&pending, &arbiter, &request_id, Some(&dir));
-                format!("cannot write temp archive: {e}")
-            })?;
+        let mut file = crate::secure_fs::create_private_new(&archive).map_err(|e| {
+            fail(&pending, &arbiter, &request_id, Some(&dir));
+            format!("cannot write temp archive: {e}")
+        })?;
         file.write_all(&body).map_err(|e| {
             fail(&pending, &arbiter, &request_id, Some(&dir));
             format!("cannot write temp archive: {e}")
+        })?;
+        file.sync_all().map_err(|e| {
+            fail(&pending, &arbiter, &request_id, Some(&dir));
+            format!("cannot sync temp archive: {e}")
         })?;
     }
 

@@ -7,13 +7,14 @@
 use crate::paths::{resolve, RuntimePaths};
 use serde::Serialize;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
 const MAX_LOGS: usize = 500;
+const MAX_SUPERVISOR_LINE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -758,28 +759,38 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
         let attempts_c = runtime.restart_attempts.clone();
         let restart_gen_c = runtime.restart_gen.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                match serde_json::from_str::<Value>(&line) {
-                    Ok(ev) => handle_event(
-                        &app_c,
-                        &state_c,
-                        &stdin_c,
-                        &shutting_down_c,
-                        &attempts_c,
-                        &restart_gen_c,
-                        &ev,
-                    ),
-                    Err(_) => log_line(&state_c, "sidecar", &line),
-                }
-            }
+            let _ = dsh_sidecar::for_each_bounded_line(
+                BufReader::new(stdout),
+                MAX_SUPERVISOR_LINE_BYTES,
+                |line| {
+                    match serde_json::from_str::<Value>(&line) {
+                        Ok(ev) => handle_event(
+                            &app_c,
+                            &state_c,
+                            &stdin_c,
+                            &shutting_down_c,
+                            &attempts_c,
+                            &restart_gen_c,
+                            &ev,
+                        ),
+                        Err(_) => log_line(&state_c, "sidecar", &line),
+                    }
+                    true
+                },
+            );
         });
     }
     if let Some(stderr) = stderr {
         let state_c = runtime.state.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                log_line(&state_c, "sidecar", &line);
-            }
+            let _ = dsh_sidecar::for_each_bounded_line(
+                BufReader::new(stderr),
+                MAX_SUPERVISOR_LINE_BYTES,
+                |line| {
+                    log_line(&state_c, "sidecar", &line);
+                    true
+                },
+            );
         });
     }
 
@@ -879,22 +890,10 @@ pub fn init(app: &AppHandle) {
         return;
     }
 
-    // Fallback initialization of the user preset root: the import path
-    // creates it on demand; this only guarantees the root exists from first
-    // boot so upstream discovery and the settings-page roster never start
-    // from a missing directory. Best-effort and silent — any real problem
-    // surfaces through the import/validation commands instead.
-    let _ = std::fs::create_dir_all(crate::preset::user_preset_root(&paths.dsh_home));
-    // Compositions can hold secrets: match DSH_HOME's 0700 for the root
-    // itself (best-effort, same silence as the mkdir above).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            crate::preset::user_preset_root(&paths.dsh_home),
-            std::fs::Permissions::from_mode(0o700),
-        );
-    }
+    // Fallback initialization of the user preset root. Keep it best-effort so
+    // Harness startup is independent from presets, but use the same checked
+    // helper as imports: a planted symlink must never receive a chmod here.
+    let _ = crate::preset::ensure_user_preset_root(&paths.dsh_home);
 
     let versions = read_versions(&paths);
     let state = Arc::new(Mutex::new(SharedState {

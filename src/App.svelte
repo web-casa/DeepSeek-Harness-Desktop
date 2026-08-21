@@ -195,6 +195,10 @@
     }
     if (remotePresetRequest || presetPreview) {
       showToast("已有待处理的预设请求，插件安装请求已忽略");
+      // A local file-preview does not own the Rust install arbiter. A plugin
+      // deep link can therefore arrive while it is open; rejecting only in
+      // the UI would leave the pending slot + arbiter held until a reload.
+      void dismissPendingPluginInstall().catch(() => {});
       return;
     }
     pluginInstallRequest = request;
@@ -792,13 +796,17 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onEvent((p) => {
+    void onEvent((p) => {
       apply(p);
       if (p.status === "crashed" || p.status === "running") void refreshRecovery();
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFn = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFn = fn;
+      })
+      .catch(() => {
+        /* listener registration can race webview startup/teardown */
+      });
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -809,14 +817,18 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onUpdateProgress((p) => {
+    void onUpdateProgress((p) => {
       if (p.total && p.total > 0) {
         updatePercent = Math.min(100, Math.round((p.downloaded / p.total) * 100));
       }
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFn = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFn = fn;
+      })
+      .catch(() => {
+        /* listener registration can race webview teardown */
+      });
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -829,17 +841,21 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onPluginLog((lines) => {
+    void onPluginLog((lines) => {
       for (const l of lines) {
         pluginLogs.push(`[${l.stream}] ${l.line}`);
       }
       if (pluginLogs.length > 300) {
         pluginLogs.splice(0, pluginLogs.length - 300);
       }
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFn = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFn = fn;
+      })
+      .catch(() => {
+        /* listener registration can race webview teardown */
+      });
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -850,7 +866,7 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onPluginDone((p) => {
+    void onPluginDone((p) => {
       pluginBusy = false;
       const tailLines = p.tail
         .split(/\r?\n/)
@@ -881,10 +897,14 @@
         pluginLogsOpen = true;
       }
       void refreshPlugins();
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFn = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFn = fn;
+      })
+      .catch(() => {
+        /* listener registration can race webview teardown */
+      });
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -899,15 +919,19 @@
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
     void (async () => {
-      const fn = await onPluginInstallRequest(presentPluginInstallRequest);
-      if (cancelled) {
-        fn();
-        return;
+      try {
+        const fn = await onPluginInstallRequest(presentPluginInstallRequest);
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlistenFn = fn;
+      } catch {
+        /* still drain the durable Rust slot below */
       }
-      unlistenFn = fn;
-      // Drain any cold-start request only AFTER the live listener is armed:
-      // a URL delivered in the gap stays in the Rust slot and is picked up
-      // here instead of being lost.
+      // Drain any cold-start request after the live listener is armed when
+      // possible. If listener registration failed, draining still prevents a
+      // durable request + arbiter from becoming invisible until reload.
       try {
         const pending = await getPendingPluginInstall();
         if (!cancelled && pending) presentPluginInstallRequest(pending);
@@ -926,12 +950,16 @@
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
     void (async () => {
-      const fn = await onPresetInstallRequest(presentRemotePresetRequest);
-      if (cancelled) {
-        fn();
-        return;
+      try {
+        const fn = await onPresetInstallRequest(presentRemotePresetRequest);
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlistenFn = fn;
+      } catch {
+        /* still drain the durable Rust slot below */
       }
-      unlistenFn = fn;
       try {
         const pending = await getPendingRemotePreset();
         if (!cancelled && pending) presentRemotePresetRequest(pending);
@@ -948,10 +976,26 @@
   // Poll logs only while the console is open; clean up via effect return.
   $effect(() => {
     if (!inTauri || !logsOpen) return;
-    const timer = setInterval(async () => {
-      logs = await getLogs();
-    }, 1000);
-    return () => clearInterval(timer);
+    let cancelled = false;
+    let fetching = false;
+    const refresh = async () => {
+      if (fetching) return;
+      fetching = true;
+      try {
+        const next = await getLogs();
+        if (!cancelled) logs = next;
+      } catch {
+        /* a transient IPC failure must not produce an unhandled rejection */
+      } finally {
+        fetching = false;
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   });
 
   function stepClass(target: "check" | "start" | "ready"): string {

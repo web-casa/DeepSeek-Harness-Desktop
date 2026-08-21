@@ -37,7 +37,7 @@
 
 use dsh_sidecar::platform::{self, PlatformChild, SpawnSpec};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -47,12 +47,12 @@ use std::time::{Duration, Instant};
 const TICK: Duration = Duration::from_millis(100);
 const FORCE_GRACE: Duration = Duration::from_secs(5);
 const MAX_LINE: usize = 8192;
+const MAX_COMMAND_LINE: usize = 64 * 1024;
 
-/// Cap a single log line: `BufReader::lines` reads unbounded, and whatever we
-/// forward is amplified through the supervisor and the Tauri logs ring.
-///
-/// The cut must land on a UTF-8 character boundary — slicing at byte MAX_LINE
-/// can panic in the middle of a multi-byte character (Chinese logs).
+/// Pure truncation oracle retained for the property tests. Production output
+/// uses `for_each_bounded_line`, which applies the cap while reading rather
+/// than after an unbounded `String` has already been allocated.
+#[cfg(test)]
 fn truncate_line(line: String) -> String {
     if line.len() <= MAX_LINE {
         return line;
@@ -365,17 +365,16 @@ impl Running {
             if let Some(pipe) = pipe {
                 let tx = tx.clone();
                 thread::spawn(move || {
-                    for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                        if line.is_empty() {
-                            continue;
-                        }
-                        // Cap amplification: a single unbounded harness line
-                        // must not balloon through the supervisor's queues.
-                        let line = truncate_line(line);
-                        if tx.send((gen, stream, line)).is_err() {
-                            break;
-                        }
-                    }
+                    let _ = dsh_sidecar::for_each_bounded_line(
+                        BufReader::new(pipe),
+                        MAX_LINE,
+                        |line| {
+                            if line.is_empty() {
+                                return true;
+                            }
+                            tx.send((gen, stream, line)).is_ok()
+                        },
+                    );
                 });
             }
         }
@@ -421,11 +420,11 @@ fn main() {
     // disconnect below (the thread ends on stdin EOF, closing the sender).
     thread::spawn(move || {
         let stdin = std::io::stdin();
-        for line in stdin.lock().lines().map_while(Result::ok) {
-            if cmd_tx.send(line).is_err() {
-                break;
-            }
-        }
+        let _ = dsh_sidecar::for_each_bounded_line(
+            BufReader::new(stdin.lock()),
+            MAX_COMMAND_LINE,
+            |line| cmd_tx.send(line).is_ok(),
+        );
     });
 
     let mut running: Option<Running> = None;

@@ -51,6 +51,27 @@ fn user_preset_root_checked(dsh_home: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Create/protect the user preset root without ever chmodding through a
+/// symlink. Kept as the single entry point for both startup initialization and
+/// imports so their filesystem posture cannot drift.
+pub(crate) fn ensure_user_preset_root(dsh_home: &Path) -> Result<PathBuf, String> {
+    let root = user_preset_root_checked(dsh_home)?;
+    match fs::symlink_metadata(&root) {
+        Ok(meta) if !meta.is_dir() => {
+            return Err("preset root is not a directory".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // This is a direct child of an already-created DSH_HOME. create_dir
+            // is atomic and refuses any leaf an attacker races into place.
+            fs::create_dir(&root).map_err(|e| format!("cannot create preset root: {e}"))?;
+        }
+        Err(error) => return Err(format!("cannot inspect preset root: {error}")),
+    }
+    crate::secure_fs::ensure_private_dir(&root)?;
+    Ok(root)
+}
+
 /// Health kind of a user preset row, aligned with upstream scanRoot
 /// semantics (verified against @deepseek-ai/dsh-agent-presets):
 /// - `Broken` — upstream lists the row with a `broken` marker and refuses to
@@ -450,41 +471,42 @@ fn derive_preset_id(files: &[(String, u64)]) -> Result<String, String> {
 /// Conflicts never overwrite.
 pub fn install_archive(path: &Path, dsh_home: &Path) -> Result<String, String> {
     let preview = inspect_archive(path)?;
-    let root = user_preset_root_checked(dsh_home)?;
-    fs::create_dir_all(&root).map_err(|e| format!("cannot create preset root: {e}"))?;
-    // Compositions can hold secrets: the root holds them all, so keep it
-    // 0700 like DSH_HOME itself (the per-preset dirs are tightened below).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("cannot tighten preset root permissions: {e}"))?;
-    }
+    let root = ensure_user_preset_root(dsh_home)?;
     // Sweep stale staging dirs from crashed/killed runs: names start with
     // ".tmp-" and match neither the preset id regex nor upstream's scan.
     if let Ok(entries) = fs::read_dir(&root) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             if name.to_string_lossy().starts_with(".tmp-") {
-                let _ = fs::remove_dir_all(entry.path());
+                let path = entry.path();
+                match fs::symlink_metadata(&path) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        let _ = fs::remove_file(path);
+                    }
+                    Ok(meta) if meta.is_dir() => {
+                        let _ = fs::remove_dir_all(path);
+                    }
+                    _ => {}
+                }
             }
         }
     }
     let target = root.join(&preview.id);
-    if target.exists() {
-        return Err(format!(
-            "preset {} already exists — not overwriting",
-            preview.id
-        ));
+    match fs::symlink_metadata(&target) {
+        Ok(_) => {
+            return Err(format!(
+                "preset {} already exists — not overwriting",
+                preview.id
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot inspect preset destination: {error}")),
     }
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
     let staging = root.join(format!(
-        ".tmp-{}-{}-{nonce}",
+        ".tmp-{}-{}-{}",
         preview.id,
-        std::process::id()
+        std::process::id(),
+        crate::secure_fs::random_suffix()?
     ));
 
     if let Err(e) = extract_bounded(path, &preview.id, &staging) {
@@ -516,7 +538,7 @@ fn extract_bounded(path: &Path, id: &str, staging: &Path) -> Result<(), String> 
     if zip.len() > MAX_FILES {
         return Err(format!("too many entries: {} (max {MAX_FILES})", zip.len()));
     }
-    fs::create_dir_all(staging).map_err(|e| format!("cannot create staging: {e}"))?;
+    fs::create_dir(staging).map_err(|e| format!("cannot create staging: {e}"))?;
 
     for i in 0..zip.len() {
         let entry = zip
@@ -560,7 +582,11 @@ fn extract_bounded(path: &Path, id: &str, staging: &Path) -> Result<(), String> 
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("cannot create dir: {e}"))?;
         }
-        let mut dest = fs::File::create(&out).map_err(|e| format!("cannot create file: {e}"))?;
+        let mut dest = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&out)
+            .map_err(|e| format!("cannot create unique preset file {raw_name}: {e}"))?;
         let mut copied = 0u64;
         let mut buf = [0u8; 64 * 1024];
         let mut reader = entry.take(MAX_FILE + 1);
@@ -646,11 +672,20 @@ pub fn export_preset(id: &str, dsh_home: &Path, dest: &Path) -> Result<(), Strin
     if !dir.join("agent.cordis.yml").is_file() || !dir.join("preset.yml").is_file() {
         return Err(format!("preset {id} is incomplete"));
     }
-    let file = fs::File::create(dest).map_err(|e| format!("cannot create archive: {e}"))?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default();
-    let mut total = 0u64;
-    let mut count = 0usize;
+
+    crate::secure_fs::check_regular_or_missing(dest)?;
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let source = fs::canonicalize(&dir)
+        .map_err(|e| format!("cannot resolve preset source directory: {e}"))?;
+    let destination_parent = fs::canonicalize(parent)
+        .map_err(|e| format!("cannot resolve preset export directory: {e}"))?;
+    if destination_parent.starts_with(&source) {
+        return Err("preset cannot be exported inside its own source directory".to_string());
+    }
+    let temp = crate::secure_fs::sibling_temp(dest, "preset-export")?;
 
     fn walk(
         zip: &mut zip::ZipWriter<fs::File>,
@@ -664,10 +699,14 @@ pub fn export_preset(id: &str, dsh_home: &Path, dest: &Path) -> Result<(), Strin
         for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
-            let meta = entry.metadata().map_err(|e| e.to_string())?;
-            if meta.file_type().is_symlink() {
+            // DirEntry::metadata follows symlinks. Inspect the directory entry
+            // itself first so a linked directory cannot make the exporter
+            // recurse outside the preset and disclose unrelated files.
+            let file_type = entry.file_type().map_err(|e| e.to_string())?;
+            if file_type.is_symlink() {
                 return Err("preset contains a symbolic link".to_string());
             }
+            let meta = entry.metadata().map_err(|e| e.to_string())?;
             let rel = path
                 .strip_prefix(base)
                 .map_err(|_| "preset path escaped its directory".to_string())?;
@@ -686,15 +725,30 @@ pub fn export_preset(id: &str, dsh_home: &Path, dest: &Path) -> Result<(), Strin
                     return Err("preset exceeds export limits".to_string());
                 }
                 zip.start_file(name, options).map_err(|e| e.to_string())?;
-                let mut src = fs::File::open(&path).map_err(|e| e.to_string())?;
+                let mut src = crate::secure_fs::open_regular_read(&path)?;
                 std::io::copy(&mut src, zip).map_err(|e| e.to_string())?;
             }
         }
         Ok(())
     }
-    walk(&mut zip, &dir, &dir, id, options, &mut count, &mut total)?;
-    zip.finish().map_err(|e| e.to_string())?;
-    Ok(())
+
+    let result = (|| {
+        let file = crate::secure_fs::create_private_new(&temp)?;
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        let mut total = 0u64;
+        let mut count = 0usize;
+        walk(&mut zip, &dir, &dir, id, options, &mut count, &mut total)?;
+        let file = zip.finish().map_err(|e| e.to_string())?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync preset archive: {e}"))?;
+        drop(file);
+        crate::secure_fs::replace_file(&temp, dest)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -946,6 +1000,22 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_archive_paths_are_rejected_without_partial_install() {
+        let archive = write_archive(&[
+            file("my-preset/conflict", b"file"),
+            file("my-preset/conflict/child.txt", b"child"),
+            file("my-preset/agent.cordis.yml", b"composition"),
+            file("my-preset/preset.yml", b"name: demo\n"),
+        ]);
+        let dsh_home = temp_dir("conflicting-paths");
+        let error = install_archive(&archive, &dsh_home).unwrap_err();
+        assert!(error.contains("cannot create dir"), "{error}");
+        assert!(!user_preset_root(&dsh_home).join("my-preset").exists());
+        fs::remove_dir_all(&dsh_home).unwrap();
+        fs::remove_file(&archive).unwrap();
+    }
+
+    #[test]
     fn export_roundtrips_through_inspect() {
         let archive = write_archive(&benign());
         let dsh_home = temp_dir("home4");
@@ -961,6 +1031,53 @@ mod tests {
         fs::remove_dir_all(&dsh_home).unwrap();
         fs::remove_file(&archive).unwrap();
         fs::remove_file(&out).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_refuses_symlink_destination_without_touching_target() {
+        use std::os::unix::fs::symlink;
+        let archive = write_archive(&benign());
+        let dsh_home = temp_dir("export-link-home");
+        install_archive(&archive, &dsh_home).unwrap();
+        let out_dir = temp_dir("export-link-out");
+        let target = out_dir.join("keep.txt");
+        fs::write(&target, b"keep").unwrap();
+        let destination = out_dir.join("preset.dshpreset");
+        symlink(&target, &destination).unwrap();
+        let error = export_preset("my-preset", &dsh_home, &destination).unwrap_err();
+        assert!(error.contains("regular file"), "{error}");
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
+        fs::remove_dir_all(&dsh_home).unwrap();
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::remove_file(&archive).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_refuses_nested_symlink_without_disclosing_target() {
+        use std::os::unix::fs::symlink;
+        let archive = write_archive(&benign());
+        let dsh_home = temp_dir("export-nested-link-home");
+        install_archive(&archive, &dsh_home).unwrap();
+        let outside = temp_dir("export-nested-link-outside");
+        fs::write(outside.join("secret.txt"), b"must not be archived").unwrap();
+        symlink(
+            &outside,
+            user_preset_root(&dsh_home).join("my-preset/linked"),
+        )
+        .unwrap();
+        let out_dir = temp_dir("export-nested-link-output");
+        let destination = out_dir.join("preset.dshpreset");
+
+        let error = export_preset("my-preset", &dsh_home, &destination).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert!(!destination.exists());
+
+        fs::remove_dir_all(&dsh_home).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+        fs::remove_dir_all(&out_dir).unwrap();
+        fs::remove_file(&archive).unwrap();
     }
 
     // ---- P2: preset-root health re-validation ---------------------------
