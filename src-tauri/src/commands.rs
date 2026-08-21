@@ -692,8 +692,7 @@ mod tests {
     use super::{
         is_zip_content_type, manual_plugin_install_allowed, market_pnpm_args, parse_pnpm_major,
         plugin_mutation_status_allowed, plugin_path_env, redact, remove_pnpm_args,
-        supervise_plugin_output, sweep_sideload_dir, sweep_sideloads_root,
-        sweep_stale_sideloads_paths,
+        sweep_sideload_dir, sweep_sideloads_root, sweep_stale_sideloads_paths,
     };
 
     #[test]
@@ -1009,8 +1008,9 @@ mod tests {
         drop(_tx);
 
         let supervisor_runner = runner.clone();
-        let supervisor =
-            std::thread::spawn(move || supervise_plugin_output(&supervisor_runner, rx, |_| {}));
+        let supervisor = std::thread::spawn(move || {
+            super::supervise_plugin_output(&supervisor_runner, rx, |_| {})
+        });
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(
             runner.child.lock().unwrap().is_some(),
