@@ -26,6 +26,7 @@ import {
 import { FLATPAK_ID, flatpakContractProblems, flatpakMetadataProblems } from "./lib/flatpak.ts";
 
 const PLATFORM_KEYS = ["win32-x64", "win32-arm64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
+const RELEASE_TAG_RE = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
 // Case-insensitive: the checksums we publish are lowercase, but a manual edit
 // must not slip through just because it used uppercase hex.
 const SHA256_RE = /^[0-9a-fA-F]{64}$/;
@@ -193,6 +194,9 @@ const tagFlag = process.argv.indexOf("--expect-tag");
 if (tagFlag >= 0) {
   const expected = process.argv[tagFlag + 1];
   if (!expected) fail("--expect-tag requires a value");
+  if (!RELEASE_TAG_RE.test(expected)) {
+    fail(`tag ${expected} must match canonical vMAJOR.MINOR.PATCH`);
+  }
   if (expected !== `v${desktopVersion}`) {
     fail(`tag ${expected} does not match desktop version v${desktopVersion}; refusing to publish`);
   }

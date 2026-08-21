@@ -9,7 +9,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Version | v0.2.10 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
+| Version | v0.2.11 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
@@ -118,7 +118,7 @@ Bundled Node 24 + @deepseek-ai/dsh (pinned)
 ```bash
 pnpm install && pnpm check && pnpm check:scripts   # deps + type checks
 pnpm runtime:all && pnpm runtime:verify           # stage runtime + e2e smoke
-pnpm test:scripts                                 # node:test unit suite (zero deps)
+pnpm test:scripts && pnpm test:frontend           # scripts + frontend security logic tests (zero deps)
 pnpm tauri dev                                    # desktop dev mode
 ```
 
@@ -129,9 +129,9 @@ pnpm tauri dev                                    # desktop dev mode
 | Layer | Gates |
 |---|---|
 | Frontend | `tsc --noEmit` + `svelte-check`, 0 errors |
-| Rust | `cargo nextest` (sidecar 35 + Tauri 35, also run on a Windows host) · llvm-cov ≥50%/25% · `clippy -D warnings` |
+| Rust | `cargo nextest` (sidecar and Tauri, also run on a Windows host) · llvm-cov ≥50%/55% · `clippy -D warnings` |
 | Supply chain | `cargo deny` · `cargo vet --locked` (70 full + 2 delta + exemptions) · `npm audit`/`pnpm audit` block high |
-| Security scan | CodeQL (rust/js-ts/actions) · Dependency Review |
+| Security scan | CodeQL (rust/js-ts/actions) · Dependency Review (lockfile fallback when Graph is unavailable) |
 | Bundles | one `verify-bundle` contract across 7 public formats + fail-closed Windows/macOS signing checks + per-package SHA-256 |
 | Release | 5-minute load soak · updater artifacts + `latest.json` |
 
@@ -156,7 +156,7 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Status: v0.2.10 release candidate, including multi-format installers, macOS
+- Status: v0.2.11 release candidate, including multi-format installers, macOS
   Developer ID signing/notarization, the Cordis v4 marketplace contract,
   diagnostic resilience, and safe plugin recovery.
 - Known limits: Windows GitHub installers do not yet have Authenticode and may

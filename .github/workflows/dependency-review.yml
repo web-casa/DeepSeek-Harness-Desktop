@@ -14,18 +14,130 @@ concurrency:
 jobs:
   dependency-review:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+        with:
+          # The fallback gate compares dependency manifests against the exact
+          # PR base when GitHub's dependency graph API is unavailable.
+          fetch-depth: 0
 
-      # Blocks PRs that introduce vulnerable dependencies (any severity) or
-      # GPL/AGPL/LGPL licenses. NOTE: requires the repo's Dependency graph to
-      # be enabled (org setting); until an org admin flips it on, the step
-      # degrades to a warning instead of blocking CI.
+      - name: Probe GitHub dependency graph
+        id: dependency-graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Pull-request base/head SHA is malformed' >&2
+            exit 1
+          fi
+
+          response_file="$RUNNER_TEMP/dependency-review-probe.json"
+          status="$({ curl --silent --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA"; } || true)"
+
+          case "$status" in
+            200)
+              echo 'available=true' >> "$GITHUB_OUTPUT"
+              ;;
+            403|404)
+              echo 'available=false' >> "$GITHUB_OUTPUT"
+              echo "::warning::GitHub Dependency Graph API returned $status; using lockfile-native fail-closed gates."
+              ;;
+            *)
+              echo "Dependency Graph probe failed with HTTP ${status:-transport-error}" >&2
+              test ! -s "$response_file" || sed -n '1,40p' "$response_file" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Detect fallback ecosystems
+        id: dependency-changes
+        if: steps.dependency-graph.outputs.available == 'false'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          root_js=false
+          runtime_js=false
+          rust=false
+          while IFS= read -r path; do
+            case "$path" in
+              package.json|pnpm-lock.yaml)
+                root_js=true
+                ;;
+              runtime/package.json|runtime/package-lock.json)
+                runtime_js=true
+                ;;
+              Cargo.toml|Cargo.lock|*/Cargo.toml|*/Cargo.lock|supply-chain/*)
+                rust=true
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          {
+            echo "root-js=$root_js"
+            echo "runtime-js=$runtime_js"
+            echo "rust=$rust"
+          } >> "$GITHUB_OUTPUT"
+
+      # When GitHub exposes the graph, this step directly blocks vulnerable or
+      # disallowed dependency additions. It never runs in advisory mode.
       - name: Dependency Review
-        continue-on-error: true
+        if: steps.dependency-graph.outputs.available == 'true'
         uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48  # v4.9.0 (SHA-pinned)
         with:
           fail-on-severity: low
           deny-licenses: GPL-2.0-only, GPL-3.0-only, AGPL-3.0-only, LGPL-2.1-only, LGPL-3.0-only
+
+      - name: Set up pnpm for root fallback
+        if: steps.dependency-changes.outputs.root-js == 'true'
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10 (SHA-pinned)
+
+      - name: Set up Node for JavaScript fallback
+        if: >-
+          steps.dependency-changes.outputs.root-js == 'true' ||
+          steps.dependency-changes.outputs.runtime-js == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+
+      - name: Root JavaScript fallback gate
+        if: steps.dependency-changes.outputs.root-js == 'true'
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm audit --audit-level low
+          pnpm licenses list --json | node scripts/verify-js-licenses.ts --format pnpm
+
+      - name: Runtime JavaScript fallback gate
+        if: steps.dependency-changes.outputs.runtime-js == 'true'
+        working-directory: runtime
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=low
+          npm query '*' --json | node ../scripts/verify-js-licenses.ts --format npm-query
+
+      - name: Set up Rust fallback
+        if: steps.dependency-changes.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable (version via rust-toolchain.toml)
+
+      - name: Install Rust supply-chain tools for fallback
+        if: steps.dependency-changes.outputs.rust == 'true'
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1  # v2 (SHA-pinned)
+        with:
+          tool: cargo-deny@0.20.2,cargo-vet@0.10.2
+
+      - name: Rust fallback gate
+        if: steps.dependency-changes.outputs.rust == 'true'
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          cargo deny --manifest-path crates/dsh-sidecar/Cargo.toml check
+          cargo deny --manifest-path src-tauri/Cargo.toml check
+          cargo vet --locked

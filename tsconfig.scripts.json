@@ -13,5 +13,5 @@
     "types": ["node"],
     "skipLibCheck": true
   },
-  "include": ["scripts/**/*.ts"]
+  "include": ["scripts/**/*.ts", "tests/frontend/**/*.ts"]
 }

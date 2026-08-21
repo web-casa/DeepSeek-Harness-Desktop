@@ -3,9 +3,9 @@
 //! Both implementations must guarantee: when the sidecar goes down (for any
 //! reason), the entire Harness process tree goes down with it.
 //!
-//! * Unix: child is spawned in its own process group (pgid == child pid);
-//!   we signal the whole group, so agents' shells and grandchildren are
-//!   covered too.
+//! * Unix: child is spawned in its own process group (pgid == child pid), and
+//!   a detached pipe watchdog kills that group if the sidecar disappears;
+//!   agents' shells and grandchildren are covered even after SIGKILL/OOM.
 //! * Windows: child is spawned with CREATE_NEW_PROCESS_GROUP (needed for
 //!   CTRL_C) and enrolled in a Job Object configured with
 //!   JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE — closing the last job handle (or
@@ -14,7 +14,7 @@
 
 use std::io;
 #[cfg(unix)]
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 
 /// Everything needed to launch the bundled Node runtime with the Harness entry.
 #[derive(Clone)]
@@ -29,10 +29,75 @@ pub struct SpawnSpec {
 #[cfg(unix)]
 mod imp {
     use super::*;
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
+
+    /// A detached watchdog owns the other end of this pipe. A deliberate
+    /// PlatformChild drop writes a disarm line; abrupt sidecar death closes
+    /// the pipe instead, and the watchdog kills the Harness process group.
+    /// This covers both Linux and macOS, including SIGKILL/OOM paths where
+    /// Rust destructors and signal handlers cannot run.
+    struct ParentDeathGuard {
+        watcher: Child,
+        control: Option<ChildStdin>,
+    }
+
+    impl ParentDeathGuard {
+        fn spawn() -> io::Result<Self> {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg("-c")
+                .arg(
+                    r#"IFS= read -r pgid || exit 0
+case "$pgid" in ''|*[!0-9]*) exit 0 ;; esac
+if IFS= read -r _; then exit 0; fi
+kill -KILL "-$pgid" 2>/dev/null || :"#,
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // The watchdog must not share the Harness process group it may
+            // later kill. setsid() gives it an independent session/group.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut watcher = cmd.spawn()?;
+            let control = watcher
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("parent-death watchdog stdin unavailable"))?;
+            Ok(Self {
+                watcher,
+                control: Some(control),
+            })
+        }
+
+        fn control_fd(&self) -> io::Result<libc::c_int> {
+            self.control
+                .as_ref()
+                .map(AsRawFd::as_raw_fd)
+                .ok_or_else(|| io::Error::other("parent-death watchdog already disarmed"))
+        }
+    }
+
+    impl Drop for ParentDeathGuard {
+        fn drop(&mut self) {
+            if let Some(mut control) = self.control.take() {
+                let _ = control.write_all(b"disarm\n");
+                drop(control);
+            }
+            let _ = self.watcher.wait();
+        }
+    }
 
     struct Kill {
         pgid: i32,
+        _parent_death: ParentDeathGuard,
     }
 
     /// A spawned child plus the platform handle used to kill its whole tree.
@@ -51,6 +116,10 @@ mod imp {
             spec: &SpawnSpec,
             inherited: &[(std::ffi::OsString, std::ffi::OsString)],
         ) -> io::Result<Self> {
+            #[cfg(target_os = "linux")]
+            let parent_pid = unsafe { libc::getpid() };
+            let parent_death = ParentDeathGuard::spawn()?;
+            let watchdog_fd = parent_death.control_fd()?;
             let mut cmd = Command::new(&spec.node);
             // Injection-safe environment: Command inherits the FULL parent
             // env by default and `.envs()` only overlays — so a key omitted
@@ -67,13 +136,38 @@ mod imp {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            // New process group: pgid == child pid, signalable as a tree.
-            cmd.process_group(0);
+            // New process group: pgid == child pid, signalable as a tree. The
+            // child reports that pgid to the watchdog before exec closes the
+            // inherited CLOEXEC pipe descriptor. On Linux PDEATHSIG closes
+            // the tiny setup race as defense in depth; the detached watchdog
+            // remains the cross-platform mechanism that covers descendants.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::setpgid(0, 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    {
+                        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        if libc::getppid() != parent_pid {
+                            return Err(io::Error::from_raw_os_error(libc::ECHILD));
+                        }
+                    }
+
+                    write_pid_line(watchdog_fd, libc::getpid())
+                });
+            }
             let child = cmd.spawn()?;
             let pid = child.id();
             Ok(PlatformChild {
                 child,
-                kill: Kill { pgid: pid as i32 },
+                kill: Kill {
+                    pgid: pid as i32,
+                    _parent_death: parent_death,
+                },
             })
         }
 
@@ -92,6 +186,48 @@ mod imp {
                 libc::kill(-self.kill.pgid, libc::SIGKILL);
             }
         }
+    }
+
+    impl Drop for PlatformChild {
+        fn drop(&mut self) {
+            // Kill possible descendants even when the direct child has
+            // already exited, then ParentDeathGuard disarms its watchdog.
+            self.force();
+        }
+    }
+
+    /// Write a positive decimal pid plus newline without allocation. This is
+    /// called between fork and exec, so it uses only async-signal-safe libc
+    /// operations.
+    unsafe fn write_pid_line(fd: libc::c_int, pid: libc::pid_t) -> io::Result<()> {
+        if pid <= 0 {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let mut digits = [0_u8; 32];
+        let mut cursor = digits.len() - 1;
+        digits[cursor] = b'\n';
+        let mut value = pid as u32;
+        while value > 0 {
+            cursor -= 1;
+            digits[cursor] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+        let mut remaining = &digits[cursor..];
+        while !remaining.is_empty() {
+            let written = libc::write(fd, remaining.as_ptr().cast(), remaining.len());
+            if written == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(error);
+            }
+            if written == 0 {
+                return Err(io::Error::from_raw_os_error(libc::EPIPE));
+            }
+            remaining = &remaining[written as usize..];
+        }
+        Ok(())
     }
 }
 

@@ -78,12 +78,12 @@ jobs:
             echo "macos_notarization=$(node scripts/release-plan.ts --github-macos-notarization-matrix --target '${{ github.event.inputs.native_target || 'all' }}')"
           } >> "$GITHUB_OUTPUT"
 
-  # The desktop deliberately refuses CDN redirects for remote preset archives.
-  # Keep this independent of native builds: a backend contract regression must
-  # block tag publication, while workflow_dispatch can still collect Windows
-  # build and installer evidence for diagnosis.
+  # The desktop deliberately refuses redirects/non-JSON responses at its
+  # Cordis trust boundaries. Keep production probes independent of native
+  # builds: a backend contract regression must block tag publication, while
+  # workflow_dispatch can still collect installer evidence for diagnosis.
   preset-download-contract:
-    name: Cordis preset direct ZIP contract
+    name: Cordis production API contracts
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -100,6 +100,9 @@ jobs:
         run: node scripts/verify-cordis-preset-download.ts
         env:
           CORDIS_PRESET_SLUG: ${{ github.event.inputs.preset_slug || 'code' }}
+
+      - name: Require direct market JSON, ETag/304, and JSON 404
+        run: node scripts/verify-cordis-market-api.ts
 
   quality:
     name: Quality gates
@@ -129,10 +132,16 @@ jobs:
           ref: ${{ github.ref }}
 
       - name: Enforce tag ancestry
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release tag must match vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
           git fetch origin main
           git merge-base --is-ancestor HEAD FETCH_HEAD || {
-            echo "::error::tag ${{ github.ref_name }} is not an ancestor of origin/main — refusing to build/publish"
+            echo "::error::tag $RELEASE_TAG is not an ancestor of origin/main — refusing to build/publish"
             exit 1
           }
 
@@ -1032,7 +1041,9 @@ jobs:
       # The tag must be bound to the version it publishes: v9.9.9 must never
       # ship artifacts whose embedded desktop version is 0.1.0.
       - name: Release preflight (tag binding)
-        run: node scripts/release-preflight.ts --expect-tag ${{ github.ref_name }}
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-preflight.ts --expect-tag "$RELEASE_TAG"
 
       # Download only the public website artifacts. Store MSIX artifacts stay
       # workflow-only and must never be swept into the GitHub Release.
@@ -1043,6 +1054,9 @@ jobs:
 
       - name: Verify complete public release inventory
         run: node scripts/verify-release-inventory.ts --directory artifacts
+
+      - name: Cryptographically verify updater artifact/signature pairs
+        run: node scripts/verify-updater-signatures.ts --directory artifacts
 
       - name: Publish release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2 (SHA-pinned)
@@ -1055,8 +1069,9 @@ jobs:
       # after the release is created; fail-closed if a platform has no
       # artifact+sig pair. macOS is intentionally absent while unsigned.
       - name: Publish updater manifest (latest.json)
-        run: node scripts/updater-manifest.ts --tag ${{ github.ref_name }} --platforms windows-x86_64
+        run: node scripts/updater-manifest.ts --tag "$RELEASE_TAG" --platforms windows-x86_64
         env:
+          RELEASE_TAG: ${{ github.ref_name }}
           # gh CLI does NOT auto-authenticate from the ambient GITHUB_TOKEN;
           # it needs GH_TOKEN explicitly (the job's contents: write applies).
           GH_TOKEN: ${{ github.token }}

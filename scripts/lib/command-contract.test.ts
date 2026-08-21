@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  BOOTSTRAP_OPENER_URLS,
   bootstrapCommands,
+  bootstrapOpenerProblems,
   commandContractProblems,
   frontendInvokeCommands,
   handlerCommands,
@@ -26,7 +28,16 @@ const build = `
 const bootstrap = JSON.stringify({
   identifier: "bootstrap",
   windows: ["bootstrap"],
-  permissions: ["core:default", "allow-get-status", "dialog:allow-save", "allow-export-diagnostics"],
+  permissions: [
+    "core:default",
+    "allow-get-status",
+    "dialog:allow-save",
+    "allow-export-diagnostics",
+    {
+      identifier: "opener:allow-open-url",
+      allow: BOOTSTRAP_OPENER_URLS.map((url) => ({ url })),
+    },
+  ],
 });
 const harness = JSON.stringify({ identifier: "harness", windows: ["harness"], permissions: [] });
 
@@ -38,6 +49,27 @@ test("balanced Rust extraction tolerates comments and nested delimiters", () => 
 
 test("capability normalization ignores plugin/core permissions", () => {
   assert.deepEqual(bootstrapCommands(bootstrap), ["export_diagnostics", "get_status"]);
+  assert.deepEqual(bootstrapOpenerProblems(bootstrap), []);
+});
+
+test("bootstrap opener URLs stay narrowly scoped", () => {
+  const unscoped = JSON.stringify({ permissions: ["opener:allow-open-url"] });
+  assert.deepEqual(bootstrapOpenerProblems(unscoped), [
+    "bootstrap opener permission must use an explicit URL scope",
+  ]);
+
+  const broad = JSON.stringify({
+    permissions: [
+      {
+        identifier: "opener:allow-open-url",
+        allow: [{ url: "https://*" }],
+      },
+    ],
+  });
+  assert.deepEqual(bootstrapOpenerProblems(broad), [
+    "bootstrap opener URL scope missing: https://cordis.run, https://cordis.run/*, https://dsharness.app, https://dsharness.app/*, https://github.com/web-casa/DeepSeek-Harness-Desktop/issues/new*",
+    "bootstrap opener URL scope extra: https://*",
+  ]);
 });
 
 test("aligned command contract has no problems", () => {

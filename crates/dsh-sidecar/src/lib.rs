@@ -7,6 +7,88 @@
 
 pub mod platform;
 
+/// Stream newline-delimited child output without ever buffering an unbounded
+/// line. `BufRead::lines()` allocates until it sees a newline, so truncating
+/// the returned `String` is too late to protect the supervisor from a child
+/// that writes one enormous line. This reader keeps at most `max_bytes`,
+/// discards the rest of that line in-place, and then resumes at the next one.
+///
+/// The callback returns `false` to stop early (for example when its channel
+/// receiver has gone away). Invalid child bytes are represented lossily; an
+/// incomplete UTF-8 character at the truncation boundary is removed before
+/// the marker is appended.
+pub fn for_each_bounded_line<R, F>(
+    mut reader: R,
+    max_bytes: usize,
+    mut callback: F,
+) -> std::io::Result<()>
+where
+    R: std::io::BufRead,
+    F: FnMut(String) -> bool,
+{
+    if max_bytes == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bounded line size must be greater than zero",
+        ));
+    }
+
+    loop {
+        let mut prefix = Vec::with_capacity(max_bytes.min(8 * 1024));
+        let mut truncated = false;
+        let mut saw_any = false;
+        loop {
+            let (consumed, newline, eof) = {
+                let available = reader.fill_buf()?;
+                if available.is_empty() {
+                    (0, false, true)
+                } else {
+                    saw_any = true;
+                    let newline_at = available.iter().position(|byte| *byte == b'\n');
+                    let content_len = newline_at.unwrap_or(available.len());
+                    let remaining = max_bytes.saturating_sub(prefix.len());
+                    let copy_len = content_len.min(remaining);
+                    prefix.extend_from_slice(&available[..copy_len]);
+                    truncated |= content_len > copy_len;
+                    (
+                        content_len + usize::from(newline_at.is_some()),
+                        newline_at.is_some(),
+                        false,
+                    )
+                }
+            };
+            if eof {
+                if !saw_any {
+                    return Ok(());
+                }
+                break;
+            }
+            reader.consume(consumed);
+            if newline {
+                break;
+            }
+        }
+
+        if prefix.last() == Some(&b'\r') {
+            prefix.pop();
+        }
+        if truncated {
+            if let Err(error) = std::str::from_utf8(&prefix) {
+                if error.error_len().is_none() {
+                    prefix.truncate(error.valid_up_to());
+                }
+            }
+        }
+        let mut line = String::from_utf8_lossy(&prefix).into_owned();
+        if truncated {
+            line.push_str("… [line truncated]");
+        }
+        if !callback(line) {
+            return Ok(());
+        }
+    }
+}
+
 /// Quote one argument for the Windows command line (CommandLineToArgvW
 /// semantics). Pure string logic — unit-tested on every platform even though
 /// only the Windows spawn path consumes it.
@@ -122,4 +204,51 @@ pub fn sanitize_env_lines(lines: Vec<Vec<u16>>) -> Vec<Vec<u16>> {
                 && !folded.starts_with(&prefix)
         })
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod bounded_line_tests {
+    use super::*;
+    use std::io::BufReader;
+
+    #[test]
+    fn bounded_reader_discards_large_line_and_resumes() {
+        let input = format!("{}\nnext\r\nlast", "x".repeat(64 * 1024));
+        let mut lines = Vec::new();
+        for_each_bounded_line(BufReader::new(input.as_bytes()), 32, |line| {
+            lines.push(line);
+            true
+        })
+        .unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], format!("{}… [line truncated]", "x".repeat(32)));
+        assert_eq!(lines[1], "next");
+        assert_eq!(lines[2], "last");
+    }
+
+    #[test]
+    fn bounded_reader_keeps_utf8_boundary() {
+        let input = format!("{}\nafter\n", "你".repeat(128));
+        let mut lines = Vec::new();
+        for_each_bounded_line(BufReader::new(input.as_bytes()), 10, |line| {
+            lines.push(line);
+            true
+        })
+        .unwrap();
+        assert_eq!(lines[0], "你你你… [line truncated]");
+        assert_eq!(lines[1], "after");
+    }
+
+    #[test]
+    fn bounded_reader_can_stop_without_reading_the_tail() {
+        let input = b"one\ntwo\nthree\n";
+        let mut lines = Vec::new();
+        for_each_bounded_line(BufReader::new(input.as_slice()), 16, |line| {
+            lines.push(line);
+            false
+        })
+        .unwrap();
+        assert_eq!(lines, ["one"]);
+    }
 }

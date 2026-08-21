@@ -7,13 +7,14 @@
 use crate::paths::{resolve, RuntimePaths};
 use serde::Serialize;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
 const MAX_LOGS: usize = 500;
+const MAX_SUPERVISOR_LINE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -72,11 +73,13 @@ pub struct Runtime {
     restart_gen: Arc<AtomicU64>,
 }
 
-/// The origin the currently open harness window was created for. Restarts may
-/// change the port; the window must be recreated in that case because its
-/// on_navigation guard is bound to the creation origin.
+/// The readiness origin currently authorized for the Harness window.
+///
+/// Restarts normally pick a new port. The navigation callback holds this
+/// shared value so the existing zero-IPC webview can move to the newly
+/// validated origin without a destroy/recreate race on the `harness` label.
 #[derive(Default)]
-pub struct WindowOrigin(pub Mutex<Option<String>>);
+pub struct WindowOrigin(pub Arc<Mutex<Option<String>>>);
 
 /// Crash auto-restart policy: up to this many consecutive attempts with
 /// exponential backoff, then give up and surface the error.
@@ -189,6 +192,12 @@ fn same_origin(candidate: &tauri::Url, origin: &tauri::Url) -> bool {
         && candidate.port() == origin.port()
 }
 
+fn matches_authorized_origin(candidate: &tauri::Url, authorized: Option<&str>) -> bool {
+    authorized
+        .and_then(|origin| tauri::Url::parse(origin).ok())
+        .is_some_and(|origin| same_origin(candidate, &origin))
+}
+
 /// Open (or focus) the harness window. The remote webview may only navigate
 /// within the readiness origin — even with zero IPC permissions, a stray page
 /// link must not turn the window into a general-purpose browser or a jumper
@@ -201,45 +210,39 @@ pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
         return;
     };
     let origin = parsed.origin().ascii_serialization();
-
-    // Same origin as the current window → refresh + show/focus (the
-    // navigation guard allows same-origin navigations).
-    let window_origin = app.try_state::<WindowOrigin>();
-    let current = window_origin.as_ref().and_then(|w| {
-        w.0.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    });
-    if current.as_deref() == Some(origin.as_str()) {
-        let app_in = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            if let Some(win) = app_in.get_webview_window("harness") {
-                let _ = win.navigate(parsed.clone());
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-        });
+    let Some(window_origin) = app.try_state::<WindowOrigin>() else {
+        eprintln!("[dsh-desktop] Harness window origin state is unavailable");
         return;
-    }
-
-    // Different origin (restart picked a new port): the old window's
-    // navigation guard would block the new port, so recreate the window.
-    let Ok(origin_parsed) = tauri::Url::parse(&origin) else {
-        return; // unreachable: is_valid_readiness_url passed above
     };
-    if let Some(window_origin) = window_origin {
-        *window_origin
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(origin.clone());
-    }
+    let authorized_origin = window_origin.0.clone();
     let app_in = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Some(win) = app_in.get_webview_window("harness") {
-            // destroy() bypasses CloseRequested (which hides instead of closing).
-            let _ = win.destroy();
+    if let Err(error) = app.run_on_main_thread(move || {
+        // The authorization update and navigation happen on the main thread,
+        // in order. Only a URL that passed is_valid_readiness_url reaches this
+        // point; the remote webview still has no capability/IPC permissions.
+        let previous_origin = {
+            let mut authorized = authorized_origin
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            authorized.replace(origin.clone())
+        };
+
+        if let Some(window) = app_in.get_webview_window("harness") {
+            if let Err(error) = window.navigate(parsed) {
+                *authorized_origin
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous_origin;
+                eprintln!("[dsh-desktop] cannot navigate Harness window: {error}");
+                return;
+            }
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+            return;
         }
-        let _ = tauri::WebviewWindowBuilder::new(
+
+        let navigation_origin = authorized_origin.clone();
+        let result = tauri::WebviewWindowBuilder::new(
             &app_in,
             "harness",
             tauri::WebviewUrl::External(parsed),
@@ -247,9 +250,22 @@ pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
         .title("DSH Desktop")
         .inner_size(1280.0, 800.0)
         .min_inner_size(960.0, 600.0)
-        .on_navigation(move |candidate| same_origin(candidate, &origin_parsed))
+        .on_navigation(move |candidate| {
+            let authorized = navigation_origin
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            matches_authorized_origin(candidate, authorized.as_deref())
+        })
         .build();
-    });
+        if let Err(error) = result {
+            *authorized_origin
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous_origin;
+            eprintln!("[dsh-desktop] cannot create Harness window: {error}");
+        }
+    }) {
+        eprintln!("[dsh-desktop] cannot schedule Harness window operation: {error}");
+    }
 }
 
 /// Side effects requested by the pure state transition, executed by the
@@ -743,28 +759,38 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
         let attempts_c = runtime.restart_attempts.clone();
         let restart_gen_c = runtime.restart_gen.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                match serde_json::from_str::<Value>(&line) {
-                    Ok(ev) => handle_event(
-                        &app_c,
-                        &state_c,
-                        &stdin_c,
-                        &shutting_down_c,
-                        &attempts_c,
-                        &restart_gen_c,
-                        &ev,
-                    ),
-                    Err(_) => log_line(&state_c, "sidecar", &line),
-                }
-            }
+            let _ = dsh_sidecar::for_each_bounded_line(
+                BufReader::new(stdout),
+                MAX_SUPERVISOR_LINE_BYTES,
+                |line| {
+                    match serde_json::from_str::<Value>(&line) {
+                        Ok(ev) => handle_event(
+                            &app_c,
+                            &state_c,
+                            &stdin_c,
+                            &shutting_down_c,
+                            &attempts_c,
+                            &restart_gen_c,
+                            &ev,
+                        ),
+                        Err(_) => log_line(&state_c, "sidecar", &line),
+                    }
+                    true
+                },
+            );
         });
     }
     if let Some(stderr) = stderr {
         let state_c = runtime.state.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                log_line(&state_c, "sidecar", &line);
-            }
+            let _ = dsh_sidecar::for_each_bounded_line(
+                BufReader::new(stderr),
+                MAX_SUPERVISOR_LINE_BYTES,
+                |line| {
+                    log_line(&state_c, "sidecar", &line);
+                    true
+                },
+            );
         });
     }
 
@@ -791,7 +817,7 @@ fn start_harness(runtime: &Runtime, paths: &RuntimePaths) -> Result<(), String> 
         "command": "start",
         "node": paths.node,
         "script": dsh_bin,
-        "args": ["web", "--host", "127.0.0.1", "--port", "0"],
+        "args": ["web", "--no-open", "--host", "127.0.0.1", "--port", "0"],
         "cwd": paths.harness_dir,
         // DSH_HOME: the harness' own data root. DSH_TELEMETRY_DISABLED:
         // upstream dsh honors any non-empty value by disabling the
@@ -864,22 +890,10 @@ pub fn init(app: &AppHandle) {
         return;
     }
 
-    // Fallback initialization of the user preset root: the import path
-    // creates it on demand; this only guarantees the root exists from first
-    // boot so upstream discovery and the settings-page roster never start
-    // from a missing directory. Best-effort and silent — any real problem
-    // surfaces through the import/validation commands instead.
-    let _ = std::fs::create_dir_all(crate::preset::user_preset_root(&paths.dsh_home));
-    // Compositions can hold secrets: match DSH_HOME's 0700 for the root
-    // itself (best-effort, same silence as the mkdir above).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            crate::preset::user_preset_root(&paths.dsh_home),
-            std::fs::Permissions::from_mode(0o700),
-        );
-    }
+    // Fallback initialization of the user preset root. Keep it best-effort so
+    // Harness startup is independent from presets, but use the same checked
+    // helper as imports: a planted symlink must never receive a chmod here.
+    let _ = crate::preset::ensure_user_preset_root(&paths.dsh_home);
 
     let versions = read_versions(&paths);
     let state = Arc::new(Mutex::new(SharedState {
@@ -1462,5 +1476,34 @@ mod tests {
         assert!(!is_valid_readiness_url("http://127.0.0.1:41234#frag"));
         assert!(!is_valid_readiness_url("not a url"));
         assert!(!is_valid_readiness_url(""));
+    }
+
+    #[test]
+    fn navigation_guard_tracks_the_latest_validated_restart_origin() {
+        let first_root = tauri::Url::parse("http://127.0.0.1:41234/").unwrap();
+        let first_route = tauri::Url::parse("http://127.0.0.1:41234/session/one?q=1").unwrap();
+        let restarted_route = tauri::Url::parse("http://127.0.0.1:52345/session/two").unwrap();
+
+        assert!(matches_authorized_origin(
+            &first_route,
+            Some("http://127.0.0.1:41234")
+        ));
+        assert!(!matches_authorized_origin(
+            &restarted_route,
+            Some("http://127.0.0.1:41234")
+        ));
+
+        // After the shell accepts a new readiness URL, the existing window
+        // may navigate to that port and the old one immediately loses access.
+        assert!(matches_authorized_origin(
+            &restarted_route,
+            Some("http://127.0.0.1:52345")
+        ));
+        assert!(!matches_authorized_origin(
+            &first_root,
+            Some("http://127.0.0.1:52345")
+        ));
+        assert!(!matches_authorized_origin(&first_root, None));
+        assert!(!matches_authorized_origin(&first_root, Some("not a URL")));
     }
 }

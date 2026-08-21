@@ -114,7 +114,10 @@ jobs:
           cargo nextest run --manifest-path src-tauri/Cargo.toml
 
       - name: Tauri coverage (llvm-cov)
-        run: cargo llvm-cov nextest --manifest-path src-tauri/Cargo.toml --fail-under-lines 25
+        # Current coverage is above 60%; keep enough headroom for platform-
+        # gated code while preventing the IPC/security surface from silently
+        # falling back to the historical placeholder floor.
+        run: cargo llvm-cov nextest --manifest-path src-tauri/Cargo.toml --fail-under-lines 55
 
       - name: Rust formatting & clippy
         run: |
@@ -143,12 +146,15 @@ jobs:
       - name: Scripts unit tests (node:test, zero-dep)
         run: pnpm test:scripts
 
+      - name: Frontend security logic tests (node:test, zero-dep)
+        run: pnpm test:frontend
+
       - name: Command permission contract
         run: pnpm verify:command-contract
 
-      # The ONLY blocking npm-side vulnerability gates: dependency-review is
-      # org-gated (continue-on-error), so the two lockfiles get their own
-      # audits. --audit-level=high keeps triage noise down.
+      # Defense in depth alongside the now-blocking dependency-review job.
+      # The lockfile-native audits also cover direct pushes and tag builds;
+      # --audit-level=high keeps triage noise down.
       - name: npm dependency audit (runtime lock)
         run: npm audit --omit=dev --audit-level=high
         working-directory: runtime

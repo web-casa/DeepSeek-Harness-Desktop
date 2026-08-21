@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
 #[cfg(unix)]
 const PRIVATE_DIR_MODE: u32 = 0o700;
 #[cfg(unix)]
@@ -55,13 +58,89 @@ pub fn ensure_private_dir(path: &Path) -> Result<(), String> {
         }
     }
     #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_DIR_MODE)).map_err(|e| {
-        format!(
-            "cannot protect private state directory {}: {e}",
-            path.display()
-        )
-    })?;
+    {
+        // Open the directory itself without following the final component and
+        // chmod the handle. A path-based chmod after symlink_metadata leaves a
+        // race where another local process can swap the leaf for a symlink.
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
+        let directory = options.open(path).map_err(|e| {
+            format!(
+                "cannot securely open private state directory {}: {e}",
+                path.display()
+            )
+        })?;
+        if !directory
+            .metadata()
+            .map_err(|e| format!("cannot inspect private directory handle: {e}"))?
+            .is_dir()
+        {
+            return Err(format!(
+                "private state path is not a real directory: {}",
+                path.display()
+            ));
+        }
+        directory
+            .set_permissions(fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+            .map_err(|e| {
+                format!(
+                    "cannot protect private state directory {}: {e}",
+                    path.display()
+                )
+            })?;
+    }
     Ok(())
+}
+
+fn no_follow(options: &mut OpenOptions) {
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+}
+
+fn validate_regular_handle(file: &File, path: &Path) -> Result<fs::Metadata, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("cannot inspect open file {}: {e}", path.display()))?;
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(format!(
+                "private state leaf is a reparse point: {}",
+                path.display()
+            ));
+        }
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "private state leaf is not a regular file: {}",
+            path.display()
+        ));
+    }
+    Ok(metadata)
+}
+
+/// Open an existing regular file while refusing a symlink/reparse-point leaf.
+/// Callers that impose a byte limit must still read through a bounded adapter,
+/// because the file can grow after the handle is opened.
+pub fn open_regular_read(path: &Path) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    no_follow(&mut options);
+    let file = options
+        .open(path)
+        .map_err(|e| format!("cannot securely open file {}: {e}", path.display()))?;
+    validate_regular_handle(&file, path)?;
+    Ok(file)
 }
 
 pub fn check_regular_or_missing(path: &Path) -> Result<(), String> {
@@ -94,13 +173,15 @@ pub fn open_private_append(path: &Path) -> Result<File, String> {
     check_regular_or_missing(path)?;
     let mut options = OpenOptions::new();
     options.write(true).create(true).append(true);
+    no_follow(&mut options);
     #[cfg(unix)]
     options.mode(PRIVATE_FILE_MODE);
     let file = options
         .open(path)
         .map_err(|e| format!("cannot open private file {}: {e}", path.display()))?;
+    validate_regular_handle(&file, path)?;
     #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+    file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
         .map_err(|e| format!("cannot protect private file {}: {e}", path.display()))?;
     Ok(file)
 }
@@ -128,9 +209,17 @@ pub fn read_bounded(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, Stri
             path.display()
         ));
     }
-    let file = File::open(path)
-        .map_err(|e| format!("cannot read private file {}: {e}", path.display()))?;
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    let file = open_regular_read(path)?;
+    let opened_meta = file
+        .metadata()
+        .map_err(|e| format!("cannot inspect private file {}: {e}", path.display()))?;
+    if opened_meta.len() > max_bytes {
+        return Err(format!(
+            "private file exceeds {max_bytes} byte limit: {}",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened_meta.len() as usize);
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|e| format!("cannot read private file {}: {e}", path.display()))?;
@@ -288,7 +377,28 @@ mod tests {
         let link = root.join("state.json");
         symlink(&target, &link).unwrap();
         assert!(atomic_write(&link, b"replacement", 64).is_err());
+        assert!(read_bounded(&link, 64).is_err());
+        assert!(open_private_append(&link).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"secret");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_directory_is_rejected_without_chmodding_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = test_dir("directory-symlink");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = root.join("state");
+        symlink(&target, &link).unwrap();
+        assert!(ensure_private_dir(&link).is_err());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

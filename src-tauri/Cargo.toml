@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness-desktop"
-version = "0.2.10"
+version = "0.2.11"
 description = "DSH Desktop — community desktop packaging of DeepSeek Harness"
 edition = "2021"
 license = "MIT"
@@ -45,7 +45,12 @@ dbg_macro = "deny"
 proptest = "1"
 
 [target.'cfg(windows)'.dependencies]
-# Needed for atomic replacement of Desktop-owned pending state. This is
-# already pinned by dsh-sidecar; declare it directly because Rust crates may
-# not rely on transitive dependencies.
+# Needed for no-follow private-file handles and atomic replacement of
+# Desktop-owned state. This is already pinned by dsh-sidecar; declare it
+# directly because Rust crates may not rely on transitive dependencies.
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW closes the final-component check/open race for Desktop-owned
+# private state and user-selected sideload archives.
+libc = "0.2"

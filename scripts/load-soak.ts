@@ -173,7 +173,7 @@ async function soak(minutes: number, burners: number): Promise<boolean> {
       command: "start",
       node: nodePath,
       script: join(harnessDir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js"),
-      args: ["web", "--host", "127.0.0.1", "--port", "0"],
+      args: ["web", "--no-open", "--host", "127.0.0.1", "--port", "0"],
       cwd: harnessDir,
       env: { DSH_HOME: dshHome, DSH_TELEMETRY_DISABLED: "1" },
     }) + "\n",

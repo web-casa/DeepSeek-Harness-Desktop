@@ -14,6 +14,8 @@
 //   - reconcilePlugins runs (is-odd declares no dsh.bundle → warning +
 //     in-box bundles list untouched);
 //   - `remove is-odd` drops the dependency again.
+//   - the reported dsh-plugin-pkgseek@0.1.1 active-bundle uninstall path
+//     removes both its dependency and dsh.profile.bundles entry.
 //
 // Store isolation (plan S5): `pnpm_config_store_dir` pins the pnpm content
 // store inside the temp home, so nothing touches the user's real store.
@@ -195,6 +197,38 @@ async function main(): Promise<void> {
   if (typeof after["is-odd"] === "string") fail(`is-odd still in dependencies after remove: ${JSON.stringify(after)}`);
   if (existsSync(join(profileDir, "node_modules", "is-odd"))) fail("node_modules/is-odd still present after remove");
   ok("remove dropped the dependency and the installed tree entry");
+
+  // Regression for the real package reported by Desktop users. Unlike
+  // is-odd it declares dsh.bundle, so this covers the active-layer removal
+  // and not only pnpm's dependency deletion path.
+  await runPlugin(
+    ["add", "dsh-plugin-pkgseek@0.1.1"],
+    "dsh plugin add dsh-plugin-pkgseek@0.1.1",
+  );
+  const activePkgseek = readProfileManifest();
+  if (typeof activePkgseek.dependencies?.["dsh-plugin-pkgseek"] !== "string") {
+    fail("dsh-plugin-pkgseek missing from dependencies after install");
+  }
+  if (!activePkgseek.dsh?.profile?.bundles?.includes("dsh-plugin-pkgseek")) {
+    fail("dsh-plugin-pkgseek missing from active bundles after install");
+  }
+  ok("dsh-plugin-pkgseek@0.1.1 installed and activated by upstream reconcile");
+
+  await runPlugin(
+    ["remove", "dsh-plugin-pkgseek"],
+    "dsh plugin remove dsh-plugin-pkgseek",
+  );
+  const withoutPkgseek = readProfileManifest();
+  if (typeof withoutPkgseek.dependencies?.["dsh-plugin-pkgseek"] === "string") {
+    fail("dsh-plugin-pkgseek still present in dependencies after remove");
+  }
+  if (withoutPkgseek.dsh?.profile?.bundles?.includes("dsh-plugin-pkgseek")) {
+    fail("dsh-plugin-pkgseek still present in active bundles after remove");
+  }
+  if (existsSync(join(profileDir, "node_modules", "dsh-plugin-pkgseek"))) {
+    fail("node_modules/dsh-plugin-pkgseek still present after remove");
+  }
+  ok("dsh-plugin-pkgseek uninstall removed dependency, active bundle, and installed files");
 
   rmSync(home, { recursive: true, force: true });
   console.log("\n  PASS — plugin install/remove e2e complete");

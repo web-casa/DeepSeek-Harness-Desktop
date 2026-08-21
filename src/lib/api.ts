@@ -118,6 +118,7 @@ export interface PluginLogLine {
 export interface PluginDone {
   exit: number | null;
   tail: string;
+  op: "add" | "remove" | "market-install";
 }
 
 export const listPlugins = (): Promise<PluginList> => invoke("list_plugins");

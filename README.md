@@ -8,7 +8,7 @@
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| 版本 | v0.2.10 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · macOS 已签名/公证 · [English](README.en.md) |
+| 版本 | v0.2.11 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · macOS 已签名/公证 · [English](README.en.md) |
 
 > **macOS 用户**：v0.2.9 起，DMG 使用 Developer ID Application 签名并经
 > Apple 公证、staple 与 Gatekeeper 复验。请只从本仓库 Releases 下载；若官方
@@ -86,7 +86,7 @@ dsh-sidecar（Rust，无重依赖）
 ```bash
 pnpm install && pnpm check && pnpm check:scripts   # 依赖 + 类型检查
 pnpm runtime:all && pnpm runtime:verify           # 准备运行时 + 端到端冒烟
-pnpm test:scripts                                 # node:test 单测（零依赖）
+pnpm test:scripts && pnpm test:frontend           # 脚本 + 前端安全逻辑单测（零依赖）
 pnpm tauri dev                                    # 桌面开发模式
 ```
 
@@ -131,9 +131,9 @@ Microsoft Store 构建仍只允许 `src-tauri/store-curated-plugins.json` 的审
 | 层 | 门禁 |
 |---|---|
 | 前端 | `tsc --noEmit` + `svelte-check` 0 error |
-| Rust | `cargo nextest`（sidecar 35 + Tauri 35，Windows 宿主亦实跑）· llvm-cov ≥50%/25% · `clippy -D warnings` |
+| Rust | `cargo nextest`（sidecar 与 Tauri，Windows 宿主亦实跑）· llvm-cov ≥50%/55% · `clippy -D warnings` |
 | 供应链 | `cargo deny` · `cargo vet --locked`（70 全审 + 2 delta + 豁免基线）· `npm audit`/`pnpm audit` 阻断 high |
-| 安全扫描 | CodeQL（rust/js-ts/actions）· Dependency Review |
+| 安全扫描 | CodeQL（rust/js-ts/actions）· Dependency Review（Graph 不可用时自动切换锁文件门禁） |
 | 安装包 | 7 种公开格式统一 `verify-bundle` + Windows/macOS `verify-signing`（fail-closed）+ 每包 SHA-256 |
 | 发布 | 5 分钟负载 soak · updater 产物与 `latest.json` |
 
@@ -151,6 +151,6 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 - CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发五个原生构建目标（Windows x64、macOS x64/arm64、Linux x64/arm64）及 Store MSIX x64/arm64，再经完整资产清单门禁发布 draft release + `latest.json`。
 - Microsoft Store：`v*` tag 同时构建 x64/arm64 MSIX（`build-msix` job，Store 模式关闭应用内更新并限制插件为 cordis.run 审核列表）。MSIX 产物作为 workflow artifact 下载后上传 Partner Center，不发布到 GitHub Release。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
-- 当前状态：v0.2.10 发布候选；包含多格式安装包、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复。
+- 当前状态：v0.2.11 发布候选；包含多格式安装包、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复。
 - 已知边界：Windows GitHub 安装包尚未配置 Authenticode，可能触发 SmartScreen；macOS 更新清单尚未接入；Linux 包当前以 SHA-256 保护，尚无独立软件仓库签名。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。

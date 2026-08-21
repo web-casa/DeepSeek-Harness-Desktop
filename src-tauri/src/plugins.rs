@@ -9,7 +9,7 @@ use dsh_sidecar::platform::PlatformChild;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -69,14 +69,11 @@ fn validate_sideload_path(path: &Path) -> Result<(), String> {
     if !name.to_ascii_lowercase().ends_with(".tgz") {
         return Err("sideload file must end with .tgz".to_string());
     }
-    let meta = std::fs::symlink_metadata(path)
+    let file = crate::secure_fs::open_regular_read(path)
+        .map_err(|e| format!("cannot securely open sideload file: {e}"))?;
+    let meta = file
+        .metadata()
         .map_err(|e| format!("cannot inspect sideload file: {e}"))?;
-    if meta.file_type().is_symlink() {
-        return Err("sideload file must not be a symlink".to_string());
-    }
-    if !meta.is_file() {
-        return Err("sideload path is not a regular file".to_string());
-    }
     if meta.len() > MAX_SIDELOAD_BYTES {
         return Err("sideload file exceeds 64 MiB".to_string());
     }
@@ -102,53 +99,62 @@ pub fn is_shell_safe_spec(spec: &str) -> bool {
 
 pub fn stage_sideload(dsh_home: &Path, src: &Path) -> Result<PathBuf, String> {
     validate_sideload_path(src)?;
-    let tools = dsh_home.join(".desktop-tools");
-    match std::fs::symlink_metadata(&tools) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err("refusing to use symlinked .desktop-tools".to_string())
-        }
-        Ok(meta) if !meta.is_dir() => return Err(".desktop-tools is not a directory".to_string()),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(&tools).map_err(|e| format!("cannot create tools dir: {e}"))?;
-        }
-        Err(e) => return Err(format!("cannot inspect tools dir: {e}")),
+    let input = crate::secure_fs::open_regular_read(src)
+        .map_err(|e| format!("cannot securely open sideload file: {e}"))?;
+    let source_size = input
+        .metadata()
+        .map_err(|e| format!("cannot inspect open sideload file: {e}"))?
+        .len();
+    if source_size > MAX_SIDELOAD_BYTES {
+        return Err("sideload file exceeds 64 MiB".to_string());
     }
+
+    let tools = market_tools_dir(dsh_home)?;
     let dir = tools.join("sideload");
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err("refusing to use symlinked sideload dir".to_string())
+    crate::secure_fs::ensure_private_dir(&dir)?;
+    let dest = dir.join(format!(
+        "sideload-{}.tgz",
+        crate::secure_fs::random_suffix()?
+    ));
+    let result = (|| {
+        let mut output = crate::secure_fs::create_private_new(&dest)?;
+        let mut bounded = input.take(MAX_SIDELOAD_BYTES.saturating_add(1));
+        let copied = std::io::copy(&mut bounded, &mut output)
+            .map_err(|e| format!("cannot stage sideload file: {e}"))?;
+        if copied > MAX_SIDELOAD_BYTES {
+            return Err("sideload file changed beyond 64 MiB while staging".to_string());
         }
-        Ok(meta) if !meta.is_dir() => return Err("sideload is not a directory".to_string()),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("cannot create sideload dir: {e}"))?;
-        }
-        Err(e) => return Err(format!("cannot inspect sideload dir: {e}")),
+        output
+            .sync_all()
+            .map_err(|e| format!("cannot sync staged sideload file: {e}"))?;
+        Ok(dest.clone())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&dest);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("cannot chmod sideload dir: {e}"))?;
-    }
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let dest = dir.join(format!("sideload-{millis}-{}.tgz", std::process::id()));
-    std::fs::copy(src, &dest).map_err(|e| format!("cannot stage sideload file: {e}"))?;
-    Ok(dest)
+    result
+}
+
+fn posix_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 /// Pure shim-text generation (unit-tested).
 pub fn pnpm_shim_script(node: &str, pnpm_cjs: &str) -> String {
-    format!("#!/bin/sh\nexec \"{node}\" \"{pnpm_cjs}\" \"$@\"\n")
+    format!(
+        "#!/bin/sh\nexec {} {} \"$@\"\n",
+        posix_shell_quote(node),
+        posix_shell_quote(pnpm_cjs)
+    )
 }
 
 pub fn pnpm_shim_cmd(node: &str, pnpm_cjs: &str) -> String {
-    format!("@echo off\n\"{node}\" \"{pnpm_cjs}\" %*\n")
+    // Percent expansion happens even inside quotes in a batch file. Doubling
+    // it preserves literal percent signs in valid Windows paths; delayed
+    // expansion is disabled so a literal `!` is preserved too.
+    let node = node.replace('%', "%%");
+    let pnpm_cjs = pnpm_cjs.replace('%', "%%");
+    format!("@echo off\nsetlocal DisableDelayedExpansion\n\"{node}\" \"{pnpm_cjs}\" %*\n")
 }
 
 /// Ensure `<dsh_home>/.desktop-tools/` holds the pnpm shims; returns the
@@ -157,35 +163,24 @@ pub fn pnpm_shim_cmd(node: &str, pnpm_cjs: &str) -> String {
 /// (extensionless files are never executed there, so the unix script is
 /// inert), while the `.cmd` variant also covers git-bash on Windows.
 pub fn ensure_pnpm_shim(dsh_home: &Path, node: &Path, pnpm_cjs: &Path) -> Result<PathBuf, String> {
-    let dir = dsh_home.join(".desktop-tools");
-    // Same write-path stance as DSH_HOME / the preset root: never write
-    // shims (or chmod) through a symlink someone planted at the tools dir.
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(
-                "tools dir is a symbolic link — refusing to write pnpm shims; remove the link"
-                    .to_string(),
-            );
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("cannot inspect tools dir: {e}")),
-    }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create tools dir: {e}"))?;
+    let dir = market_tools_dir(dsh_home)?;
     let node_s = node.display().to_string();
     let cjs_s = pnpm_cjs.display().to_string();
     let unix = dir.join("pnpm");
-    std::fs::write(&unix, pnpm_shim_script(&node_s, &cjs_s)).map_err(|e| e.to_string())?;
+    crate::secure_fs::atomic_write(
+        &unix,
+        pnpm_shim_script(&node_s, &cjs_s).as_bytes(),
+        64 * 1024,
+    )?;
     let win = dir.join("pnpm.cmd");
-    std::fs::write(&win, pnpm_shim_cmd(&node_s, &cjs_s)).map_err(|e| e.to_string())?;
+    crate::secure_fs::atomic_write(&win, pnpm_shim_cmd(&node_s, &cjs_s).as_bytes(), 64 * 1024)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // The tools dir holds executables we generate: keep it 0700 like
-        // DSH_HOME itself, and mark the unix shim executable.
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-        std::fs::set_permissions(&unix, std::fs::Permissions::from_mode(0o755))
+        // Set executable permission through a no-follow file handle, not the
+        // pathname, so a concurrent leaf swap cannot redirect chmod.
+        crate::secure_fs::open_regular_read(&unix)?
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
     }
     Ok(dir)
@@ -284,27 +279,8 @@ fn checked_real_dir(path: &Path, label: &str) -> Result<(), String> {
 pub(crate) fn market_tools_dir(dsh_home: &Path) -> Result<PathBuf, String> {
     checked_real_dir(dsh_home, "DSH_HOME")?;
     let tools = dsh_home.join(".desktop-tools");
-    match std::fs::symlink_metadata(&tools) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err("refusing to use symlinked .desktop-tools".to_string())
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            return Err(".desktop-tools is not a directory".to_string())
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(&tools)
-                .map_err(|e| format!("cannot create .desktop-tools: {e}"))?;
-        }
-        Err(error) => return Err(format!("cannot inspect .desktop-tools: {error}")),
-    }
-    checked_real_dir(&tools, ".desktop-tools")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("cannot chmod .desktop-tools: {e}"))?;
-    }
+    crate::secure_fs::ensure_private_dir(&tools)
+        .map_err(|e| format!("cannot prepare .desktop-tools: {e}"))?;
     Ok(tools)
 }
 
@@ -314,25 +290,10 @@ fn pending_path(dsh_home: &Path) -> Result<PathBuf, String> {
 
 fn load_pending(dsh_home: &Path) -> Result<MarketPendingFile, String> {
     let path = pending_path(dsh_home)?;
-    match std::fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(MarketPendingFile::default())
-        }
-        Err(error) => return Err(format!("cannot inspect market pending state: {error}")),
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err("market pending state must not be a symbolic link".to_string())
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err("market pending state is not a regular file".to_string())
-        }
-        Ok(metadata) if metadata.len() > MARKET_PENDING_MAX_BYTES => {
-            return Err("market pending state exceeds 256 KiB".to_string())
-        }
-        Ok(_) => {}
-    }
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read market pending state: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("invalid market pending state: {e}"))
+    let Some(bytes) = crate::secure_fs::read_bounded(&path, MARKET_PENDING_MAX_BYTES)? else {
+        return Ok(MarketPendingFile::default());
+    };
+    serde_json::from_slice(&bytes).map_err(|e| format!("invalid market pending state: {e}"))
 }
 
 fn active_path(dsh_home: &Path) -> Result<PathBuf, String> {
@@ -461,50 +422,11 @@ fn replace_existing_file(temp: &Path, destination: &Path, label: &str) -> Result
 
 fn write_pending(dsh_home: &Path, pending: &MarketPendingFile) -> Result<(), String> {
     let path = pending_path(dsh_home)?;
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err("market pending state must not be a symbolic link".to_string())
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err("market pending state is not a regular file".to_string())
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("cannot inspect market pending state: {error}")),
-    }
-    let encoded = serde_json::to_vec_pretty(pending)
+    let mut encoded = serde_json::to_vec_pretty(pending)
         .map_err(|e| format!("cannot serialize market pending state: {e}"))?;
-    if encoded.len() as u64 > MARKET_PENDING_MAX_BYTES {
-        return Err("market pending state exceeds 256 KiB".to_string());
-    }
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let temp = path.with_file_name(format!(
-        ".market-pending-{}-{}.tmp",
-        std::process::id(),
-        millis
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|e| format!("cannot create pending-state temp file: {e}"))?;
-    file.write_all(&encoded)
-        .map_err(|e| format!("cannot write pending-state temp file: {e}"))?;
-    file.write_all(b"\n")
-        .map_err(|e| format!("cannot finalize pending-state temp file: {e}"))?;
-    file.sync_all()
-        .map_err(|e| format!("cannot sync pending-state temp file: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("cannot chmod pending-state temp file: {e}"))?;
-    }
-    replace_existing_file(&temp, &path, "market pending state")?;
-    Ok(())
+    encoded.push(b'\n');
+    crate::secure_fs::atomic_write(&path, &encoded, MARKET_PENDING_MAX_BYTES as usize)
+        .map_err(|e| format!("cannot write market pending state: {e}"))
 }
 
 pub(crate) fn profile_dir(dsh_home: &Path) -> Result<PathBuf, String> {
@@ -1166,11 +1088,23 @@ mod tests {
     fn shim_texts_quote_paths_and_forward_args() {
         assert_eq!(
             pnpm_shim_script("/opt/node", "/opt/harness/node_modules/pnpm/bin/pnpm.cjs"),
-            "#!/bin/sh\nexec \"/opt/node\" \"/opt/harness/node_modules/pnpm/bin/pnpm.cjs\" \"$@\"\n"
+            "#!/bin/sh\nexec '/opt/node' '/opt/harness/node_modules/pnpm/bin/pnpm.cjs' \"$@\"\n"
         );
         assert_eq!(
             pnpm_shim_cmd("C:\\node.exe", "C:\\harness\\pnpm.cjs"),
-            "@echo off\n\"C:\\node.exe\" \"C:\\harness\\pnpm.cjs\" %*\n"
+            "@echo off\nsetlocal DisableDelayedExpansion\n\"C:\\node.exe\" \"C:\\harness\\pnpm.cjs\" %*\n"
+        );
+    }
+
+    #[test]
+    fn shim_texts_escape_shell_sensitive_path_characters() {
+        assert_eq!(
+            pnpm_shim_script("/tmp/a'b/$node", "/tmp/$(touch nope)/pnpm.cjs"),
+            "#!/bin/sh\nexec '/tmp/a'\"'\"'b/$node' '/tmp/$(touch nope)/pnpm.cjs' \"$@\"\n"
+        );
+        assert_eq!(
+            pnpm_shim_cmd("C:\\100%\\node.exe", "C:\\bang!\\pnpm.cjs"),
+            "@echo off\nsetlocal DisableDelayedExpansion\n\"C:\\100%%\\node.exe\" \"C:\\bang!\\pnpm.cjs\" %*\n"
         );
     }
 
@@ -1213,6 +1147,29 @@ mod tests {
         );
         assert!(!String::from_utf8_lossy(&output.stdout).trim().is_empty());
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_writer_refuses_a_symlinked_leaf() {
+        use std::os::unix::fs::symlink;
+        let home = std::env::temp_dir().join(format!(
+            "dsd-shim-link-test-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        std::fs::create_dir_all(home.join(".desktop-tools")).unwrap();
+        let outside = home.join("outside");
+        std::fs::write(&outside, b"keep").unwrap();
+        symlink(&outside, home.join(".desktop-tools/pnpm")).unwrap();
+        let error = ensure_pnpm_shim(
+            &home,
+            std::path::Path::new("/opt/node"),
+            std::path::Path::new("/opt/pnpm.cjs"),
+        )
+        .unwrap_err();
+        assert!(error.contains("regular file"), "{error}");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     fn market_candidate() -> crate::market::MarketInstallCandidate {

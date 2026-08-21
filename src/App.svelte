@@ -66,6 +66,12 @@
     type PluginRecoveryCandidate,
     type PluginRecoveryOverview,
   } from "./lib/api";
+  import {
+    arbitratePluginRequest,
+    arbitrateRemotePresetRequest,
+    type InstallSurfaceSnapshot,
+  } from "./lib/install-arbitration";
+  import { trapDialog } from "./lib/dialog-trap";
 
   let status = $state<Status>("idle");
   let url = $state<string | null>(null);
@@ -103,7 +109,7 @@
   let pluginLogs = $state<string[]>([]);
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
-  let pluginOperation = $state<"generic" | "market-install" | "sideload" | null>(null);
+  let pluginRestartNotice = $state<string | null>(null);
   let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
   let remotePresetRequest = $state<RemotePresetRequest | null>(null);
   let remotePresetPreview = $state<RemotePresetPreview | null>(null);
@@ -162,6 +168,9 @@
     if (p.status === "starting" || p.status === "running") {
       restartInFlight = false;
     }
+    if (p.status === "starting" && pluginRestartNotice) {
+      pluginRestartNotice = null;
+    }
   }
 
   function showToast(message: string) {
@@ -171,43 +180,52 @@
     }, 2600);
   }
 
+  function installSurfaceSnapshot(): InstallSurfaceSnapshot {
+    return {
+      plugin: pluginInstallRequest,
+      remotePresetRequestId: remotePresetRequest?.requestId ?? null,
+      localPresetPreview: presetPreview !== null,
+      marketConfirmation: marketConfirm !== null,
+      marketPreparing,
+    };
+  }
+
   function presentPluginInstallRequest(request: PluginInstallRequest) {
     // The confirmation dialog is the security control: never let a second
-    // deep link replace the package the user is currently reading. Same
-    // request is idempotent; a different one is ignored with a visible note.
-    if (pluginInstallRequest) {
-      if (
-        pluginInstallRequest.name !== request.name ||
-        pluginInstallRequest.source !== request.source ||
-        pluginInstallRequest.slug !== request.slug
-      ) {
-        showToast("已有待确认的安装请求，新请求已忽略");
-      }
+    // deep link replace the package the user is currently reading. Keep this
+    // decision in a pure, directly tested arbiter; this function only maps
+    // the result to Rust-slot cleanup and UI state.
+    const decision = arbitratePluginRequest(installSurfaceSnapshot(), request);
+    if (decision.action === "keep-current") {
+      if (decision.notify) showToast("已有待确认的安装请求，新请求已忽略");
       return;
     }
-    if (marketConfirm || marketPreparing) {
-      showToast("已有市场安装确认正在进行，插件安装请求已忽略");
+    if (decision.action === "dismiss-incoming") {
+      showToast(
+        decision.conflict === "market"
+          ? "已有市场安装确认正在进行，插件安装请求已忽略"
+          : "已有待处理的预设请求，插件安装请求已忽略",
+      );
+      // A local file-preview does not own the Rust install arbiter. A plugin
+      // deep link can therefore arrive while it is open; rejecting only in
+      // the UI would leave the pending slot + arbiter held until a reload.
       void dismissPendingPluginInstall().catch(() => {});
-      return;
-    }
-    if (remotePresetRequest || presetPreview) {
-      showToast("已有待处理的预设请求，插件安装请求已忽略");
       return;
     }
     pluginInstallRequest = request;
   }
 
   function presentRemotePresetRequest(request: RemotePresetRequest) {
-    if (pluginInstallRequest || presetPreview || marketConfirm || marketPreparing) {
-      showToast("已有待处理的安装请求，预设请求已忽略");
-      void dismissRemotePreset(request.requestId).catch(() => {});
-      return;
-    }
-    if (
-      remotePresetRequest &&
-      remotePresetRequest.requestId !== request.requestId
-    ) {
-      showToast("已有待处理的预设请求，新请求已忽略");
+    const decision = arbitrateRemotePresetRequest(
+      installSurfaceSnapshot(),
+      request.requestId,
+    );
+    if (decision.action === "dismiss-incoming") {
+      showToast(
+        decision.conflict === "preset"
+          ? "已有待处理的预设请求，新请求已忽略"
+          : "已有待处理的安装请求，预设请求已忽略",
+      );
       void dismissRemotePreset(request.requestId).catch(() => {});
       return;
     }
@@ -330,13 +348,11 @@
     if (!preview || pluginBusy) return;
     marketConfirm = null;
     pluginBusy = true;
-    pluginOperation = "market-install";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
     void marketInstallPlugin(preview.slug, preview.entryRevision).catch((e) => {
       pluginBusy = false;
-      pluginOperation = null;
       pluginError = "市场安装失败：" + e;
       pluginLogsOpen = true;
       void refreshPlugins();
@@ -358,6 +374,7 @@
     pluginError = null;
     try {
       await activateMarketPlugin(plugin.slug, plugin.entryRevision);
+      pluginRestartNotice = `插件 ${plugin.name} 已激活，需要重启 Harness 后才能生效。`;
       showToast("已激活 " + plugin.name + "；请重启 Harness 后加载");
       await refreshPlugins();
     } catch (e) {
@@ -380,7 +397,6 @@
     const path = sideloadPath;
     sideloadPath = null;
     pluginBusy = true;
-    pluginOperation = "sideload";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
@@ -389,7 +405,6 @@
       await sideloadPlugin(path);
     } catch (e) {
       pluginBusy = false;
-      pluginOperation = null;
       pluginError = `离线安装失败：${e}`;
       pluginLogsOpen = true;
       void refreshPlugins();
@@ -711,7 +726,6 @@
   function startPluginOp(name: string, op: "install" | "uninstall") {
     if (pluginBusy || recoveryOverview?.transaction || !name.trim()) return;
     pluginBusy = true;
-    pluginOperation = "generic";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
@@ -719,7 +733,6 @@
     const call = op === "install" ? installPlugin(name.trim()) : uninstallPlugin(name.trim());
     void call.catch((e) => {
       pluginBusy = false;
-      pluginOperation = null;
       pluginError = `${op === "install" ? "安装" : "卸载"}失败：${e}`;
       pluginLogsOpen = true;
       // Resync busy: "an operation is already running" means another
@@ -794,13 +807,17 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onEvent((p) => {
+    void onEvent((p) => {
       apply(p);
       if (p.status === "crashed" || p.status === "running") void refreshRecovery();
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFn = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFn = fn;
+      })
+      .catch(() => {
+        /* listener registration can race webview startup/teardown */
+      });
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -811,14 +828,18 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onUpdateProgress((p) => {
+    void onUpdateProgress((p) => {
       if (p.total && p.total > 0) {
         updatePercent = Math.min(100, Math.round((p.downloaded / p.total) * 100));
       }
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFn = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFn = fn;
+      })
+      .catch(() => {
+        /* listener registration can race webview teardown */
+      });
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -831,17 +852,21 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onPluginLog((lines) => {
+    void onPluginLog((lines) => {
       for (const l of lines) {
         pluginLogs.push(`[${l.stream}] ${l.line}`);
       }
       if (pluginLogs.length > 300) {
         pluginLogs.splice(0, pluginLogs.length - 300);
       }
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFn = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFn = fn;
+      })
+      .catch(() => {
+        /* listener registration can race webview teardown */
+      });
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -852,26 +877,45 @@
     if (!inTauri) return;
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
-    onPluginDone((p) => {
+    void onPluginDone((p) => {
       pluginBusy = false;
-      const completedOperation = pluginOperation;
-      pluginOperation = null;
+      const tailLines = p.tail
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      // Early setup/spawn errors have no streamed plugin-log event. Preserve
+      // plugin-done.tail so a failure can never render as "暂无日志".
+      if (pluginLogs.length === 0 && tailLines.length > 0) {
+        pluginLogs = tailLines.slice(-300);
+      }
       if (p.exit === 0) {
         pluginName = "";
-        showToast(
-          completedOperation === "market-install"
-            ? "插件已校验完成，正在等待你的显式激活"
-            : "插件操作完成",
-        );
+        if (p.op === "market-install") {
+          showToast("插件已校验完成，正在等待你的显式激活");
+        } else if (p.op === "remove") {
+          pluginRestartNotice = "插件已卸载，需要重启 Harness 才能从当前进程中完全移除。";
+          showToast("插件已卸载；请重启 Harness 完成移除");
+        } else if (p.op === "add") {
+          pluginRestartNotice = "插件已安装，需要重启 Harness 后才能生效。";
+          showToast("插件已安装；请重启 Harness 后使用");
+        } else {
+          pluginError = "插件操作已完成，但返回了无法识别的操作类型；请刷新状态后重试。";
+          pluginLogsOpen = true;
+        }
       } else {
-        pluginError = `插件操作失败（exit ${p.exit ?? "被终止"}），详情见安装日志`;
+        const detail = tailLines.at(-1);
+        pluginError = `插件操作失败（exit ${p.exit ?? "被终止"}）${detail ? `：${detail}` : "，详情见安装日志"}`;
         pluginLogsOpen = true;
       }
       void refreshPlugins();
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenFn = fn;
-    });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlistenFn = fn;
+      })
+      .catch(() => {
+        /* listener registration can race webview teardown */
+      });
     return () => {
       cancelled = true;
       unlistenFn?.();
@@ -886,15 +930,19 @@
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
     void (async () => {
-      const fn = await onPluginInstallRequest(presentPluginInstallRequest);
-      if (cancelled) {
-        fn();
-        return;
+      try {
+        const fn = await onPluginInstallRequest(presentPluginInstallRequest);
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlistenFn = fn;
+      } catch {
+        /* still drain the durable Rust slot below */
       }
-      unlistenFn = fn;
-      // Drain any cold-start request only AFTER the live listener is armed:
-      // a URL delivered in the gap stays in the Rust slot and is picked up
-      // here instead of being lost.
+      // Drain any cold-start request after the live listener is armed when
+      // possible. If listener registration failed, draining still prevents a
+      // durable request + arbiter from becoming invisible until reload.
       try {
         const pending = await getPendingPluginInstall();
         if (!cancelled && pending) presentPluginInstallRequest(pending);
@@ -913,12 +961,16 @@
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
     void (async () => {
-      const fn = await onPresetInstallRequest(presentRemotePresetRequest);
-      if (cancelled) {
-        fn();
-        return;
+      try {
+        const fn = await onPresetInstallRequest(presentRemotePresetRequest);
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlistenFn = fn;
+      } catch {
+        /* still drain the durable Rust slot below */
       }
-      unlistenFn = fn;
       try {
         const pending = await getPendingRemotePreset();
         if (!cancelled && pending) presentRemotePresetRequest(pending);
@@ -935,10 +987,26 @@
   // Poll logs only while the console is open; clean up via effect return.
   $effect(() => {
     if (!inTauri || !logsOpen) return;
-    const timer = setInterval(async () => {
-      logs = await getLogs();
-    }, 1000);
-    return () => clearInterval(timer);
+    let cancelled = false;
+    let fetching = false;
+    const refresh = async () => {
+      if (fetching) return;
+      fetching = true;
+      try {
+        const next = await getLogs();
+        if (!cancelled) logs = next;
+      } catch {
+        /* a transient IPC failure must not produce an unhandled rejection */
+      } finally {
+        fetching = false;
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   });
 
   function stepClass(target: "check" | "start" | "ready"): string {
@@ -1343,6 +1411,14 @@
     {#if pluginError}
       <div class="notice-box">{pluginError}</div>
     {/if}
+    {#if pluginRestartNotice}
+      <div class="notice-box">
+        {pluginRestartNotice}
+        <button class="primary" onclick={doRestart} disabled={busy || status !== "running"}>
+          立即重启 Harness
+        </button>
+      </div>
+    {/if}
     {#if plugins.length > 0}
       {#each plugins as p (p.name)}
         <div class="preset-row">
@@ -1393,7 +1469,17 @@
 
 {#if recoveryConfirm}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="安全插件恢复确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="安全插件恢复确认"
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => (recoveryConfirm = null),
+        escapeDisabled: recoveryBusy,
+      }}
+    >
       <div class="modal-title">
         {recoveryConfirm.action === "disable"
           ? "确认隔离插件？"
@@ -1427,7 +1513,18 @@
 
 {#if remotePresetRequest}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="预设一键安装确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="预设一键安装确认"
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => void doRemotePresetDismiss(),
+        escapeDisabled:
+          remotePresetDownloading || remotePresetRequest.stage === "installing",
+      }}
+    >
       <div class="modal-title">安装 Cordis 预设？</div>
       <div class="modal-meta">
         关联页面（未验证与预设内容的对应关系）：<button
@@ -1475,7 +1572,14 @@
 
 {#if marketDetail}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="插件详情">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="插件详情"
+      tabindex="-1"
+      use:trapDialog={{ onEscape: () => (marketDetail = null) }}
+    >
       <div class="modal-title">{marketDetail.name}</div>
       <div class="modal-name">{marketPackageName(marketDetail)}</div>
       <div class="modal-meta">{marketDescriptionText(marketDetail.description)}</div>
@@ -1500,7 +1604,17 @@
 
 {#if marketConfirm}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="安装 Cordis 插件确认"
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => (marketConfirm = null),
+        escapeDisabled: pluginBusy,
+      }}
+    >
       <div class="modal-title">安装 Cordis 插件？</div>
       <div class="modal-name">{marketConfirm.packageName} v{marketConfirm.version}</div>
       <div class="modal-meta">
@@ -1524,7 +1638,17 @@
 
 {#if sideloadPath && !storeBuild}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="离线插件安装确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="离线插件安装确认"
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => (sideloadPath = null),
+        escapeDisabled: pluginBusy,
+      }}
+    >
       <div class="modal-title">离线安装插件？</div>
       <div class="modal-name">{sideloadPath}</div>
       <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将通过 `dsh plugin add` 安装该 .tgz。</div>
@@ -1538,7 +1662,14 @@
 
 {#if pluginInstallRequest}
   <div class="modal-backdrop">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="安装 Cordis 插件确认">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="安装 Cordis 插件确认"
+      tabindex="-1"
+      use:trapDialog={{ onEscape: () => void dismissPluginInstallRequest() }}
+    >
       <div class="modal-title">安装 Cordis 插件？</div>
       <div class="modal-name">链接声明的包：{pluginInstallRequest.name}</div>
       <div class="modal-meta">

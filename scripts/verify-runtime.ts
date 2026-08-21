@@ -170,7 +170,7 @@ async function main(): Promise<void> {
     command: "start",
     node: nodePath,
     script: dshBin,
-    args: ["web", "--host", "127.0.0.1", "--port", "0"],
+    args: ["web", "--no-open", "--host", "127.0.0.1", "--port", "0"],
     cwd: harnessDir,
     // Keep this env in lockstep with src-tauri/src/harness/mod.rs
     // (start_harness): the smoke must exercise the production contract.
