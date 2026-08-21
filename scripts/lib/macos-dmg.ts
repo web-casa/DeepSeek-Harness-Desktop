@@ -1,8 +1,17 @@
 import { join } from "node:path";
 import type { ReleaseArch } from "./release-artifacts.ts";
 
-export const DMG_CREATE_TIMEOUT_MS = 10 * 60 * 1000;
+export const DMG_CREATE_TIMEOUT_MS = 5 * 60 * 1000;
 export const DMG_TOOL_TIMEOUT_MS = 5 * 60 * 1000;
+export const DMG_CREATE_MAX_ATTEMPTS = 3;
+export const DMG_CREATE_RETRY_DELAY_MS = 15 * 1000;
+
+export function isRetryableDmgCreateFailure(output: string, timedOut = false): boolean {
+  if (timedOut) return true;
+  return /resource busy|temporarily unavailable|device not configured|diskimages?[- ](?:helper|help|controller)/i.test(
+    output,
+  );
+}
 
 function safeFileComponent(value: string, label: string): string {
   const trimmed = value.trim();
