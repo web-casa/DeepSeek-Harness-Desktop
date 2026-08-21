@@ -19,6 +19,9 @@ mod recovery;
 mod secure_fs;
 mod tray;
 
+#[cfg(any(target_os = "macos", test))]
+mod app_menu;
+
 fn main() {
     // Windows: give the shell a private hidden console before any plugin
     // child exists. Plugin children are spawned WITHOUT CREATE_NO_WINDOW so
@@ -97,6 +100,8 @@ fn main() {
                 .build(),
         )
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app_menu::init(app.handle());
             // Observability is independent from DSH_HOME and must exist before
             // Harness resolution so initialization failures are still visible.
             // Failure to persist evidence does not block the application.

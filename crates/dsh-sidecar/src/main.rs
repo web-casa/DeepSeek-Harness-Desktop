@@ -19,7 +19,7 @@
 //! → {"id":2,"command":"status"}   →  {"type":"status","id":2,"state":"running","pid":…,"url":"…"}
 //! → {"id":3,"command":"restart"}  →  {"type":"stopping"} … {"type":"stopped","code":0} … {"type":"starting"} …
 //! → {"id":4,"command":"shutdown"} →  {"type":"stopped","code":0}   (sidecar keeps running)
-//! [stdin EOF]                     →  graceful shutdown of the tree, sidecar exits 0
+//! [stdin EOF]                     →  immediate forced teardown of the tree, sidecar exits 0
 //! ```
 //!
 //! While running, the sidecar also probes the ready URL (liveness heartbeat);
@@ -422,8 +422,9 @@ fn main() {
     let hb_gen: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let hb_enabled: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-    // stdin reader: commands in. Parent death is detected via channel
-    // disconnect below (the thread ends on stdin EOF, closing the sender).
+    // stdin reader: commands in. Parent-control loss is detected via channel
+    // disconnect below (the thread ends on stdin EOF or a read error, closing
+    // the sender).
     thread::spawn(move || {
         let stdin = std::io::stdin();
         let _ = dsh_sidecar::for_each_bounded_line(
@@ -759,7 +760,11 @@ fn main() {
             },
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                // stdin thread gone without EOF: treat as parent gone.
+                // The parent control channel is gone (normally stdin EOF).
+                // Do not wait for a session flush: a disappeared parent means
+                // the supervised tree must be torn down immediately. The
+                // platform parent-death guard/watchdog covers an abrupt
+                // sidecar death while this process exits.
                 if let Some(r) = running.as_ref() {
                     r.child.force();
                 }

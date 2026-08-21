@@ -50,6 +50,12 @@ proptest = "1"
 # directly because Rust crates may not rely on transitive dependencies.
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Finder-launched GUI apps cannot rely on shell locale variables. Read the
+# ordered macOS language preference directly; keep the binding surface to the
+# three Foundation types used by app_menu.rs.
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSLocale", "NSString"] }
+
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW closes the final-component check/open race for Desktop-owned
 # private state and user-selected sideload archives.
