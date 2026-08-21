@@ -159,6 +159,34 @@ test("Windows installer smoke can safely reuse one completed Release run", () =>
   );
 });
 
+test("tag publication tolerates only the intentional transitive smoke-source skip", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const releaseJob = workflow.slice(workflow.indexOf("\n  release:\n"));
+  assert.match(releaseJob, /always\(\)/);
+  assert.match(releaseJob, /github\.event_name == 'push'/);
+  assert.match(releaseJob, /startsWith\(github\.ref, 'refs\/tags\/'\)/);
+  for (const dependency of [
+    "build",
+    "notarize-macos",
+    "build-msix",
+    "soak",
+    "tag-gate",
+    "windows-deep-link-smoke",
+    "windows-msi-smoke",
+    "macos-deep-link-smoke",
+    "preset-download-contract",
+  ]) {
+    assert.equal(
+      releaseJob.includes(`needs.${dependency}.result == 'success'`),
+      true,
+      dependency,
+    );
+  }
+});
+
 test("MSI smoke accepts a valid 8.3 registry path but verifies the real file", () => {
   const workflow = readFileSync(
     new URL("../../.github/workflows/release.yml", import.meta.url),
