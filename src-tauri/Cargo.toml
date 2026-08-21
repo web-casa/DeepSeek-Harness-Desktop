@@ -16,7 +16,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-deep-link = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # Remote .dshpreset download and cordis.run market requests. rustls keeps the
 # supply chain to a single TLS backend (already transitive via
 # tauri-plugin-updater); no native-tls/OpenSSL.
