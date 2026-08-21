@@ -42,7 +42,7 @@ Harness 的技能、工具、模型路由、MCP、预设——**全部是 Cordis
 
 **发现**：设置页「资源」一键打开插件市场 [cordis.run](https://cordis.run)。
 
-**安装**：设置页「插件（用户安装）」输入 npm 包名即装即卸——桌面层调用官方 `dsh plugin --profile web add/remove`，pinned CLI 与 pnpm 均随包携带（**无需系统 pnpm**），带实时安装日志与取消（整棵 node → dsh → pnpm 进程树一并清理）。
+**安装**：设置页「插件（用户安装）」输入 npm 包名即可安装、卸载。安装复用官方 `dsh plugin --profile web add`；卸载先精确 pre-disable 目标，再用随包 pnpm 关闭 lifecycle script 后直接移除，避免上游全局 reconcile 意外启用另一个仍处于 pending 的市场插件。CLI 与 pnpm 均随包携带（**无需系统 pnpm**），带实时日志与取消（整棵 node → dsh/pnpm 进程树一并清理）。
 
 从 cordis.run 插件详情页点「安装到桌面版」会用 `dsharness://plugin/install?v=1&name=<包名>&source=<插件页>` 唤起桌面版；桌面版在 Rust 侧严格校验协议后，仅将链接定位到对应市场 slug，并重新拉取详情、核对当前 `entryRevision` 与嵌套 source，再由用户确认安装（旧版本桌面版或不支持的市场页仍可复制包名粘贴安装）。命令行等价路径（高级用法）：
 
@@ -121,8 +121,9 @@ shape（仍不安装）：
 CORDIS_MARKET_PROBE_SLUG=<reviewed-public-slug> pnpm verify:cordis-market
 ```
 
-Microsoft Store 构建仍只允许 `src-tauri/store-curated-plugins.json` 的审核快照；
-通过生产 probe 不等于获得 Store allowlist 权限。
+Microsoft Store 构建要求插件同时通过生产 API 的实时安装门禁与
+`src-tauri/store-curated-plugins.json` 本地审核快照；快照不是离线安装授权，
+通过生产 probe 也不等于获得 Store allowlist 权限。
 
 > `~/.cargo` 不可写时：`export CARGO_HOME=<repo>/.tmp/cargo-home`。
 

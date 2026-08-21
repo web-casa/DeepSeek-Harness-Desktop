@@ -4,15 +4,15 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { delimiter, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { runtimeDir as defaultRuntimeDir, tmpDir, fail, ok, info } from "./lib/common.ts";
+import { pluginPath, pluginRemoveArgs, writePluginShims } from "./lib/plugin-shim.ts";
 
 const runtimeDirArg = process.argv.indexOf("--runtime-dir");
 if (runtimeDirArg >= 0 && !process.argv[runtimeDirArg + 1]) {
@@ -39,16 +39,18 @@ const tarball = join(fixture, "fixture.tgz");
 const toolsDir = join(home, ".desktop-tools");
 const profileDir = join(home, "profiles", "web");
 const storeDir = join(home, "pnpm-store");
+const configDir = join(toolsDir, "pnpm-config");
+const uninstallScriptMarker = join(home, "uninstall-script-ran");
 
-function run(args: string[], label: string): Promise<string> {
+function runChild(script: string, args: string[], cwd: string, label: string): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(node, [dshBin, "plugin", "--profile", "web", ...args], {
-      cwd: harness,
+    const child = spawn(node, [script, ...args], {
+      cwd,
       env: {
         ...process.env,
         DSH_HOME: home,
         DSH_TELEMETRY_DISABLED: "1",
-        PATH: `${toolsDir}${delimiter}${process.env.PATH ?? ""}`,
+        PATH: pluginPath(toolsDir, process.env.PATH),
         pnpm_config_store_dir: storeDir,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -84,12 +86,39 @@ function run(args: string[], label: string): Promise<string> {
   });
 }
 
+function run(args: string[], label: string): Promise<string> {
+  return runChild(dshBin, ["plugin", "--profile", "web", ...args], harness, label);
+}
+
+function runPnpmRemove(name: string, label: string): Promise<string> {
+  const modulesState = JSON.parse(
+    readFileSync(join(profileDir, "node_modules", ".modules.yaml"), "utf8"),
+  ) as { storeDir?: unknown };
+  if (typeof modulesState.storeDir !== "string") {
+    fail("pnpm .modules.yaml did not record a string storeDir");
+  }
+  return runChild(
+    pnpmCjs,
+    pluginRemoveArgs(name, configDir, dirname(modulesState.storeDir)),
+    profileDir,
+    label,
+  );
+}
+
 function makeFixture(): void {
   rmSync(fixture, { recursive: true, force: true });
   mkdirSync(packageDir, { recursive: true });
   writeFileSync(
     join(packageDir, "package.json"),
-    JSON.stringify({ name: "dsh-sideload-fixture", version: "1.0.0" }),
+    JSON.stringify({
+      name: "dsh-sideload-fixture",
+      version: "1.0.0",
+      scripts: { preuninstall: "node uninstall-marker.cjs" },
+    }),
+  );
+  writeFileSync(
+    join(packageDir, "uninstall-marker.cjs"),
+    `require("node:fs").writeFileSync(${JSON.stringify(uninstallScriptMarker)}, "unsafe");\n`,
   );
   const res = spawnSync("tar", ["-czf", tarball, "-C", fixture, "package"], {
     encoding: "utf8",
@@ -101,16 +130,9 @@ function makeFixture(): void {
 
 async function main(): Promise<void> {
   rmSync(home, { recursive: true, force: true });
-  mkdirSync(toolsDir, { recursive: true });
-  writeFileSync(
-    join(toolsDir, "pnpm"),
-    `#!/bin/sh\nexec "${node}" "${pnpmCjs}" "$@"\n`,
-  );
-  writeFileSync(
-    join(toolsDir, "pnpm.cmd"),
-    `@echo off\n"${node}" "${pnpmCjs}" %*\n`,
-  );
-  if (process.platform !== "win32") chmodSync(join(toolsDir, "pnpm"), 0o755);
+  writePluginShims(toolsDir, node, pnpmCjs);
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, ".npmrc"), "");
   makeFixture();
   info(`isolated DSH_HOME ${home} · tarball ${tarball}`);
 
@@ -138,8 +160,11 @@ async function main(): Promise<void> {
   await run(["add", "is-odd"], "dsh plugin add is-odd while file: dep is retained");
   ok("subsequent add succeeded while file: dependency source was retained");
 
-  await run(["remove", "dsh-sideload-fixture"], "dsh plugin remove dsh-sideload-fixture");
-  ok("dsh plugin remove dsh-sideload-fixture exited 0");
+  await runPnpmRemove("dsh-sideload-fixture", "direct pnpm remove dsh-sideload-fixture");
+  if (existsSync(uninstallScriptMarker)) {
+    fail("direct plugin removal executed the package preuninstall lifecycle script");
+  }
+  ok("direct, scripts-disabled pnpm remove dsh-sideload-fixture exited 0");
 
   rmSync(home, { recursive: true, force: true });
   rmSync(fixture, { recursive: true, force: true });

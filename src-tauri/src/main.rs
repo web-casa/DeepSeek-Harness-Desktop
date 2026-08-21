@@ -109,6 +109,10 @@ fn main() {
                 std::sync::Arc::new(observability::Observability::new(app.handle()));
             app.manage(observability);
             app.manage(std::sync::Arc::new(diagnostics::DiagnosticExporter::new()));
+            // Install the profile-mutation gate before Harness starts. Crash
+            // auto-restart events can arrive as soon as the sidecar launches,
+            // and every restart path must serialize against plugin changes.
+            app.manage(std::sync::Arc::new(plugins::PluginRunner::new()));
             // Tray first: harness init failure paths publish snapshots that
             // must reach the tray status line.
             tray::init(&app.handle().clone());
@@ -119,7 +123,6 @@ fn main() {
             // preview_preset and import_preset. MUST be managed: extracting
             // an unmanaged State panics at the first command invocation.
             app.manage(commands::PendingPreset(std::sync::Mutex::new(None)));
-            app.manage(std::sync::Arc::new(plugins::PluginRunner::new()));
             // Deep-link parsing/dispatch. Manage the pending-request slot
             // BEFORE init drains get_current(): a cold start URL can arrive
             // before the webview subscribed to plugin-install-request.

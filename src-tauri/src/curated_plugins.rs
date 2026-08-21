@@ -1,9 +1,9 @@
 //! Curated plugin allowlist for Store builds.
 //!
-//! The Store product may only install plugins reviewed on cordis.run. The
-//! snapshot is committed so a Store build never depends on a live fetch from
-//! the marketplace; refresh it with the maintainer checklist when the
-//! marketplace list changes.
+//! The Store product may only install plugins that pass BOTH the live
+//! cordis.run candidate gate and this locally reviewed snapshot. The snapshot
+//! is a second distribution boundary, not an offline installation authority;
+//! refresh it with the maintainer checklist when the marketplace list changes.
 
 use serde::Deserialize;
 

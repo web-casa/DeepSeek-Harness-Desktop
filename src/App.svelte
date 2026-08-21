@@ -73,6 +73,7 @@
   } from "./lib/install-arbitration";
   import { trapDialog } from "./lib/dialog-trap";
   import { marketFailureText } from "./lib/market-error";
+  import { reconcilePluginCompletion } from "./lib/plugin-completion";
 
   let status = $state<Status>("idle");
   let url = $state<string | null>(null);
@@ -111,6 +112,13 @@
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
   let pluginRestartNotice = $state<string | null>(null);
+  let pluginRefreshInFlight = false;
+  let pluginRefreshQueued = false;
+  let pluginDoneExpected = false;
+  let pluginExpectedOp: "add" | "remove" | "market-install" | null = null;
+  let pluginProfileTransitioning = $derived(
+    status === "idle" || status === "starting" || status === "stopping",
+  );
   let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
   let remotePresetRequest = $state<RemotePresetRequest | null>(null);
   let remotePresetPreview = $state<RemotePresetPreview | null>(null);
@@ -326,7 +334,13 @@
   }
 
   async function prepareMarketInstall(slug: string) {
-    if (pluginBusy || marketPreparing || marketOffline || recoveryOverview?.transaction) return;
+    if (
+      pluginBusy ||
+      pluginProfileTransitioning ||
+      marketPreparing ||
+      marketOffline ||
+      recoveryOverview?.transaction
+    ) return;
     marketPreparing = true;
     marketError = null;
     try {
@@ -346,14 +360,18 @@
 
   function confirmMarketInstall() {
     const preview = marketConfirm;
-    if (!preview || pluginBusy) return;
+    if (!preview || pluginBusy || pluginProfileTransitioning) return;
     marketConfirm = null;
     pluginBusy = true;
+    pluginDoneExpected = true;
+    pluginExpectedOp = "market-install";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
     void marketInstallPlugin(preview.slug, preview.entryRevision).catch((e) => {
       pluginBusy = false;
+      pluginDoneExpected = false;
+      pluginExpectedOp = null;
       pluginError = marketFailureText("市场安装失败", e);
       pluginLogsOpen = true;
       void refreshPlugins();
@@ -364,6 +382,7 @@
   async function doActivateMarketPlugin(plugin: PluginEntry) {
     if (
       pluginBusy ||
+      pluginProfileTransitioning ||
       recoveryOverview?.transaction ||
       plugin.state !== "pending" ||
       !plugin.slug ||
@@ -372,16 +391,30 @@
       return;
     }
     pluginBusy = true;
+    // Activation is a synchronous IPC mutation and deliberately emits no
+    // plugin-done event. Keep it out of the asynchronous completion monitor.
+    pluginDoneExpected = false;
+    pluginExpectedOp = null;
     pluginError = null;
     try {
       await activateMarketPlugin(plugin.slug, plugin.entryRevision);
       pluginRestartNotice = `插件 ${plugin.name} 已激活，需要重启 Harness 后才能生效。`;
       showToast("已激活 " + plugin.name + "；请重启 Harness 后加载");
-      await refreshPlugins();
     } catch (e) {
       pluginError = marketFailureText("激活失败", e);
+    } finally {
+      pluginBusy = false;
+      // Refresh after both success and partial-commit errors. The backend can
+      // truthfully expose an active bundle even when final marker cleanup was
+      // interrupted, and the UI must not keep rendering its stale pending row.
+      await refreshPlugins();
+      if (plugins.some((entry) => entry.name === plugin.name && entry.state === "active")) {
+        pluginRestartNotice = `插件 ${plugin.name} 已激活，需要重启 Harness 后才能生效。`;
+        if (pluginError) {
+          pluginError = `插件已进入激活状态，但收尾操作报告错误：${pluginError}`;
+        }
+      }
     }
-    pluginBusy = false;
   }
 
   async function doPickSideload() {
@@ -394,10 +427,17 @@
   }
 
   async function confirmSideloadInstall() {
-    if (!sideloadPath || pluginBusy || recoveryOverview?.transaction) return;
+    if (
+      !sideloadPath ||
+      pluginBusy ||
+      pluginProfileTransitioning ||
+      recoveryOverview?.transaction
+    ) return;
     const path = sideloadPath;
     sideloadPath = null;
     pluginBusy = true;
+    pluginDoneExpected = true;
+    pluginExpectedOp = "add";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
@@ -406,6 +446,8 @@
       await sideloadPlugin(path);
     } catch (e) {
       pluginBusy = false;
+      pluginDoneExpected = false;
+      pluginExpectedOp = null;
       pluginError = `离线安装失败：${e}`;
       pluginLogsOpen = true;
       void refreshPlugins();
@@ -458,6 +500,7 @@
   }
 
   async function doRestart() {
+    if (busy || pluginBusy || recoveryBusy) return;
     busy = true;
     restartInFlight = true;
     try {
@@ -676,15 +719,61 @@
   }
 
   async function refreshPlugins() {
+    if (pluginRefreshInFlight) {
+      pluginRefreshQueued = true;
+      return;
+    }
+    pluginRefreshInFlight = true;
+    const wasBusy = pluginBusy;
+    const expectedDone = pluginDoneExpected;
+    const expectedOp = pluginExpectedOp;
     try {
       const res = await listPlugins();
+      if (
+        pluginBusy !== wasBusy ||
+        pluginDoneExpected !== expectedDone ||
+        pluginExpectedOp !== expectedOp
+      ) {
+        // A user action or live completion event changed local state while
+        // this request was in flight. Its busy snapshot may predate that
+        // transition, so never let it resurrect or erase the newer state or
+        // plugin list.
+        pluginRefreshQueued = true;
+        return;
+      }
       plugins = res.plugins;
       // Backend busy is the truth across webview reloads: an op may still be
       // running after the UI restarted, and the single-flight flag is
-      // app-wide — resync instead of showing a stale idle state.
+      // app-wide. The helper deliberately does not guess whether an unknown
+      // operation emits plugin-done (activation/recovery do not).
+      const completion = reconcilePluginCompletion({
+        frontendBusy: wasBusy,
+        backendBusy: res.busy,
+        doneExpected: expectedDone,
+      });
       pluginBusy = res.busy;
+      pluginDoneExpected = completion.doneExpected;
+      pluginExpectedOp = res.busy ? expectedOp : null;
+      if (completion.missedDone) {
+        // Tauri events are live notifications, not a durable queue. A very
+        // fast setup failure or a webview reload can miss `plugin-done`;
+        // polling backend truth prevents the UI from remaining busy forever.
+        pluginError ??=
+          "插件操作已经结束，但完成事件未送达；请检查安装日志和当前插件列表。";
+        if (expectedOp === "remove") {
+          pluginRestartNotice =
+            "插件移除操作已经结束；请重启 Harness 停止当前进程中的旧插件，并核对列表后按需重试。";
+        }
+        pluginLogsOpen = true;
+      }
     } catch {
       /* non-fatal */
+    } finally {
+      pluginRefreshInFlight = false;
+      if (pluginRefreshQueued) {
+        pluginRefreshQueued = false;
+        void refreshPlugins();
+      }
     }
   }
 
@@ -725,8 +814,15 @@
   }
 
   function startPluginOp(name: string, op: "install" | "uninstall") {
-    if (pluginBusy || recoveryOverview?.transaction || !name.trim()) return;
+    if (
+      pluginBusy ||
+      pluginProfileTransitioning ||
+      recoveryOverview?.transaction ||
+      !name.trim()
+    ) return;
     pluginBusy = true;
+    pluginDoneExpected = true;
+    pluginExpectedOp = op === "install" ? "add" : "remove";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
@@ -734,6 +830,16 @@
     const call = op === "install" ? installPlugin(name.trim()) : uninstallPlugin(name.trim());
     void call.catch((e) => {
       pluginBusy = false;
+      pluginDoneExpected = false;
+      pluginExpectedOp = null;
+      if (op === "uninstall") {
+        // Synchronous setup can fail after exact pre-disable but before the
+        // worker exists, so no plugin-done event will arrive to set the usual
+        // restart notice. Keep this wording truthful for failures that
+        // happened before mutation as well.
+        pluginRestartNotice =
+          "卸载未开始或未完成；如果插件此前正在运行，请重启 Harness 后检查状态并重试。";
+      }
       pluginError = `${op === "install" ? "安装" : "卸载"}失败：${e}`;
       pluginLogsOpen = true;
       // Resync busy: "an operation is already running" means another
@@ -879,7 +985,16 @@
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
     void onPluginDone((p) => {
+      if (pluginDoneExpected && pluginExpectedOp && p.op !== pluginExpectedOp) {
+        // Completion is queued before the backend releases its operation
+        // transition gate. Keep this defensive check so an unexpected stale
+        // event can never clear a different operation's busy state.
+        void refreshPlugins();
+        return;
+      }
       pluginBusy = false;
+      pluginDoneExpected = false;
+      pluginExpectedOp = null;
       const tailLines = p.tail
         .split(/\r?\n/)
         .map((line) => line.trim())
@@ -889,7 +1004,17 @@
       if (pluginLogs.length === 0 && tailLines.length > 0) {
         pluginLogs = tailLines.slice(-300);
       }
+      if (p.op === "remove" && p.exit !== 0) {
+        // Every spawned remove has already completed exact pre-disable. Even
+        // when pnpm fails or cancellation wins, the currently running Harness
+        // may still hold the old plugin and must be restarted to unload it.
+        pluginRestartNotice =
+          "插件移除未完成，但目标已安全禁用；请重启 Harness 停止当前进程中的插件后再重试卸载。";
+      }
       if (p.exit === 0) {
+        // A delayed live event can arrive just after polling synthesized a
+        // missed-completion warning. The durable success supersedes it.
+        pluginError = null;
         pluginName = "";
         if (p.op === "market-install") {
           showToast("插件已校验完成，正在等待你的显式激活");
@@ -921,6 +1046,15 @@
       cancelled = true;
       unlistenFn?.();
     };
+  });
+
+  // Event delivery can race an immediate backend failure or a webview
+  // reload. While an operation is active, cheaply poll the local IPC state so
+  // a missed `plugin-done` cannot leave every plugin control disabled.
+  $effect(() => {
+    if (!inTauri || !pluginBusy) return;
+    const timer = setInterval(() => void refreshPlugins(), 1000);
+    return () => clearInterval(timer);
   });
 
   // Deep-link requests: warm links arrive as events; the pending Rust slot
@@ -1098,10 +1232,10 @@
     <div class="actions">
       {#if status === "running"}
         <button class="primary" onclick={doOpen}>打开 Harness 窗口</button>
-        <button class="ghost" onclick={doRestart} disabled={busy}>重新启动</button>
+        <button class="ghost" onclick={doRestart} disabled={busy || pluginBusy || recoveryBusy}>重新启动</button>
         <button class="danger-ghost" onclick={doShutdown} disabled={busy}>停止</button>
       {:else if status === "crashed" || status === "stopped"}
-        <button class="primary" onclick={doRestart} disabled={busy}>
+        <button class="primary" onclick={doRestart} disabled={busy || pluginBusy || recoveryBusy}>
           {status === "stopped" ? "重新启动" : "重新启动 Harness"}
         </button>
         {#if status === "crashed"}
@@ -1291,7 +1425,7 @@
     <div class="update-row">
       <span class="update-title">插件市场</span>
       {#if !storeBuild}
-        <button class="ghost" onclick={doPickSideload} disabled={recoveryOverview?.transaction != null}>离线安装 .tgz</button>
+        <button class="ghost" onclick={doPickSideload} disabled={pluginProfileTransitioning || recoveryOverview?.transaction != null}>离线安装 .tgz</button>
       {/if}
     </div>
     <div class="plugin-row">
@@ -1341,7 +1475,7 @@
             <button
               class="primary"
               onclick={() => doMarketInstall(item)}
-              disabled={pluginBusy || marketPreparing || marketOffline || recoveryOverview?.transaction != null}
+              disabled={pluginBusy || pluginProfileTransitioning || marketPreparing || marketOffline || recoveryOverview?.transaction != null}
             >{marketPreparing ? "校验中…" : "安装"}</button>
           {:else}
             <button class="ghost" disabled title={item.installReason ?? "该条目不可安装"}>
@@ -1376,7 +1510,12 @@
     {#if storeBuild}
       <div class="plugin-row">
         <span class="update-info">仅允许安装 cordis.run 已审核插件</span>
-        <button class="ghost" onclick={() => openSite("https://cordis.run")}>打开插件市场</button>
+        {#if pluginBusy}
+          <span class="plugin-busy"><span class="spinner"></span> 操作中…</span>
+          <button class="danger-ghost" onclick={doCancelPluginOp}>取消</button>
+        {:else}
+          <button class="ghost" onclick={() => openSite("https://cordis.run")}>打开插件市场</button>
+        {/if}
       </div>
       <div class="trust-note">
         插件与 Agent 同权限运行工具和命令；Store 版仅安装已审核插件。
@@ -1388,7 +1527,7 @@
           type="text"
           placeholder="npm 包名，如 @cordisjs/plugin-example"
           bind:value={pluginName}
-          disabled={pluginBusy || recoveryOverview?.transaction != null}
+          disabled={pluginBusy || pluginProfileTransitioning || recoveryOverview?.transaction != null}
           spellcheck="false"
           onkeydown={(e) => {
             if (e.key === "Enter") startPluginOp(pluginName, "install");
@@ -1398,7 +1537,7 @@
           <span class="plugin-busy"><span class="spinner"></span> 操作中…</span>
           <button class="danger-ghost" onclick={doCancelPluginOp}>取消</button>
         {:else}
-          <button class="primary" onclick={() => startPluginOp(pluginName, "install")} disabled={!pluginName.trim() || recoveryOverview?.transaction != null}>
+          <button class="primary" onclick={() => startPluginOp(pluginName, "install")} disabled={pluginProfileTransitioning || !pluginName.trim() || recoveryOverview?.transaction != null}>
             安装
           </button>
         {/if}
@@ -1415,7 +1554,7 @@
     {#if pluginRestartNotice}
       <div class="notice-box">
         {pluginRestartNotice}
-        <button class="primary" onclick={doRestart} disabled={busy || status !== "running"}>
+        <button class="primary" onclick={doRestart} disabled={busy || pluginBusy || recoveryBusy || status !== "running"}>
           立即重启 Harness
         </button>
       </div>
@@ -1428,11 +1567,11 @@
             <span class="badge">{pluginStateText(p.state)}</span>
           </span>
           {#if p.state === "pending" && p.slug && p.entryRevision}
-            <button class="primary" onclick={() => doActivateMarketPlugin(p)} disabled={pluginBusy || recoveryOverview?.transaction != null}>
+            <button class="primary" onclick={() => doActivateMarketPlugin(p)} disabled={pluginBusy || pluginProfileTransitioning || recoveryOverview?.transaction != null}>
               Activate
             </button>
           {/if}
-          <button class="ghost" onclick={() => startPluginOp(p.name, "uninstall")} disabled={pluginBusy || recoveryOverview?.transaction != null}>卸载</button>
+          <button class="ghost" onclick={() => startPluginOp(p.name, "uninstall")} disabled={pluginBusy || pluginProfileTransitioning || recoveryOverview?.transaction != null}>卸载</button>
         </div>
       {/each}
     {:else}
@@ -1630,7 +1769,7 @@
         将校验此修订的 tarball 与 lockfile integrity，禁用构建脚本，并保持为待激活状态。安装完成后不会自动启用，需你再次点击 Activate。
       </div>
       <div class="modal-actions">
-        <button class="primary" onclick={confirmMarketInstall} disabled={pluginBusy}>确认安装</button>
+        <button class="primary" onclick={confirmMarketInstall} disabled={pluginBusy || pluginProfileTransitioning}>确认安装</button>
         <button class="ghost" onclick={() => (marketConfirm = null)}>取消</button>
       </div>
     </div>
@@ -1654,7 +1793,7 @@
       <div class="modal-name">{sideloadPath}</div>
       <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将通过 `dsh plugin add` 安装该 .tgz。</div>
       <div class="modal-actions">
-        <button class="primary" onclick={confirmSideloadInstall} disabled={pluginBusy}>确认安装</button>
+        <button class="primary" onclick={confirmSideloadInstall} disabled={pluginBusy || pluginProfileTransitioning}>确认安装</button>
         <button class="ghost" onclick={() => (sideloadPath = null)}>取消</button>
       </div>
     </div>
