@@ -42,7 +42,8 @@ git push origin v0.2.1
    x64/arm64 AppImage+DEB+RPM+Flatpak）：下载 Node（SHA-256）
    → prepare-harness（441+ 许可证 + 零链接断言）→ 构建 sidecar → 冒烟 →
    `tauri build`（macOS 只产生已签名 `.app`，DMG 由无 Finder 自动化的
-   有界 `hdiutil -srcfolder` 路径生成；Flatpak 从同一 DEB 导入）→
+   有界 `hdiutil -srcfolder` 路径生成；仅对已知的 DiskImages 瞬态故障最多
+   重试 3 次，确定性错误立即失败；Flatpak 从同一 DEB 导入）→
    **verify-bundle**（包元数据、
    二进制架构、必需文件、scoped 许可证
    绊线、零符号链接、执行位、无 quarantine）→ **verify-signing**（见下）→

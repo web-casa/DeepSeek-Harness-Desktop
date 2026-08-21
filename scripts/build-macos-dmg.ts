@@ -19,8 +19,11 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fail, info, ok, readManifest, repoRoot } from "./lib/common.ts";
 import {
+  DMG_CREATE_MAX_ATTEMPTS,
+  DMG_CREATE_RETRY_DELAY_MS,
   DMG_CREATE_TIMEOUT_MS,
   DMG_TOOL_TIMEOUT_MS,
+  isRetryableDmgCreateFailure,
   macosDmgPaths,
 } from "./lib/macos-dmg.ts";
 import type { ReleaseArch } from "./lib/release-artifacts.ts";
@@ -47,6 +50,22 @@ function commandOutput(...values: readonly (string | null | undefined)[]): strin
     .slice(-5000);
 }
 
+class CommandFailure extends Error {
+  readonly output: string;
+  readonly timedOut: boolean;
+
+  constructor(
+    message: string,
+    output: string,
+    timedOut: boolean,
+  ) {
+    super(message);
+    this.name = "CommandFailure";
+    this.output = output;
+    this.timedOut = timedOut;
+  }
+}
+
 function run(command: string, args: string[], label: string, timeout: number): void {
   const result = spawnSync(command, args, {
     encoding: "utf8",
@@ -56,13 +75,39 @@ function run(command: string, args: string[], label: string, timeout: number): v
     maxBuffer: 64 * 1024 * 1024,
   });
   if (result.status !== 0) {
-    const timeoutHint = result.error?.message.includes("ETIMEDOUT")
+    const timedOut = result.error?.message.includes("ETIMEDOUT") === true;
+    const timeoutHint = timedOut
       ? ` after ${Math.ceil(timeout / 60000)} minutes`
       : "";
-    throw new Error(
+    const output = commandOutput(result.stdout, result.stderr);
+    throw new CommandFailure(
       `${label} failed${timeoutHint} (exit ${result.status}, ${result.error?.message ?? "no spawn error"}):\n` +
-        commandOutput(result.stdout, result.stderr),
+        output,
+      output,
+      timedOut,
     );
+  }
+}
+
+async function createDmg(args: string[], output: string): Promise<void> {
+  for (let attempt = 1; attempt <= DMG_CREATE_MAX_ATTEMPTS; attempt += 1) {
+    rmSync(output, { force: true });
+    try {
+      run("hdiutil", args, "direct DMG creation", DMG_CREATE_TIMEOUT_MS);
+      return;
+    } catch (error) {
+      const retryable =
+        error instanceof CommandFailure &&
+        isRetryableDmgCreateFailure(error.output, error.timedOut);
+      if (!retryable || attempt === DMG_CREATE_MAX_ATTEMPTS) throw error;
+
+      const delay = DMG_CREATE_RETRY_DELAY_MS * attempt;
+      console.warn(
+        `warning: transient DiskImages failure on attempt ${attempt}/${DMG_CREATE_MAX_ATTEMPTS}; ` +
+          `removing the partial image and retrying in ${delay / 1000}s`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
 }
 
@@ -118,8 +163,7 @@ try {
   );
   symlinkSync("/Applications", join(stagingDirectory, "Applications"));
 
-  run(
-    "hdiutil",
+  await createDmg(
     [
       "create",
       "-volname",
@@ -133,8 +177,7 @@ try {
       "-ov",
       paths.output,
     ],
-    "direct DMG creation",
-    DMG_CREATE_TIMEOUT_MS,
+    paths.output,
   );
 
   if (signingIdentity) {

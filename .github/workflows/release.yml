@@ -355,7 +355,7 @@ jobs:
       # compressed image directly: no mount, Finder, AppleScript, or detach.
       - name: Build macOS DMG without Finder automation
         if: runner.os == 'macOS'
-        timeout-minutes: 15
+        timeout-minutes: 35
         run: node scripts/build-macos-dmg.ts --arch ${{ matrix.arch }}
 
       - name: Verify signed DMG before notarization
