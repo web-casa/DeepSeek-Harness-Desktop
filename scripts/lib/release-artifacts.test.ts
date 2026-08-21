@@ -274,7 +274,6 @@ test("macOS release signs runtime, uploads once, then waits in a separate job", 
   const handoffIndex = workflow.indexOf("name: Upload notarization handoff");
   const waitJobIndex = workflow.indexOf("notarize-macos:");
   const waitIndex = workflow.indexOf("name: Wait for the recorded Apple submission");
-  const windowsIndex = workflow.indexOf("name: Bundle application (Windows)");
   const cleanupIndex = workflow.indexOf("name: Remove remaining job-scoped macOS signing keychain");
   assert.equal(importIndex > 0, true);
   assert.equal(nestedIndex > importIndex, true);
