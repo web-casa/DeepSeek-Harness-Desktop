@@ -606,7 +606,7 @@ fn ensure_no_plugin_recovery(runtime: &Runtime) -> Result<(), String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        is_zip_content_type, read_installed_plugins, redact, sweep_sideload_dir,
+        is_zip_content_type, plugin_path_env, read_installed_plugins, redact, sweep_sideload_dir,
         sweep_sideloads_root,
     };
 
@@ -786,6 +786,33 @@ mod tests {
         .unwrap();
         // Malformed dependency payloads are skipped safely.
         assert_eq!(read_installed_plugins(&dir), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn plugin_path_splits_a_serialized_multi_segment_parent_path() {
+        let parent = std::env::join_paths([
+            std::path::Path::new("parent-one"),
+            std::path::Path::new("parent-two"),
+        ])
+        .unwrap();
+        let actual = plugin_path_env(std::path::Path::new("desktop-shim"), Some(&parent)).unwrap();
+        assert_eq!(
+            std::env::split_paths(&actual).collect::<Vec<_>>(),
+            vec![
+                std::path::PathBuf::from("desktop-shim"),
+                std::path::PathBuf::from("parent-one"),
+                std::path::PathBuf::from("parent-two"),
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_path_without_parent_keeps_the_owned_shim() {
+        let actual = plugin_path_env(std::path::Path::new("desktop-shim"), None).unwrap();
+        assert_eq!(
+            std::env::split_paths(&actual).collect::<Vec<_>>(),
+            vec![std::path::PathBuf::from("desktop-shim")]
+        );
     }
 }
 
@@ -1026,6 +1053,22 @@ pub fn list_plugins(
     })
 }
 
+/// Prepend the Desktop-owned pnpm shim while retaining every inherited PATH
+/// entry. `join_paths` takes *individual* path segments, not a serialized
+/// PATH value: passing the latter as one segment rejects normal multi-entry
+/// PATH values on every platform (for example `a:b` on Unix).
+fn plugin_path_env(
+    shim_dir: &std::path::Path,
+    inherited_path: Option<&std::ffi::OsStr>,
+) -> Result<std::ffi::OsString, std::env::JoinPathsError> {
+    let mut segments = vec![shim_dir.as_os_str().to_owned()];
+    if let Some(inherited_path) = inherited_path {
+        segments
+            .extend(std::env::split_paths(inherited_path).map(std::path::PathBuf::into_os_string));
+    }
+    std::env::join_paths(segments)
+}
+
 fn run_plugin_spec(
     app: AppHandle,
     paths: crate::paths::RuntimePaths,
@@ -1052,10 +1095,8 @@ fn run_plugin_spec(
             return;
         }
     };
-    let path_env = match std::env::join_paths(
-        std::iter::once(shim_dir.as_os_str().to_owned())
-            .chain(std::env::var_os("PATH").map(|old| old.to_owned())),
-    ) {
+    let inherited_path = std::env::var_os("PATH");
+    let path_env = match plugin_path_env(&shim_dir, inherited_path.as_deref()) {
         Ok(path_env) => path_env.to_string_lossy().to_string(),
         Err(e) => {
             let _ = app.emit(
