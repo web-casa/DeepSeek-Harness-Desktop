@@ -771,7 +771,7 @@ mod tests {
             secure_fs::random_suffix().unwrap()
         ));
         let web = home.join("profiles/web");
-        fs::create_dir_all(web.join("node_modules/broken-plugin")).unwrap();
+        fs::create_dir_all(&web).unwrap();
         fs::write(
             web.join("package.json"),
             br#"{
@@ -791,6 +791,19 @@ mod tests {
 "#,
         )
         .unwrap();
+        // Attribution is deliberately complete-or-unavailable. Model the two
+        // active fixture roots as installed packages so unrelated missing
+        // manifests do not accidentally turn every leaf-attribution test
+        // into the incomplete-graph case.
+        for package_name in ["broken-plugin", "healthy-plugin"] {
+            let package_dir = web.join("node_modules").join(package_name);
+            fs::create_dir_all(&package_dir).unwrap();
+            fs::write(
+                package_dir.join("package.json"),
+                format!(r#"{{"name":"{package_name}","version":"1.0.0","dependencies":{{}}}}"#),
+            )
+            .unwrap();
+        }
         home
     }
 
