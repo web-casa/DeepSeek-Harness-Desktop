@@ -29,6 +29,12 @@ src-tauri/icons/ios/
 .pnpm-store/
 .tmp/
 
+# Agent-local planning records. These are working notes, not product docs;
+# keeping them ignored prevents an accidental `git add -A` from shipping them.
+/findings.md
+/progress.md
+/task_plan.md
+
 # Local updater-manifest artifact (scripts/updater-manifest.ts); the live
 # one is published by CI and must never be committed from a local run.
 latest.json

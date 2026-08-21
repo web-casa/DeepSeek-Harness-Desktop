@@ -23,6 +23,17 @@ test("macOS shell path gate validates event SHAs and fails closed", () => {
   assert.ok(shell.includes('git cat-file -e "${BASE_SHA}^{commit}"'));
   assert.ok(shell.includes('git cat-file -e "${HEAD_SHA}^{commit}"'));
   assert.ok(shell.includes('git diff --quiet "$BASE_SHA" "$HEAD_SHA"'));
+  for (const requiredBuildInput of [
+    "Cargo.toml",
+    "crates/",
+    "src-tauri/capabilities",
+    "src-tauri/permissions",
+  ]) {
+    assert.ok(
+      shell.includes(requiredBuildInput),
+      `macOS path gate must include ${requiredBuildInput}`,
+    );
+  }
   assert.ok(shell.includes("printf 'run=true\\n' >> \"$GITHUB_OUTPUT\""));
   assert.ok(shell.includes("run_check=true"));
 });

@@ -74,9 +74,13 @@ jobs:
             if git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null && git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
               .github/workflows/test.yml \
               Cargo.lock \
+              Cargo.toml \
               rust-toolchain.toml \
+              crates/ \
               src-tauri/Cargo.toml \
               src-tauri/build.rs \
+              src-tauri/capabilities \
+              src-tauri/permissions \
               src-tauri/src \
               src-tauri/tauri.conf.json; then
               run_check=false
