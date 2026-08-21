@@ -141,7 +141,9 @@ Desktop 工作区直接改为公开发布。
 - draft 阶段发现问题：删除 draft + tag 后重新打 tag（tag 重新指向新提交）。
 - 已发布：永不覆盖资产；bump patch 版本重新发布，旧版标注。
 - workflow_dispatch（不发布）可用于在**不打 tag** 的情况下全流程演练构建
-  与验证（`tag` 输入为空时构建默认分支）。`native_target`
+  与验证；手动演练必须在受保护的 `main` 上启动，非 main workflow ref 不会进入
+  签名/构建图。Release 的全部源码 checkout 都固定为 `main`，且不接受
+  tag/branch 输入。`native_target`
   默认为 `all`；选 `macos-x64` 或 `macos-arm64` 时只跑对应的构建、
   Developer ID 签名、Submission-ID 公证与产物复验，并跳过 MSIX、
   Windows installer smoke 和 5 分钟 soak。此通道用于发布前低成本验证

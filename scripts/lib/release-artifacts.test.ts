@@ -151,12 +151,18 @@ test("Windows installer smoke can safely reuse one completed Release run", () =>
     workflow,
     /github\.event\.inputs\.windows_smoke_installer != 'nsis'/,
   );
-  assert.equal(
-    workflow.split(
-      "if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''",
-    ).length - 1,
-    3,
+  const readOnlySourceRunGate =
+    "if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''";
+  const presetContract = workflow.slice(
+    workflow.indexOf("  preset-download-contract:"),
+    workflow.indexOf("\n  quality:"),
   );
+  const quality = workflow.slice(
+    workflow.indexOf("  quality:"),
+    workflow.indexOf("\n  # Refuse to spend two platform builds"),
+  );
+  assert.ok(presetContract.includes(readOnlySourceRunGate));
+  assert.ok(quality.includes(readOnlySourceRunGate));
 });
 
 test("tag publication tolerates only the intentional transitive smoke-source skip", () => {
@@ -199,6 +205,77 @@ test("release shell never interpolates the attacker-controlled ref name", () => 
   assert.match(workflow, /\^v\(0\|\[1-9\]\[0-9\]\*\)\\\./);
   assert.match(workflow, /--expect-tag "\$RELEASE_TAG"/);
   assert.match(workflow, /--tag "\$RELEASE_TAG"/);
+});
+
+test("release matrix treats workflow native_target as data, not shell source", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const start = workflow.indexOf("      - name: Emit reviewed native, notarization, and Store matrices");
+  const end = workflow.indexOf("\n  # The desktop deliberately refuses redirects", start);
+  assert.ok(start >= 0 && end > start, "release matrix step missing");
+  const step = workflow.slice(start, end);
+  const shell = step.slice(step.indexOf("        run: |"));
+
+  assert.match(
+    step,
+    /NATIVE_TARGET: \$\{\{ github\.event\.inputs\.native_target \|\| 'all' \}\}/,
+  );
+  assert.doesNotMatch(shell, /\$\{\{/);
+  assert.equal(
+    shell.split('--target "$NATIVE_TARGET"').length - 1,
+    2,
+    "both target-dependent matrices must use the quoted environment value",
+  );
+  assert.equal(
+    shell.includes("--target '${{ github.event.inputs.native_target"),
+    false,
+  );
+});
+
+test("manual Release always builds reviewed main, never a dispatch-selected source ref", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const safeRef =
+    "ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}";
+  const releasePlanStart = workflow.indexOf("  release-plan:");
+  const releasePlanEnd = workflow.indexOf("\n  # The desktop deliberately refuses redirects", releasePlanStart);
+  const releasePlan = workflow.slice(releasePlanStart, releasePlanEnd);
+  const checkoutCount = workflow.split("uses: actions/checkout@").length - 1;
+  const checkoutRefs = [
+    ...workflow.matchAll(
+      /uses: actions\/checkout@[^\n]+\n\s+with:\n\s+ref: ([^\n]+)/g,
+    ),
+  ].map((match) => `ref: ${match[1]}`);
+
+  assert.ok(checkoutCount > 0, "Release must retain explicit pinned checkouts");
+  assert.match(
+    releasePlan,
+    /if: github\.event_name != 'workflow_dispatch' \|\| \(github\.ref == 'refs\/heads\/main' && github\.event\.inputs\.windows_smoke_source_run_id == ''\)/,
+    "manual dispatches outside main must not enter the signing/build dependency graph",
+  );
+  assert.equal(
+    workflow.includes("github.event.inputs.tag"),
+    false,
+    "a dispatch input must never choose source executed with release credentials",
+  );
+  assert.equal(
+    checkoutRefs.length,
+    checkoutCount,
+    "every checkout step must declare an explicit ref",
+  );
+  assert.deepEqual(
+    checkoutRefs,
+    Array.from({ length: checkoutCount }, () => safeRef),
+    "every Release checkout must bind dispatches to main and tags to their tag ref",
+  );
+  assert.match(
+    workflow,
+    /checkout_ref: \$\{\{ github\.event_name == 'workflow_dispatch' && 'refs\/heads\/main' \|\| github\.ref \}\}/,
+  );
 });
 
 test("dependency review is blocking with a graph-unavailable fallback", () => {

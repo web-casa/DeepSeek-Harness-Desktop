@@ -5,10 +5,6 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      tag:
-        type: string
-        required: false
-        description: "Tag/branch to build & verify (defaults to the default branch). Does not publish."
       native_target:
         type: choice
         required: false
@@ -53,7 +49,11 @@ concurrency:
 jobs:
   release-plan:
     name: Validate release matrix
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''
+    # A manually selected workflow ref must never start the signing/build graph:
+    # dispatches are allowed only from reviewed main. Every subsequent native
+    # build depends on this plan; the separate read-only diagnosis path below
+    # remains explicitly scoped to an already completed same-repository run.
+    if: github.event_name != 'workflow_dispatch' || (github.ref == 'refs/heads/main' && github.event.inputs.windows_smoke_source_run_id == '')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
         with:
@@ -71,11 +71,18 @@ jobs:
 
       - name: Emit reviewed native, notarization, and Store matrices
         id: matrix
+        env:
+          # workflow_dispatch values are external data even when the UI offers
+          # a choice. Keep them out of the shell source; release-plan.ts then
+          # enforces its exact reviewed target allowlist.
+          NATIVE_TARGET: ${{ github.event.inputs.native_target || 'all' }}
         run: |
+          native="$(node scripts/release-plan.ts --github-matrix --target "$NATIVE_TARGET")"
+          macos_notarization="$(node scripts/release-plan.ts --github-macos-notarization-matrix --target "$NATIVE_TARGET")"
           {
-            echo "native=$(node scripts/release-plan.ts --github-matrix --target '${{ github.event.inputs.native_target || 'all' }}')"
+            echo "native=$native"
             echo "msix=$(node scripts/release-plan.ts --github-msix-matrix)"
-            echo "macos_notarization=$(node scripts/release-plan.ts --github-macos-notarization-matrix --target '${{ github.event.inputs.native_target || 'all' }}')"
+            echo "macos_notarization=$macos_notarization"
           } >> "$GITHUB_OUTPUT"
 
   # The desktop deliberately refuses redirects/non-JSON responses at its
@@ -90,7 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
         with:
@@ -109,7 +116,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_smoke_source_run_id == ''
     uses: ./.github/workflows/quality.yml
     with:
-      checkout_ref: ${{ github.event.inputs.tag || github.ref }}
+      checkout_ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
   # Refuse to spend two platform builds (and a publish) on a tag that can
   # never be published: the tag commit must be an ancestor of main. The
@@ -129,7 +136,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - name: Enforce tag ancestry
         env:
@@ -158,7 +165,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
         with:
@@ -203,7 +210,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - name: Install Linux bundle and Flatpak dependencies
         if: runner.os == 'Linux'
@@ -497,7 +504,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
         with:
@@ -582,7 +589,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable (version via rust-toolchain.toml)
         with:
@@ -1030,7 +1037,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
         with:
