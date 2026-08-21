@@ -49,7 +49,7 @@ DSH CLI 的启动契约随版本演进，社区同类项目已实证踩坑（如
 1. bump `runtime/package.json` pin + `npm install` 刷新 lock +
    manifest.harnessVersion；
 2. 对照新版 `dsh --help` / `dsh web --help` 复核契约并记录变化（当前钉
-   0.1.0-rc.8 的基线：`web` = `--profile web` 别名；flag 仅
+   0.1.1-rc.1 的基线：`web` = `--profile web` 别名；flag 仅
    `--host`/`--port`/`--trusted-host`/`--no-open`（Desktop 启动必须显式
    `--no-open`，避免上游再拉起系统浏览器）；**无** `--expose-internals`/
    `--use-system-ca`；就绪行 MARKER 为 `dsh web: http://127.0.0.1:`；
