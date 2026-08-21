@@ -15,6 +15,14 @@ export interface CapabilityDocument {
   permissions?: unknown;
 }
 
+export const BOOTSTRAP_OPENER_URLS = [
+  "https://cordis.run",
+  "https://cordis.run/*",
+  "https://dsharness.app",
+  "https://dsharness.app/*",
+  "https://github.com/web-casa/DeepSeek-Harness-Desktop/issues/new*",
+] as const;
+
 function sortedUnique(values: Iterable<string>): string[] {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right, "en"));
 }
@@ -225,6 +233,47 @@ export function bootstrapCommands(source: string): string[] {
   return sortedUnique(commands);
 }
 
+export function bootstrapOpenerProblems(source: string): string[] {
+  const parsed = parseCapability(source, "bootstrap capability");
+  if (!Array.isArray(parsed.permissions)) {
+    return ["bootstrap capability permissions must be an array"];
+  }
+  if (parsed.permissions.includes("opener:allow-open-url")) {
+    return ["bootstrap opener permission must use an explicit URL scope"];
+  }
+  const openerPermissions = parsed.permissions.filter(
+    (permission): permission is { identifier: string; allow?: unknown } =>
+      typeof permission === "object" &&
+      permission !== null &&
+      !Array.isArray(permission) &&
+      (permission as { identifier?: unknown }).identifier === "opener:allow-open-url",
+  );
+  if (openerPermissions.length !== 1) {
+    return ["bootstrap capability must contain exactly one scoped opener:allow-open-url permission"];
+  }
+  const allow = openerPermissions[0].allow;
+  if (!Array.isArray(allow)) {
+    return ["bootstrap opener permission allow scope must be an array"];
+  }
+  const urls: string[] = [];
+  for (const entry of allow) {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      Array.isArray(entry) ||
+      typeof (entry as { url?: unknown }).url !== "string"
+    ) {
+      return ["bootstrap opener permission entries must contain URL strings"];
+    }
+    urls.push((entry as { url: string }).url);
+  }
+  return describeDifference(
+    sortedUnique(BOOTSTRAP_OPENER_URLS),
+    sortedUnique(urls),
+    "bootstrap opener URL scope",
+  );
+}
+
 function describeDifference(expected: string[], actual: string[], label: string): string[] {
   const expectedSet = new Set(expected);
   const actualSet = new Set(actual);
@@ -263,6 +312,7 @@ export function commandContractProblems(sources: CommandContractSources): string
   const problems = [
     ...describeDifference(handler, manifest, "build.rs AppManifest"),
     ...describeDifference(handler, bootstrap, "bootstrap capability"),
+    ...bootstrapOpenerProblems(sources.bootstrap),
   ];
   try {
     problems.push(...harnessProblems(sources.harness));

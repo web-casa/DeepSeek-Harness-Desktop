@@ -49,8 +49,9 @@ DSH CLI 的启动契约随版本演进，社区同类项目已实证踩坑（如
 1. bump `runtime/package.json` pin + `npm install` 刷新 lock +
    manifest.harnessVersion；
 2. 对照新版 `dsh --help` / `dsh web --help` 复核契约并记录变化（当前钉
-   0.1.0-rc.7 的基线：`web` = `--profile web` 别名；flag 仅
-   `--host`/`--port`/`--trusted-host`；**无** `--expose-internals`/
+   0.1.0-rc.8 的基线：`web` = `--profile web` 别名；flag 仅
+   `--host`/`--port`/`--trusted-host`/`--no-open`（Desktop 启动必须显式
+   `--no-open`，避免上游再拉起系统浏览器）；**无** `--expose-internals`/
    `--use-system-ca`；就绪行 MARKER 为 `dsh web: http://127.0.0.1:`；
    `DSH_TELEMETRY_DISABLED` 任意非空即关闭 session 遥测）；
 3. 若契约变化，同步三端：sidecar `extract_local_url` MARKER、
@@ -67,7 +68,7 @@ DSH CLI 的启动契约随版本演进，社区同类项目已实证踩坑（如
   `scripts/verify-plugins.ts` 断言与 `verify-bundle.ts` 必含文件；
 - 上游若新增 `.dshpreset` 归档导入/导出入口（或变更 `.agent-presets`
   根语义），必须复核壳层预设边界（`src-tauri/src/preset.rs`）——当前
-  rc.7 无归档入口，壳层导入/导出是预设根的唯一写入路径，壳层健康复核
+  rc.8 无归档入口，壳层导入/导出是预设根的唯一写入路径，壳层健康复核
   （validate_user_presets）覆盖该根的全部来源。
   已知语义差异（有意为之，随上游演进复核）：壳层 Broken 只探测
   agent.cordis.yml 缺失/不可读/为空（不重实现 YAML 解析，可读但畸形仍由

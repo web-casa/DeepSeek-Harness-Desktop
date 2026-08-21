@@ -103,7 +103,7 @@
   let pluginLogs = $state<string[]>([]);
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
-  let pluginOperation = $state<"generic" | "market-install" | "sideload" | null>(null);
+  let pluginRestartNotice = $state<string | null>(null);
   let pluginInstallRequest = $state<PluginInstallRequest | null>(null);
   let remotePresetRequest = $state<RemotePresetRequest | null>(null);
   let remotePresetPreview = $state<RemotePresetPreview | null>(null);
@@ -161,6 +161,9 @@
     if (p.versions) versions = p.versions;
     if (p.status === "starting" || p.status === "running") {
       restartInFlight = false;
+    }
+    if (p.status === "starting" && pluginRestartNotice) {
+      pluginRestartNotice = null;
     }
   }
 
@@ -330,13 +333,11 @@
     if (!preview || pluginBusy) return;
     marketConfirm = null;
     pluginBusy = true;
-    pluginOperation = "market-install";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
     void marketInstallPlugin(preview.slug, preview.entryRevision).catch((e) => {
       pluginBusy = false;
-      pluginOperation = null;
       pluginError = "市场安装失败：" + e;
       pluginLogsOpen = true;
       void refreshPlugins();
@@ -358,6 +359,7 @@
     pluginError = null;
     try {
       await activateMarketPlugin(plugin.slug, plugin.entryRevision);
+      pluginRestartNotice = `插件 ${plugin.name} 已激活，需要重启 Harness 后才能生效。`;
       showToast("已激活 " + plugin.name + "；请重启 Harness 后加载");
       await refreshPlugins();
     } catch (e) {
@@ -380,7 +382,6 @@
     const path = sideloadPath;
     sideloadPath = null;
     pluginBusy = true;
-    pluginOperation = "sideload";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
@@ -389,7 +390,6 @@
       await sideloadPlugin(path);
     } catch (e) {
       pluginBusy = false;
-      pluginOperation = null;
       pluginError = `离线安装失败：${e}`;
       pluginLogsOpen = true;
       void refreshPlugins();
@@ -711,7 +711,6 @@
   function startPluginOp(name: string, op: "install" | "uninstall") {
     if (pluginBusy || recoveryOverview?.transaction || !name.trim()) return;
     pluginBusy = true;
-    pluginOperation = "generic";
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
@@ -719,7 +718,6 @@
     const call = op === "install" ? installPlugin(name.trim()) : uninstallPlugin(name.trim());
     void call.catch((e) => {
       pluginBusy = false;
-      pluginOperation = null;
       pluginError = `${op === "install" ? "安装" : "卸载"}失败：${e}`;
       pluginLogsOpen = true;
       // Resync busy: "an operation is already running" means another
@@ -854,17 +852,32 @@
     let unlistenFn: (() => void) | null = null;
     onPluginDone((p) => {
       pluginBusy = false;
-      const completedOperation = pluginOperation;
-      pluginOperation = null;
+      const tailLines = p.tail
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      // Early setup/spawn errors have no streamed plugin-log event. Preserve
+      // plugin-done.tail so a failure can never render as "暂无日志".
+      if (pluginLogs.length === 0 && tailLines.length > 0) {
+        pluginLogs = tailLines.slice(-300);
+      }
       if (p.exit === 0) {
         pluginName = "";
-        showToast(
-          completedOperation === "market-install"
-            ? "插件已校验完成，正在等待你的显式激活"
-            : "插件操作完成",
-        );
+        if (p.op === "market-install") {
+          showToast("插件已校验完成，正在等待你的显式激活");
+        } else if (p.op === "remove") {
+          pluginRestartNotice = "插件已卸载，需要重启 Harness 才能从当前进程中完全移除。";
+          showToast("插件已卸载；请重启 Harness 完成移除");
+        } else if (p.op === "add") {
+          pluginRestartNotice = "插件已安装，需要重启 Harness 后才能生效。";
+          showToast("插件已安装；请重启 Harness 后使用");
+        } else {
+          pluginError = "插件操作已完成，但返回了无法识别的操作类型；请刷新状态后重试。";
+          pluginLogsOpen = true;
+        }
       } else {
-        pluginError = `插件操作失败（exit ${p.exit ?? "被终止"}），详情见安装日志`;
+        const detail = tailLines.at(-1);
+        pluginError = `插件操作失败（exit ${p.exit ?? "被终止"}）${detail ? `：${detail}` : "，详情见安装日志"}`;
         pluginLogsOpen = true;
       }
       void refreshPlugins();
@@ -1342,6 +1355,14 @@
     {/if}
     {#if pluginError}
       <div class="notice-box">{pluginError}</div>
+    {/if}
+    {#if pluginRestartNotice}
+      <div class="notice-box">
+        {pluginRestartNotice}
+        <button class="primary" onclick={doRestart} disabled={busy || status !== "running"}>
+          立即重启 Harness
+        </button>
+      </div>
     {/if}
     {#if plugins.length > 0}
       {#each plugins as p (p.name)}

@@ -1042,7 +1042,10 @@ fn run_plugin_spec(
     let shim_dir = match crate::plugins::ensure_pnpm_shim(&paths.dsh_home, &paths.node, &pnpm_cjs) {
         Ok(d) => d,
         Err(e) => {
-            let _ = app.emit("plugin-done", serde_json::json!({ "exit": 1, "tail": e }));
+            let _ = app.emit(
+                "plugin-done",
+                serde_json::json!({ "exit": 1, "tail": e, "op": op }),
+            );
             plugins.busy.store(false, Ordering::SeqCst);
             return;
         }
@@ -1055,7 +1058,7 @@ fn run_plugin_spec(
         Err(e) => {
             let _ = app.emit(
                 "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": format!("cannot build PATH: {e}") }),
+                serde_json::json!({ "exit": 1, "tail": format!("cannot build PATH: {e}"), "op": op }),
             );
             plugins.busy.store(false, Ordering::SeqCst);
             return;
@@ -1094,7 +1097,7 @@ fn run_plugin_spec(
         Err(e) => {
             let _ = app.emit(
                 "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": format!("spawn failed: {e}") }),
+                serde_json::json!({ "exit": 1, "tail": format!("spawn failed: {e}"), "op": op }),
             );
             plugins.busy.store(false, Ordering::SeqCst);
             return;
@@ -1254,7 +1257,7 @@ fn run_plugin_spec(
     plugins.busy.store(false, Ordering::SeqCst);
     let _ = app.emit(
         "plugin-done",
-        serde_json::json!({ "exit": exit, "tail": tail.join("\n") }),
+        serde_json::json!({ "exit": exit, "tail": tail.join("\n"), "op": op }),
     );
 }
 
@@ -1276,7 +1279,7 @@ fn run_market_pnpm(
         Err(error) => {
             let _ = app.emit(
                 "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": error }),
+                serde_json::json!({ "exit": 1, "tail": error, "op": "market-install" }),
             );
             plugins.busy.store(false, Ordering::SeqCst);
             return;
@@ -1312,7 +1315,7 @@ fn run_market_pnpm(
         Err(error) => {
             let _ = app.emit(
                 "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": format!("market pnpm spawn failed: {error}") }),
+                serde_json::json!({ "exit": 1, "tail": format!("market pnpm spawn failed: {error}"), "op": "market-install" }),
             );
             plugins.busy.store(false, Ordering::SeqCst);
             return;
@@ -1460,7 +1463,7 @@ fn run_market_pnpm(
     plugins.busy.store(false, Ordering::SeqCst);
     let _ = app.emit(
         "plugin-done",
-        serde_json::json!({ "exit": exit, "tail": tail.join("\n") }),
+        serde_json::json!({ "exit": exit, "tail": tail.join("\n"), "op": "market-install" }),
     );
 }
 

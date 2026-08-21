@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! → {"id":1,"command":"start","node":"…/node","script":"…/lib/bin.js",
-//!    "args":["web","--host","127.0.0.1","--port","0"],
+//!    "args":["web","--no-open","--host","127.0.0.1","--port","0"],
 //!    "cwd":"…/harness","env":{"DSH_HOME":"…"}}
 //! ← {"type":"ack","id":1,"ok":true}
 //! ← {"type":"starting"}
