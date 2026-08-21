@@ -920,7 +920,7 @@ fn parse_dsh_requirement(raw: &str) -> Result<VersionReq, String> {
 /// and the mutation command all agree that an unreviewed package is not
 /// installable. The command repeats this check as defense in depth because
 /// IPC callers must never rely on UI-derived state.
-fn distribution_allows_package(package_name: &str, store_build: bool) -> bool {
+pub(crate) fn distribution_allows_package(package_name: &str, store_build: bool) -> bool {
     !store_build || crate::curated_plugins::is_allowed(package_name)
 }
 

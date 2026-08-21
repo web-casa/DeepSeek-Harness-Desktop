@@ -6,8 +6,7 @@
 
 use crate::diagnostics::redact;
 use crate::harness::{
-    child_alive, open_harness_window, publish_snapshot, request_restart, send_raw,
-    snapshot_payload, Runtime, CMD_ID_SHUTDOWN,
+    open_harness_window, request_restart, request_shutdown, snapshot_payload, Runtime, Status,
 };
 use dsh_sidecar::platform::{PlatformChild, SpawnSpec};
 use serde_json::Value;
@@ -16,6 +15,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const MAX_PLUGIN_LOG_LINE_BYTES: usize = 8 * 1024;
+const PLUGIN_LOG_CHANNEL_CAPACITY: usize = 256;
+const PLUGIN_EXIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const PLUGIN_CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[tauri::command]
 pub fn get_status(runtime: State<'_, Runtime>) -> Value {
@@ -80,39 +82,8 @@ pub fn restart(_runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub fn shutdown(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String> {
-    if !child_alive(&runtime) {
-        // Keep the real status (Stopped/Idle stays what it is) — only the
-        // message explains why nothing happened.
-        let error = "sidecar 未运行，无需停止".to_string();
-        runtime
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .last_error = Some(error.clone());
-        publish_snapshot(&app, &runtime.state);
-        return Err(error);
-    }
-
-    if let Err(error) = send_raw(
-        &runtime,
-        &serde_json::json!({"id": CMD_ID_SHUTDOWN, "command": "shutdown"}),
-    ) {
-        {
-            // Scope the lock: publish_snapshot takes the same mutex and a
-            // held guard here would deadlock the command.
-            let mut s = runtime
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            s.last_error = Some(error.clone());
-            s.status = crate::harness::Status::Crashed;
-        }
-        publish_snapshot(&app, &runtime.state);
-        return Err(error);
-    }
-
-    Ok(())
+pub fn shutdown(app: AppHandle) -> Result<(), String> {
+    request_shutdown(&app)
 }
 
 #[tauri::command]
@@ -327,9 +298,7 @@ pub async fn market_install_plugin(
     market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
 ) -> Result<(), String> {
     let plugins = plugins.inner().clone();
-    if plugins.busy.swap(true, Ordering::SeqCst) {
-        return Err("an operation is already running".to_string());
-    }
+    begin_plugin_mutation(&plugins, &runtime)?;
     let dsh_version = runtime
         .state
         .lock()
@@ -340,38 +309,63 @@ pub async fn market_install_plugin(
     let candidate = match market.prepare_install(&slug, &dsh_version).await {
         Ok(candidate) => candidate,
         Err(error) => {
-            plugins.busy.store(false, Ordering::SeqCst);
+            plugins.finish();
             return Err(error);
         }
     };
-    if crate::build_info::STORE_BUILD
-        && !crate::curated_plugins::is_allowed(&candidate.package_name)
-    {
-        plugins.busy.store(false, Ordering::SeqCst);
+    if plugins.cancellation_requested() {
+        plugins.finish();
+        return Err("plugin installation was cancelled before profile mutation".to_string());
+    }
+    if !crate::market::distribution_allows_package(
+        &candidate.package_name,
+        crate::build_info::STORE_BUILD,
+    ) {
+        plugins.finish();
         return Err("仅允许安装 cordis.run 已审核插件".to_string());
     }
     if candidate.entry_revision != entry_revision {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
         return Err(
             "market entry changed; review the latest entryRevision before installing".to_string(),
         );
     }
     let Some(paths) = runtime.paths() else {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
         return Err("runtime paths are not resolved yet".to_string());
     };
     if let Err(error) = ensure_no_plugin_recovery(&runtime) {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
+        return Err(error);
+    }
+    if let Err(error) = crate::plugins::ensure_market_install_config(&paths.dsh_home) {
+        plugins.finish();
         return Err(error);
     }
     if let Err(error) = crate::plugins::pre_disable_market_plugin(&paths.dsh_home, &candidate) {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
         return Err(error);
     }
-    std::thread::spawn(move || {
-        run_market_pnpm(app, paths, plugins, candidate);
-    });
-    Ok(())
+    if plugins.cancellation_requested() {
+        plugins.finish();
+        return Err(
+            "plugin installation was cancelled after safe pre-disable; the plugin remains disabled"
+                .to_string(),
+        );
+    }
+    let worker_plugins = plugins.clone();
+    std::thread::Builder::new()
+        .name("market-plugin-install".to_string())
+        .spawn(move || {
+            run_market_pnpm(app, paths, worker_plugins, candidate);
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            plugins.finish();
+            format!(
+                "cannot start market plugin worker after safe pre-disable; the plugin remains disabled: {error}"
+            )
+        })
 }
 
 /// Activate a previously verified pending market package. It refetches and
@@ -386,9 +380,7 @@ pub async fn activate_market_plugin(
     market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
 ) -> Result<(), String> {
     let plugins = plugins.inner().clone();
-    if plugins.busy.swap(true, Ordering::SeqCst) {
-        return Err("an operation is already running".to_string());
-    }
+    begin_plugin_mutation(&plugins, &runtime)?;
     let dsh_version = runtime
         .state
         .lock()
@@ -399,32 +391,37 @@ pub async fn activate_market_plugin(
     let candidate = match market.prepare_install(&slug, &dsh_version).await {
         Ok(candidate) => candidate,
         Err(error) => {
-            plugins.busy.store(false, Ordering::SeqCst);
+            plugins.finish();
             return Err(error);
         }
     };
-    if crate::build_info::STORE_BUILD
-        && !crate::curated_plugins::is_allowed(&candidate.package_name)
-    {
-        plugins.busy.store(false, Ordering::SeqCst);
+    if plugins.cancellation_requested() {
+        plugins.finish();
+        return Err("plugin activation was cancelled before profile mutation".to_string());
+    }
+    if !crate::market::distribution_allows_package(
+        &candidate.package_name,
+        crate::build_info::STORE_BUILD,
+    ) {
+        plugins.finish();
         return Err("仅允许激活 cordis.run 已审核插件".to_string());
     }
     if candidate.entry_revision != entry_revision {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
         return Err(
             "market entry changed; install and review the latest revision before activation"
                 .to_string(),
         );
     }
     if let Err(error) = ensure_no_plugin_recovery(&runtime) {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
         return Err(error);
     }
     let result = runtime
         .paths()
         .ok_or_else(|| "runtime paths are not resolved yet".to_string())
         .and_then(|paths| crate::plugins::activate_market_plugin(&paths.dsh_home, &candidate));
-    plugins.busy.store(false, Ordering::SeqCst);
+    plugins.finish();
     result
 }
 
@@ -457,9 +454,7 @@ pub fn begin_plugin_recovery(
     plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
 ) -> Result<Value, String> {
     let plugins = plugins.inner().clone();
-    if plugins.busy.swap(true, Ordering::SeqCst) {
-        return Err("an operation is already running".to_string());
-    }
+    begin_plugin_mutation(&plugins, &runtime)?;
     let result = (|| {
         let paths = runtime
             .paths()
@@ -481,7 +476,7 @@ pub fn begin_plugin_recovery(
         serde_json::to_value(transaction)
             .map_err(|error| format!("cannot serialize plugin recovery transaction: {error}"))
     })();
-    plugins.busy.store(false, Ordering::SeqCst);
+    plugins.finish();
     let transaction = result?;
     request_restart(&app).map_err(|error| {
         format!("plugin was safely disabled, but Harness restart failed: {error}")
@@ -498,24 +493,22 @@ pub async fn rollback_plugin_recovery(
     market: State<'_, std::sync::Arc<crate::market::MarketClient>>,
 ) -> Result<(), String> {
     let plugins = plugins.inner().clone();
-    if plugins.busy.swap(true, Ordering::SeqCst) {
-        return Err("an operation is already running".to_string());
-    }
+    begin_plugin_mutation(&plugins, &runtime)?;
     let paths = match runtime.paths() {
         Some(paths) => paths,
         None => {
-            plugins.busy.store(false, Ordering::SeqCst);
+            plugins.finish();
             return Err("runtime paths are not resolved yet".to_string());
         }
     };
     let receipt = match crate::recovery::rollback_receipt(&paths.dsh_home, &transaction_id) {
         Ok(receipt) => receipt,
         Err(error) => {
-            plugins.busy.store(false, Ordering::SeqCst);
+            plugins.finish();
             return Err(error);
         }
     };
-    if let Some(receipt) = receipt {
+    let approved_market_candidate = if let Some(receipt) = receipt {
         let dsh_version = runtime
             .state
             .lock()
@@ -526,44 +519,79 @@ pub async fn rollback_plugin_recovery(
         let candidate = match market.prepare_install(&receipt.slug, &dsh_version).await {
             Ok(candidate) => candidate,
             Err(error) => {
-                plugins.busy.store(false, Ordering::SeqCst);
+                plugins.finish();
                 return Err(format!(
                     "market-managed plugin cannot be re-enabled without live approval: {error}"
                 ));
             }
         };
+        if plugins.cancellation_requested() {
+            plugins.finish();
+            return Err("plugin recovery rollback was cancelled before re-enable".to_string());
+        }
         if !receipt.matches(&candidate) {
-            plugins.busy.store(false, Ordering::SeqCst);
+            plugins.finish();
             return Err(
                 "market entry changed; recovery rollback cannot re-enable the recorded package"
+                    .to_string(),
+            );
+        }
+        if !crate::market::distribution_allows_package(
+            &candidate.package_name,
+            crate::build_info::STORE_BUILD,
+        ) {
+            plugins.finish();
+            return Err(
+                "Microsoft Store recovery cannot re-enable a plugin removed from the reviewed snapshot"
                     .to_string(),
             );
         }
         if let Err(error) =
             crate::plugins::verify_market_installation(&paths.dsh_home, &candidate, true)
         {
-            plugins.busy.store(false, Ordering::SeqCst);
+            plugins.finish();
             return Err(format!(
                 "market-managed plugin failed local integrity revalidation: {error}"
             ));
         }
+        Some(candidate)
     } else if crate::build_info::STORE_BUILD {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
         return Err(
             "Microsoft Store recovery cannot re-enable a plugin without a live market receipt"
                 .to_string(),
         );
+    } else {
+        None
+    };
+    if plugins.cancellation_requested() {
+        plugins.finish();
+        return Err("plugin recovery rollback was cancelled before profile mutation".to_string());
+    }
+    if let Some(candidate) = &approved_market_candidate {
+        if let Err(error) = crate::plugins::record_active_market_receipt(&paths.dsh_home, candidate)
+        {
+            plugins.finish();
+            return Err(format!(
+                "cannot preserve reviewed market provenance before recovery rollback: {error}"
+            ));
+        }
     }
     if let Err(error) = crate::recovery::rollback(&paths.dsh_home, &transaction_id) {
-        plugins.busy.store(false, Ordering::SeqCst);
+        if let Some(candidate) = &approved_market_candidate {
+            let _ = crate::plugins::remove_active_market_receipt(
+                &paths.dsh_home,
+                &candidate.package_name,
+            );
+        }
+        plugins.finish();
         return Err(error);
     }
     if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
         observability.record("plugin_recovery_rolled_back", serde_json::json!({}));
     }
-    let restart_result = request_restart(&app);
-    plugins.busy.store(false, Ordering::SeqCst);
-    restart_result
+    plugins.finish();
+    request_restart(&app)
 }
 
 #[tauri::command]
@@ -574,14 +602,12 @@ pub fn finalize_plugin_recovery(
     plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
 ) -> Result<(), String> {
     let plugins = plugins.inner().clone();
-    if plugins.busy.swap(true, Ordering::SeqCst) {
-        return Err("an operation is already running".to_string());
-    }
+    begin_plugin_mutation(&plugins, &runtime)?;
     let result = runtime
         .paths()
         .ok_or_else(|| "runtime paths are not resolved yet".to_string())
         .and_then(|paths| crate::recovery::finalize(&paths.dsh_home, &transaction_id));
-    plugins.busy.store(false, Ordering::SeqCst);
+    plugins.finish();
     result?;
     if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
         observability.record("plugin_recovery_finalized", serde_json::json!({}));
@@ -602,12 +628,39 @@ fn ensure_no_plugin_recovery(runtime: &Runtime) -> Result<(), String> {
     Ok(())
 }
 
+fn plugin_mutation_status_allowed(status: Status) -> bool {
+    !matches!(status, Status::Idle | Status::Starting | Status::Stopping)
+}
+
+/// Claim the plugin single-flight gate, then verify the Harness is not inside
+/// a start/stop boundary. User and automatic restarts use the same gate, so
+/// once this check succeeds no new restart can race pnpm/profile mutation.
+fn begin_plugin_mutation(
+    plugins: &crate::plugins::PluginRunner,
+    runtime: &Runtime,
+) -> Result<(), String> {
+    if !plugins.try_begin() {
+        return Err("an operation is already running".to_string());
+    }
+    let status = runtime
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .status;
+    if !plugin_mutation_status_allowed(status) {
+        plugins.finish();
+        return Err("Harness 尚未就绪或正在启动/停止；状态稳定后才能修改插件".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        is_zip_content_type, read_installed_plugins, redact, sweep_sideload_dir,
-        sweep_sideloads_root,
+        is_zip_content_type, manual_plugin_install_allowed, market_pnpm_args, parse_pnpm_major,
+        plugin_mutation_status_allowed, plugin_path_env, redact, remove_pnpm_args,
+        sweep_sideload_dir, sweep_sideloads_root, sweep_stale_sideloads_paths,
     };
 
     #[test]
@@ -667,14 +720,6 @@ mod tests {
         assert!(keep.is_file());
         assert!(!stale.exists());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("dsd-plugin-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     #[test]
@@ -748,44 +793,205 @@ mod tests {
     }
 
     #[test]
-    fn plugin_list_reads_deps_and_versions_sorted() {
-        let dir = temp_dir("list");
-        std::fs::write(
-            dir.join("package.json"),
-            r#"{"dependencies":{"zz-top":"1.0.0","is-odd":"^3.0.1"}}"#,
-        )
+    fn store_builds_reject_the_generic_install_path() {
+        assert!(manual_plugin_install_allowed(false));
+        assert!(!manual_plugin_install_allowed(true));
+    }
+
+    #[test]
+    fn plugin_mutations_wait_for_harness_transition_boundaries() {
+        assert!(!plugin_mutation_status_allowed(
+            crate::harness::Status::Idle
+        ));
+        assert!(!plugin_mutation_status_allowed(
+            crate::harness::Status::Starting
+        ));
+        assert!(!plugin_mutation_status_allowed(
+            crate::harness::Status::Stopping
+        ));
+        assert!(plugin_mutation_status_allowed(
+            crate::harness::Status::Running
+        ));
+        assert!(plugin_mutation_status_allowed(
+            crate::harness::Status::Crashed
+        ));
+        assert!(plugin_mutation_status_allowed(
+            crate::harness::Status::Stopped
+        ));
+    }
+
+    #[test]
+    fn market_pnpm_isolated_install_contract_is_complete() {
+        let candidate = crate::market::MarketInstallCandidate {
+            slug: "fixture-plugin".to_string(),
+            entry_revision: "revision-1".to_string(),
+            package_name: "fixture-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            integrity: "sha512-fixture".to_string(),
+            registry: "https://registry.npmjs.org".to_string(),
+            tarball: "https://registry.npmjs.org/fixture-plugin/-/fixture-plugin-1.0.0.tgz"
+                .to_string(),
+        };
+        let store = std::path::Path::new("private-market-store");
+        let config = std::path::Path::new("private-market-config");
+        let args = market_pnpm_args(&candidate, Some(store), config);
+
+        assert_eq!(args[0], "add");
+        assert_eq!(args[1], candidate.tarball);
+        for required in [
+            "--ignore-scripts",
+            "--ignore-workspace",
+            "--global=false",
+            "--node-linker=hoisted",
+            "--config.auto-install-peers=false",
+            "--package-import-method=copy",
+            "--virtual-store-dir=node_modules/.pnpm",
+            "--config.enable-global-virtual-store=false",
+            "--verify-store-integrity",
+            "--config.strict-store-pkg-content-check=true",
+            "--config.ignore-pnpmfile=true",
+            "--save-exact",
+            "--reporter=append-only",
+            "--registry=https://registry.npmjs.org",
+        ] {
+            assert!(args.iter().any(|arg| arg == required), "missing {required}");
+        }
+        for required in [
+            format!("--store-dir={}", store.display()),
+            format!("--config.config-dir={}", config.display()),
+            format!("--config.userconfig={}", config.join(".npmrc").display()),
+            format!("--config.globalconfig={}", config.join(".npmrc").display()),
+        ] {
+            assert!(args.contains(&required), "missing {required}");
+        }
+    }
+
+    #[test]
+    fn direct_uninstall_never_uses_upstream_global_reconciliation() {
+        let store = std::path::Path::new("existing-profile-store");
+        let config = std::path::Path::new("private-plugin-config");
+        let args = remove_pnpm_args("fixture-plugin", Some(store), config);
+        assert_eq!(&args[..2], ["remove", "fixture-plugin"]);
+        assert!(args.iter().any(|arg| arg == "--config.ignore-scripts=true"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--config.ignore-pnpmfile=true"));
+        assert!(args.iter().any(|arg| arg == "--ignore-workspace"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--store-dir=existing-profile-store"));
+        assert!(!args.iter().any(|arg| arg == "plugin"));
+    }
+
+    #[test]
+    fn bundled_pnpm_major_is_strictly_parsed() {
+        assert_eq!(parse_pnpm_major(br#"{"version":"11.21.0"}"#).unwrap(), 11);
+        assert!(parse_pnpm_major(br#"{"version":"latest"}"#).is_err());
+        assert!(parse_pnpm_major(br#"{"version":"11.beta"}"#).is_err());
+        assert!(parse_pnpm_major(br#"{"name":"pnpm"}"#).is_err());
+    }
+
+    #[test]
+    fn sideload_sweep_fails_closed_when_the_profile_is_unreadable() {
+        let root = std::env::temp_dir().join(format!(
+            "dsh-sideload-unreadable-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let profile = root.join("profiles/web");
+        let sideload = root.join(".desktop-tools/sideload");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&sideload).unwrap();
+        std::fs::write(profile.join("package.json"), "not json").unwrap();
+        let retained = sideload.join("retained.tgz");
+        std::fs::write(&retained, b"archive").unwrap();
+        let paths = crate::paths::RuntimePaths {
+            sidecar: root.join("sidecar"),
+            node: root.join("node"),
+            harness_dir: root.join("harness"),
+            dsh_home: root.clone(),
+        };
+
+        sweep_stale_sideloads_paths(&paths);
+        assert!(retained.is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plugin_path_prepends_shim_to_a_multi_segment_parent_path() {
+        let parent = std::env::join_paths([
+            std::path::Path::new("parent-one"),
+            std::path::Path::new("parent-two"),
+        ])
         .unwrap();
-        std::fs::create_dir_all(dir.join("node_modules").join("is-odd")).unwrap();
-        std::fs::write(
-            dir.join("node_modules").join("is-odd").join("package.json"),
-            r#"{"name":"is-odd","version":"3.0.1"}"#,
-        )
-        .unwrap();
-        let entries = read_installed_plugins(&dir);
+        let actual = plugin_path_env(std::path::Path::new("desktop-shim"), Some(&parent)).unwrap();
         assert_eq!(
-            entries,
+            std::env::split_paths(&actual).collect::<Vec<_>>(),
             vec![
-                ("is-odd".to_string(), "3.0.1".to_string()),
-                // zz-top is a dependency but its tree entry is missing:
-                // still listed, with an unresolved version marker.
-                ("zz-top".to_string(), "—".to_string()),
+                std::path::PathBuf::from("desktop-shim"),
+                std::path::PathBuf::from("parent-one"),
+                std::path::PathBuf::from("parent-two"),
             ]
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
-    fn plugin_list_tolerates_missing_or_malformed_profile() {
-        let dir = temp_dir("empty");
-        assert_eq!(read_installed_plugins(&dir), Vec::<(String, String)>::new());
-        std::fs::write(dir.join("package.json"), "not json").unwrap();
-        assert_eq!(read_installed_plugins(&dir), Vec::<(String, String)>::new());
-        std::fs::write(
-            dir.join("package.json"),
-            r#"{"dependencies":"not-an-object"}"#,
+    fn plugin_path_preserves_empty_parent_segments_verbatim() {
+        let inherited = std::ffi::OsStr::new("parent-one::parent-two:");
+        let actual =
+            plugin_path_env(std::path::Path::new("desktop-shim"), Some(inherited)).unwrap();
+        assert_eq!(actual, "desktop-shim:parent-one::parent-two:");
+    }
+
+    #[test]
+    fn plugin_path_without_parent_keeps_the_owned_shim() {
+        let actual = plugin_path_env(std::path::Path::new("desktop-shim"), None).unwrap();
+        assert_eq!(
+            std::env::split_paths(&actual).collect::<Vec<_>>(),
+            vec![std::path::PathBuf::from("desktop-shim")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closed_log_stream_does_not_make_a_running_plugin_uncancellable() {
+        use dsh_sidecar::platform::{PlatformChild, SpawnSpec};
+        use std::sync::Arc;
+
+        let runner = Arc::new(crate::plugins::PluginRunner::new());
+        assert!(runner.try_begin());
+        let child = PlatformChild::spawn(
+            &SpawnSpec {
+                node: "/bin/sh".to_string(),
+                script: "-c".to_string(),
+                args: vec!["exec 1>&- 2>&-; sleep 30".to_string()],
+                cwd: std::env::temp_dir().to_string_lossy().to_string(),
+                env: Vec::new(),
+            },
+            &std::env::vars_os().collect::<Vec<_>>(),
         )
         .unwrap();
-        // Malformed dependency payloads are skipped safely.
-        assert_eq!(read_installed_plugins(&dir), Vec::<(String, String)>::new());
+        *runner.child.lock().unwrap() = Some(child);
+        let (_tx, rx) = std::sync::mpsc::sync_channel(1);
+        drop(_tx);
+
+        let supervisor_runner = runner.clone();
+        let supervisor = std::thread::spawn(move || {
+            super::supervise_plugin_output(&supervisor_runner, rx, |_| {})
+        });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            runner.child.lock().unwrap().is_some(),
+            "pipe closure must not discard the live process handle"
+        );
+        let (accepted, child) = runner.request_cancel();
+        assert!(accepted);
+        let child = child.expect("cancel must recover the registered process tree");
+        child.force();
+        drop(child);
+        runner.child_termination_finished();
+        assert_eq!(supervisor.join().unwrap(), None);
+        runner.finish();
     }
 }
 
@@ -968,45 +1174,11 @@ pub async fn export_preset(
 }
 
 // ---------------------------------------------------------------------------
-// Plugin installation (bundled pnpm + official `dsh plugin` CLI). The whole
-// node → dsh → pnpm → node-gyp tree runs under dsh-sidecar's PlatformChild
-// (process group / Job Object), so cancel and app exit clean it fully.
+// Plugin installation (bundled pnpm + official `dsh plugin` add CLI) and
+// precise direct-pnpm removal. The whole node → dsh/pnpm → node-gyp tree runs
+// under dsh-sidecar's PlatformChild (process group / Job Object), so cancel
+// and app exit clean it fully.
 // ---------------------------------------------------------------------------
-
-/// Pure profile-dir parse (unit-tested): user-installed plugin names from
-/// package.json dependencies, with resolved versions read from
-/// node_modules/<pkg>/package.json ("—" when the tree entry is missing).
-/// In-box bundles are not dependencies here, so they never appear — the UI
-/// can therefore offer uninstall on every listed row (plan §P1.4).
-#[cfg(test)]
-fn read_installed_plugins(profile_dir: &std::path::Path) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    if let Ok(text) = std::fs::read_to_string(profile_dir.join("package.json")) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(deps) = json.get("dependencies").and_then(|d| d.as_object()) {
-                for (name, _spec) in deps {
-                    let version = std::fs::read_to_string(
-                        profile_dir
-                            .join("node_modules")
-                            .join(name)
-                            .join("package.json"),
-                    )
-                    .ok()
-                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                    .and_then(|p| {
-                        p.get("version")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| "—".to_string());
-                    out.push((name.clone(), version));
-                }
-            }
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
 
 #[tauri::command]
 pub fn list_plugins(
@@ -1022,51 +1194,394 @@ pub fn list_plugins(
         // The backend busy flag survives webview reloads; the UI must be
         // able to resync instead of showing a stale idle state while an op
         // is still running (single-flight is app-wide).
-        "busy": plugins.busy.load(Ordering::SeqCst),
+        "busy": plugins.is_busy(),
     })
 }
 
-fn run_plugin_spec(
-    app: AppHandle,
-    paths: crate::paths::RuntimePaths,
-    plugins: Arc<crate::plugins::PluginRunner>,
-    plugin_spec: String,
+/// Prepend the Desktop-owned pnpm shim without parsing and rebuilding the
+/// inherited PATH. `join_paths` validates only the app-owned segment; feeding
+/// the serialized parent value to it as one segment caused the reported
+/// separator error and rebuilding can rewrite Windows quoting/empty segments.
+fn plugin_path_env(
+    shim_dir: &std::path::Path,
+    inherited_path: Option<&std::ffi::OsStr>,
+) -> Result<std::ffi::OsString, std::env::JoinPathsError> {
+    let mut path = std::env::join_paths([shim_dir.as_os_str()])?;
+    if let Some(inherited_path) = inherited_path.filter(|path| !path.is_empty()) {
+        #[cfg(windows)]
+        path.push(";");
+        #[cfg(not(windows))]
+        path.push(":");
+        path.push(inherited_path);
+    }
+    Ok(path)
+}
+
+/// Upstream invokes pnpm through `shell: true` on Windows. Do not let an
+/// inherited, attacker-controlled ComSpec redirect that reviewed operation to
+/// an arbitrary executable: resolve cmd.exe from the OS system directory and
+/// pair it with the standard executable-extension search contract.
+#[cfg(windows)]
+fn trusted_windows_comspec() -> Result<String, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    // Windows' documented extended path limit is 32,767 UTF-16 code units;
+    // the system directory is normally far shorter, but a fixed upper bound
+    // avoids trusting an inherited environment variable or allocating from an
+    // untrusted API length.
+    let mut buffer = vec![0_u16; 32_768];
+    // SAFETY: buffer is writable for the advertised length and remains alive
+    // for the duration of the synchronous Win32 call.
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    if length == 0 {
+        return Err(format!(
+            "cannot resolve the trusted Windows system directory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if length >= buffer.len() {
+        return Err(
+            "trusted Windows system directory exceeds the supported path limit".to_string(),
+        );
+    }
+    let mut path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length]));
+    path.push("cmd.exe");
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| format!("cannot inspect trusted Windows command shell: {error}"))?;
+    if crate::secure_fs::is_symlink_or_reparse(&metadata) || !metadata.is_file() {
+        return Err("trusted Windows command shell must be a regular file".to_string());
+    }
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| "trusted Windows command shell path is not valid Unicode".to_string())
+}
+
+enum PluginChildPoll {
+    Running,
+    Missing,
+    Exited(Option<i32>, PlatformChild),
+    Failed(String, PlatformChild),
+}
+
+fn poll_plugin_child(plugins: &crate::plugins::PluginRunner) -> PluginChildPoll {
+    let mut slot = plugins
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(child) = slot.as_mut() else {
+        return PluginChildPoll::Missing;
+    };
+    let status = child.child.try_wait();
+    match status {
+        Ok(None) => PluginChildPoll::Running,
+        Ok(Some(status)) => match slot.take() {
+            Some(child) => PluginChildPoll::Exited(status.code(), child),
+            None => PluginChildPoll::Missing,
+        },
+        Err(error) => match slot.take() {
+            Some(child) => PluginChildPoll::Failed(error.to_string(), child),
+            None => PluginChildPoll::Missing,
+        },
+    }
+}
+
+fn attach_plugin_log_readers(
+    child: &mut PlatformChild,
+    tx: &std::sync::mpsc::SyncSender<(String, String)>,
+) -> Result<(), String> {
+    for (stream, pipe) in [
+        (
+            "stdout",
+            child
+                .child
+                .stdout
+                .take()
+                .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+        ),
+        (
+            "stderr",
+            child
+                .child
+                .stderr
+                .take()
+                .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+        ),
+    ] {
+        let Some(pipe) = pipe else {
+            continue;
+        };
+        let tx = tx.clone();
+        std::thread::Builder::new()
+            .name(format!("plugin-{stream}-reader"))
+            .spawn(move || {
+                let _ = dsh_sidecar::for_each_bounded_line(
+                    std::io::BufReader::new(pipe),
+                    MAX_PLUGIN_LOG_LINE_BYTES,
+                    |line| tx.send((stream.to_string(), line)).is_ok(),
+                );
+            })
+            .map_err(|error| format!("cannot start plugin {stream} reader: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Drive one registered plugin process without using pipe closure as a proxy
+/// for process exit. A child can close stdout/stderr and keep running; keeping
+/// its handle registered lets Cancel and app-exit still terminate that tree.
+/// The receiver is bounded, so a noisy pnpm/plugin cannot move an unbounded
+/// amount of output from the OS pipe into Desktop heap memory.
+fn supervise_plugin_output(
+    plugins: &crate::plugins::PluginRunner,
+    rx: std::sync::mpsc::Receiver<(String, String)>,
+    mut on_event: impl FnMut(Option<(String, String)>),
+) -> Option<i32> {
+    let mut readers_disconnected = false;
+    let mut child_missing_since: Option<std::time::Instant> = None;
+
+    loop {
+        if readers_disconnected {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        } else {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(line) => on_event(Some(line)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => on_event(None),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    readers_disconnected = true;
+                    on_event(None);
+                }
+            }
+        }
+
+        match poll_plugin_child(plugins) {
+            PluginChildPoll::Running => child_missing_since = None,
+            PluginChildPoll::Missing => {
+                let since = child_missing_since.get_or_insert_with(std::time::Instant::now);
+                if readers_disconnected || since.elapsed() >= PLUGIN_CANCEL_DRAIN_TIMEOUT {
+                    on_event(None);
+                    return None;
+                }
+            }
+            PluginChildPoll::Exited(code, child) => {
+                // PlatformChild::drop tears down any descendants that kept
+                // the inherited pipes open after the direct pnpm/dsh process
+                // exited. Drop outside the runner mutex so Cancel never waits
+                // behind output draining.
+                drop(child);
+                drain_plugin_output(&rx, &mut on_event);
+                return code;
+            }
+            PluginChildPoll::Failed(error, child) => {
+                on_event(Some((
+                    "supervisor".to_string(),
+                    format!("cannot poll plugin process: {error}"),
+                )));
+                drop(child);
+                drain_plugin_output(&rx, &mut on_event);
+                return Some(1);
+            }
+        }
+    }
+}
+
+fn drain_plugin_output(
+    rx: &std::sync::mpsc::Receiver<(String, String)>,
+    on_event: &mut impl FnMut(Option<(String, String)>),
+) {
+    let deadline = std::time::Instant::now() + PLUGIN_EXIT_DRAIN_TIMEOUT;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(25)) {
+            Ok(line) => on_event(Some(line)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                if std::time::Instant::now() >= deadline =>
+            {
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+    on_event(None);
+}
+
+fn emit_plugin_done(
+    app: &AppHandle,
+    paths: &crate::paths::RuntimePaths,
+    plugins: &crate::plugins::PluginRunner,
+    exit: Option<i32>,
+    tail: String,
     op: &'static str,
 ) {
-    use std::io::BufReader;
+    sweep_stale_sideloads_paths(paths);
+    plugins.finish_with(|| {
+        let _ = app.emit(
+            "plugin-done",
+            serde_json::json!({ "exit": exit, "tail": tail, "op": op }),
+        );
+    });
+}
 
+fn parse_pnpm_major(package_json: &[u8]) -> Result<u64, String> {
+    let package: serde_json::Value = serde_json::from_slice(package_json)
+        .map_err(|error| format!("bundled pnpm package.json is invalid JSON: {error}"))?;
+    let version = package
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "bundled pnpm package.json has no version".to_string())?;
+    semver::Version::parse(version)
+        .map(|version| version.major)
+        .map_err(|error| format!("bundled pnpm version is invalid: {error}"))
+}
+
+fn bundled_pnpm_major(paths: &crate::paths::RuntimePaths) -> Result<u64, String> {
+    let manifest = paths
+        .harness_dir
+        .join("node_modules")
+        .join("pnpm")
+        .join("package.json");
+    let bytes = crate::secure_fs::read_bounded(&manifest, 256 * 1024)?
+        .ok_or_else(|| "bundled pnpm package.json is missing".to_string())?;
+    parse_pnpm_major(&bytes)
+}
+
+fn prepare_plugin_pnpm_config(dsh_home: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let tools = crate::plugins::market_tools_dir(dsh_home)?;
+    let config_home = tools.join("pnpm-config");
+    crate::secure_fs::ensure_private_dir(&config_home)
+        .and_then(|()| crate::secure_fs::atomic_write(&config_home.join(".npmrc"), b"", 1024))
+        .map_err(|error| format!("cannot prepare isolated plugin pnpm configuration: {error}"))?;
+    Ok(config_home)
+}
+
+fn isolated_pnpm_args(store_dir: Option<&std::path::Path>) -> Vec<String> {
+    let mut args = vec![
+        "--ignore-workspace".to_string(),
+        "--global=false".to_string(),
+        "--node-linker=hoisted".to_string(),
+        "--config.auto-install-peers=false".to_string(),
+        "--package-import-method=copy".to_string(),
+        "--virtual-store-dir=node_modules/.pnpm".to_string(),
+        "--yes".to_string(),
+        "--reporter=append-only".to_string(),
+    ];
+    if let Some(store_dir) = store_dir {
+        args.push(format!("--store-dir={}", store_dir.display()));
+    }
+    args
+}
+
+fn market_pnpm_args(
+    candidate: &crate::market::MarketInstallCandidate,
+    store_dir: Option<&std::path::Path>,
+    config_home: &std::path::Path,
+) -> Vec<String> {
+    let mut args = vec!["add".to_string(), candidate.tarball.clone()];
+    args.extend(isolated_pnpm_args(store_dir));
+    let npmrc = config_home.join(".npmrc");
+    args.extend([
+        "--ignore-scripts".to_string(),
+        "--config.ignore-pnpmfile=true".to_string(),
+        "--config.enable-global-virtual-store=false".to_string(),
+        "--verify-store-integrity".to_string(),
+        "--config.strict-store-pkg-content-check=true".to_string(),
+        format!("--config.config-dir={}", config_home.display()),
+        format!("--config.userconfig={}", npmrc.display()),
+        format!("--config.globalconfig={}", npmrc.display()),
+    ]);
+    args.push("--save-exact".to_string());
+    args.push(format!("--registry={}", candidate.registry));
+    args
+}
+
+fn remove_pnpm_args(
+    package_name: &str,
+    store_dir: Option<&std::path::Path>,
+    config_home: &std::path::Path,
+) -> Vec<String> {
+    let mut args = vec!["remove".to_string(), package_name.to_string()];
+    args.extend(isolated_pnpm_args(store_dir));
+    let npmrc = config_home.join(".npmrc");
+    // pnpm 11's remove command intentionally does not expose these install
+    // settings as first-class flags. The documented `--config.*` escape hatch
+    // applies them without the CLI rejecting the operation as unknown.
+    args.extend([
+        "--config.ignore-scripts=true".to_string(),
+        "--config.ignore-pnpmfile=true".to_string(),
+        "--config.enable-global-virtual-store=false".to_string(),
+        "--config.verify-store-integrity=true".to_string(),
+        "--config.strict-store-pkg-content-check=true".to_string(),
+        format!("--config.config-dir={}", config_home.display()),
+        format!("--config.userconfig={}", npmrc.display()),
+        format!("--config.globalconfig={}", npmrc.display()),
+    ]);
+    args
+}
+
+fn plugin_spawn_spec(
+    paths: &crate::paths::RuntimePaths,
+    plugin_spec: &str,
+    op: &'static str,
+) -> Result<SpawnSpec, String> {
     let pnpm_cjs = paths
         .harness_dir
         .join("node_modules")
         .join("pnpm")
         .join("bin")
         .join("pnpm.cjs");
-    let shim_dir = match crate::plugins::ensure_pnpm_shim(&paths.dsh_home, &paths.node, &pnpm_cjs) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = app.emit(
-                "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": e, "op": op }),
-            );
-            plugins.busy.store(false, Ordering::SeqCst);
-            return;
-        }
-    };
-    let path_env = match std::env::join_paths(
-        std::iter::once(shim_dir.as_os_str().to_owned())
-            .chain(std::env::var_os("PATH").map(|old| old.to_owned())),
-    ) {
-        Ok(path_env) => path_env.to_string_lossy().to_string(),
-        Err(e) => {
-            let _ = app.emit(
-                "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": format!("cannot build PATH: {e}"), "op": op }),
-            );
-            plugins.busy.store(false, Ordering::SeqCst);
-            return;
-        }
-    };
-    let spawn_spec = SpawnSpec {
+    if op == "remove" {
+        let profile = crate::plugins::market_profile_dir(&paths.dsh_home)?;
+        let config_home = prepare_plugin_pnpm_config(&paths.dsh_home)?;
+        let store_dir = crate::plugins::pnpm_store_base(&profile, bundled_pnpm_major(paths)?)?;
+        return Ok(SpawnSpec {
+            node: paths.node.to_string_lossy().to_string(),
+            script: pnpm_cjs.to_string_lossy().to_string(),
+            args: remove_pnpm_args(plugin_spec, store_dir.as_deref(), &config_home),
+            cwd: profile.to_string_lossy().to_string(),
+            env: vec![
+                (
+                    "DSH_HOME".to_string(),
+                    paths.dsh_home.to_string_lossy().to_string(),
+                ),
+                (
+                    "XDG_CONFIG_HOME".to_string(),
+                    config_home.to_string_lossy().to_string(),
+                ),
+                (
+                    "NPM_CONFIG_USERCONFIG".to_string(),
+                    config_home.join(".npmrc").to_string_lossy().to_string(),
+                ),
+            ],
+        });
+    }
+
+    let shim_dir = crate::plugins::ensure_pnpm_shim(&paths.dsh_home, &paths.node, &pnpm_cjs)?;
+    let inherited_path = std::env::var_os("PATH");
+    let path_env = plugin_path_env(&shim_dir, inherited_path.as_deref())
+        .map_err(|error| format!("cannot build PATH: {error}"))?;
+    let store_dir =
+        crate::plugins::generic_profile_store_base(&paths.dsh_home, bundled_pnpm_major(paths)?)?;
+    let mut env = vec![
+        (
+            "DSH_HOME".to_string(),
+            paths.dsh_home.to_string_lossy().to_string(),
+        ),
+        ("PATH".to_string(), path_env.to_string_lossy().to_string()),
+    ];
+    if let Some(store_dir) = store_dir {
+        // PlatformChild removes inherited pnpm_config_* keys, then applies
+        // these Desktop-owned overrides. Reusing only pnpm's recorded store
+        // avoids both config injection and ERR_PNPM_UNEXPECTED_STORE.
+        env.push((
+            "PNPM_CONFIG_STORE_DIR".to_string(),
+            store_dir.to_string_lossy().to_string(),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        env.push(("ComSpec".to_string(), trusted_windows_comspec()?));
+        env.push(("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string()));
+    }
+    Ok(SpawnSpec {
         node: paths.node.to_string_lossy().to_string(),
         script: paths
             .harness_dir
@@ -1082,26 +1597,70 @@ fn run_plugin_spec(
             "--profile".to_string(),
             "web".to_string(),
             op.to_string(),
-            plugin_spec.clone(),
+            plugin_spec.to_string(),
         ],
         cwd: paths.harness_dir.to_string_lossy().to_string(),
-        env: vec![
-            (
-                "DSH_HOME".to_string(),
-                paths.dsh_home.to_string_lossy().to_string(),
-            ),
-            ("PATH".to_string(), path_env),
-        ],
+        env,
+    })
+}
+
+fn run_plugin_spec(
+    app: AppHandle,
+    paths: crate::paths::RuntimePaths,
+    plugins: Arc<crate::plugins::PluginRunner>,
+    plugin_spec: String,
+    op: &'static str,
+) {
+    if plugins.cancellation_requested() {
+        emit_plugin_done(
+            &app,
+            &paths,
+            &plugins,
+            None,
+            "plugin operation cancelled before start".to_string(),
+            op,
+        );
+        return;
+    }
+
+    let spawn_spec = match plugin_spawn_spec(&paths, &plugin_spec, op) {
+        Ok(spawn_spec) => spawn_spec,
+        Err(mut error) => {
+            if op == "remove" {
+                error.push_str("; the requested plugin remains safely disabled");
+            }
+            emit_plugin_done(&app, &paths, &plugins, Some(1), error, op);
+            return;
+        }
     };
+    if plugins.cancellation_requested() {
+        emit_plugin_done(
+            &app,
+            &paths,
+            &plugins,
+            None,
+            "plugin operation cancelled before spawn".to_string(),
+            op,
+        );
+        return;
+    }
     let inherited = std::env::vars_os().collect::<Vec<_>>();
     let child = match PlatformChild::spawn(&spawn_spec, &inherited) {
         Ok(c) => c,
         Err(e) => {
-            let _ = app.emit(
-                "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": format!("spawn failed: {e}"), "op": op }),
+            let suffix = if op == "remove" {
+                "; the requested plugin remains safely disabled"
+            } else {
+                ""
+            };
+            emit_plugin_done(
+                &app,
+                &paths,
+                &plugins,
+                Some(1),
+                format!("spawn failed: {e}{suffix}"),
+                op,
             );
-            plugins.busy.store(false, Ordering::SeqCst);
             return;
         }
     };
@@ -1109,10 +1668,21 @@ fn run_plugin_spec(
     // kill what is already stored, so if the exit latch flipped while the
     // tree was being created, kill the fresh tree HERE (on unix its process
     // group would otherwise outlive the shell).
-    if plugins.exiting.load(Ordering::SeqCst) {
+    if plugins.exiting.load(Ordering::SeqCst) || plugins.cancellation_requested() {
         let _ = child.graceful();
         child.force();
-        plugins.busy.store(false, Ordering::SeqCst);
+        if !plugins.exiting.load(Ordering::SeqCst) {
+            emit_plugin_done(
+                &app,
+                &paths,
+                &plugins,
+                None,
+                "plugin operation cancelled during spawn".to_string(),
+                op,
+            );
+        } else {
+            plugins.finish();
+        }
         return;
     }
 
@@ -1129,40 +1699,15 @@ fn run_plugin_spec(
             .collect();
         let _ = app_c.emit("plugin-log", serde_json::json!(payload));
     };
-    let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
-    let child = {
-        let mut child = child;
-        for (stream, pipe) in [
-            (
-                "stdout",
-                child
-                    .child
-                    .stdout
-                    .take()
-                    .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
-            ),
-            (
-                "stderr",
-                child
-                    .child
-                    .stderr
-                    .take()
-                    .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
-            ),
-        ] {
-            if let Some(pipe) = pipe {
-                let tx = tx.clone();
-                std::thread::spawn(move || {
-                    let _ = dsh_sidecar::for_each_bounded_line(
-                        BufReader::new(pipe),
-                        MAX_PLUGIN_LOG_LINE_BYTES,
-                        |line| tx.send((stream.to_string(), line)).is_ok(),
-                    );
-                });
-            }
-        }
-        child
-    };
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(String, String)>(PLUGIN_LOG_CHANNEL_CAPACITY);
+    let mut child = child;
+    if let Err(error) = attach_plugin_log_readers(&mut child, &tx) {
+        drop(tx);
+        child.force();
+        drop(child);
+        emit_plugin_done(&app, &paths, &plugins, Some(1), error, op);
+        return;
+    }
     // The readers hold clones; the ORIGINAL sender must go before the loop
     // or `Disconnected` never fires (cancel takes the child out of the
     // runner, and without Disconnected the loop would spin forever — busy
@@ -1172,7 +1717,7 @@ fn run_plugin_spec(
     // Second half of the exit race: shutdown() may have flipped the latch
     // between the post-spawn check above and this store — it would have
     // taken None, so reclaim and kill the tree ourselves.
-    if plugins.exiting.load(Ordering::SeqCst) {
+    if plugins.exiting.load(Ordering::SeqCst) || plugins.cancellation_requested() {
         if let Some(child) = plugins
             .child
             .lock()
@@ -1182,7 +1727,18 @@ fn run_plugin_spec(
             let _ = child.graceful();
             child.force();
         }
-        plugins.busy.store(false, Ordering::SeqCst);
+        if !plugins.exiting.load(Ordering::SeqCst) {
+            emit_plugin_done(
+                &app,
+                &paths,
+                &plugins,
+                None,
+                "plugin operation cancelled before execution".to_string(),
+                op,
+            );
+        } else {
+            plugins.finish();
+        }
         return;
     }
     fn handle_line(
@@ -1201,51 +1757,11 @@ fn run_plugin_spec(
             flush(pending);
         }
     }
-    let mut exit = loop {
-        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => flush(&mut pending),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                flush(&mut pending);
-                // Pipes closed: normally the tree has exited and wait()
-                // recovers the REAL exit code (reporting null would make
-                // the UI show "terminated" for successful installs). Take
-                // the handle FIRST so the wait() does not hold the runner
-                // mutex — cancel/app-exit must stay able to kill a hung
-                // tree. If cancel took it already, a canceled op keeps its
-                // null code.
-                let handle = plugins
-                    .child
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .take();
-                break handle
-                    .and_then(|mut c| c.child.wait().ok())
-                    .and_then(|s| s.code());
-            }
-        }
-        if let Some(child) = plugins
-            .child
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_mut()
-        {
-            if let Some(status) = child.child.try_wait().ok().flatten() {
-                // Fast-exit path: drain what the reader threads already
-                // queued (exit closes the pipes, so they wind down within
-                // a tick) so the last log lines reach the UI/tail, then
-                // report the code try_wait() reaped.
-                while let Ok((stream, line)) = rx.recv_timeout(std::time::Duration::from_millis(50))
-                {
-                    handle_line(&mut tail, &mut pending, &mut flush, stream, line);
-                }
-                flush(&mut pending);
-                break status.code();
-            }
-        }
-    };
-    *plugins.child.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    if let Err(error) = crate::plugins::reconcile_active_market_receipts(&paths.dsh_home) {
+    let mut exit = supervise_plugin_output(&plugins, rx, |event| match event {
+        Some((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
+        None => flush(&mut pending),
+    });
+    if let Err(error) = crate::plugins::reconcile_market_receipts(&paths.dsh_home) {
         handle_line(
             &mut tail,
             &mut pending,
@@ -1254,13 +1770,15 @@ fn run_plugin_spec(
             format!("plugin operation completed, but market provenance cleanup failed: {error}"),
         );
         flush(&mut pending);
-        exit = Some(1);
+        // A successful direct removal is not undone by a corrupt optional
+        // provenance receipt. Keep uninstall available as the fail-safe path;
+        // malformed receipts grant no activation/recovery authority and the
+        // warning remains visible in the operation log.
+        if op != "remove" {
+            exit = Some(1);
+        }
     }
-    plugins.busy.store(false, Ordering::SeqCst);
-    let _ = app.emit(
-        "plugin-done",
-        serde_json::json!({ "exit": exit, "tail": tail.join("\n"), "op": op }),
-    );
+    emit_plugin_done(&app, &paths, &plugins, exit, tail.join("\n"), op);
 }
 
 /// Run the market-only direct pnpm path. The official dsh plugin command
@@ -1274,59 +1792,112 @@ fn run_market_pnpm(
     plugins: Arc<crate::plugins::PluginRunner>,
     candidate: crate::market::MarketInstallCandidate,
 ) {
-    use std::io::BufReader;
+    if plugins.cancellation_requested() {
+        emit_plugin_done(
+            &app,
+            &paths,
+            &plugins,
+            None,
+            "market install cancelled before start".to_string(),
+            "market-install",
+        );
+        return;
+    }
 
     let profile = match crate::plugins::market_profile_dir(&paths.dsh_home) {
         Ok(profile) => profile,
         Err(error) => {
-            let _ = app.emit(
-                "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": error, "op": "market-install" }),
-            );
-            plugins.busy.store(false, Ordering::SeqCst);
+            emit_plugin_done(&app, &paths, &plugins, Some(1), error, "market-install");
             return;
         }
     };
+    if let Err(error) = crate::plugins::ensure_market_install_config(&paths.dsh_home) {
+        emit_plugin_done(&app, &paths, &plugins, Some(1), error, "market-install");
+        return;
+    }
     let pnpm = paths
         .harness_dir
         .join("node_modules")
         .join("pnpm")
         .join("bin")
         .join("pnpm.cjs");
-    let spawn_spec = SpawnSpec {
-        node: paths.node.to_string_lossy().to_string(),
-        script: pnpm.to_string_lossy().to_string(),
-        args: vec![
-            "add".to_string(),
-            candidate.tarball.clone(),
-            "--ignore-scripts".to_string(),
-            "--save-exact".to_string(),
-            "--yes".to_string(),
-            "--reporter=append-only".to_string(),
-            format!("--registry={}", candidate.registry),
-        ],
-        cwd: profile.to_string_lossy().to_string(),
-        env: vec![(
-            "DSH_HOME".to_string(),
-            paths.dsh_home.to_string_lossy().to_string(),
-        )],
-    };
-    let inherited = std::env::vars_os().collect::<Vec<_>>();
-    let child = match PlatformChild::spawn(&spawn_spec, &inherited) {
-        Ok(child) => child,
+    let config_home = match prepare_plugin_pnpm_config(&paths.dsh_home) {
+        Ok(config_home) => config_home,
         Err(error) => {
-            let _ = app.emit(
-                "plugin-done",
-                serde_json::json!({ "exit": 1, "tail": format!("market pnpm spawn failed: {error}"), "op": "market-install" }),
-            );
-            plugins.busy.store(false, Ordering::SeqCst);
+            emit_plugin_done(&app, &paths, &plugins, Some(1), error, "market-install");
             return;
         }
     };
-    if plugins.exiting.load(Ordering::SeqCst) {
+    let store_dir = match bundled_pnpm_major(&paths)
+        .and_then(|major| crate::plugins::pnpm_store_base(&profile, major))
+    {
+        Ok(store_dir) => store_dir,
+        Err(error) => {
+            emit_plugin_done(&app, &paths, &plugins, Some(1), error, "market-install");
+            return;
+        }
+    };
+    let spawn_spec = SpawnSpec {
+        node: paths.node.to_string_lossy().to_string(),
+        script: pnpm.to_string_lossy().to_string(),
+        args: market_pnpm_args(&candidate, store_dir.as_deref(), &config_home),
+        cwd: profile.to_string_lossy().to_string(),
+        env: vec![
+            (
+                "DSH_HOME".to_string(),
+                paths.dsh_home.to_string_lossy().to_string(),
+            ),
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                config_home.to_string_lossy().to_string(),
+            ),
+            (
+                "NPM_CONFIG_USERCONFIG".to_string(),
+                config_home.join(".npmrc").to_string_lossy().to_string(),
+            ),
+        ],
+    };
+    let inherited = std::env::vars_os().collect::<Vec<_>>();
+    if plugins.cancellation_requested() {
+        emit_plugin_done(
+            &app,
+            &paths,
+            &plugins,
+            None,
+            "market install cancelled before spawn".to_string(),
+            "market-install",
+        );
+        return;
+    }
+    let child = match PlatformChild::spawn(&spawn_spec, &inherited) {
+        Ok(child) => child,
+        Err(error) => {
+            emit_plugin_done(
+                &app,
+                &paths,
+                &plugins,
+                Some(1),
+                format!("market pnpm spawn failed: {error}"),
+                "market-install",
+            );
+            return;
+        }
+    };
+    if plugins.exiting.load(Ordering::SeqCst) || plugins.cancellation_requested() {
         let _ = child.graceful();
         child.force();
-        plugins.busy.store(false, Ordering::SeqCst);
+        if !plugins.exiting.load(Ordering::SeqCst) {
+            emit_plugin_done(
+                &app,
+                &paths,
+                &plugins,
+                None,
+                "market install cancelled during spawn".to_string(),
+                "market-install",
+            );
+        } else {
+            plugins.finish();
+        }
         return;
     }
 
@@ -1343,46 +1914,21 @@ fn run_market_pnpm(
             .collect();
         let _ = app_c.emit("plugin-log", serde_json::json!(payload));
     };
-    let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
-    let child = {
-        let mut child = child;
-        for (stream, pipe) in [
-            (
-                "stdout",
-                child
-                    .child
-                    .stdout
-                    .take()
-                    .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
-            ),
-            (
-                "stderr",
-                child
-                    .child
-                    .stderr
-                    .take()
-                    .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
-            ),
-        ] {
-            if let Some(pipe) = pipe {
-                let tx = tx.clone();
-                std::thread::spawn(move || {
-                    let _ = dsh_sidecar::for_each_bounded_line(
-                        BufReader::new(pipe),
-                        MAX_PLUGIN_LOG_LINE_BYTES,
-                        |line| tx.send((stream.to_string(), line)).is_ok(),
-                    );
-                });
-            }
-        }
-        child
-    };
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(String, String)>(PLUGIN_LOG_CHANNEL_CAPACITY);
+    let mut child = child;
+    if let Err(error) = attach_plugin_log_readers(&mut child, &tx) {
+        drop(tx);
+        child.force();
+        drop(child);
+        emit_plugin_done(&app, &paths, &plugins, Some(1), error, "market-install");
+        return;
+    }
     drop(tx);
     *plugins
         .child
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(child);
-    if plugins.exiting.load(Ordering::SeqCst) {
+    if plugins.exiting.load(Ordering::SeqCst) || plugins.cancellation_requested() {
         if let Some(child) = plugins
             .child
             .lock()
@@ -1392,7 +1938,18 @@ fn run_market_pnpm(
             let _ = child.graceful();
             child.force();
         }
-        plugins.busy.store(false, Ordering::SeqCst);
+        if !plugins.exiting.load(Ordering::SeqCst) {
+            emit_plugin_done(
+                &app,
+                &paths,
+                &plugins,
+                None,
+                "market install cancelled before execution".to_string(),
+                "market-install",
+            );
+        } else {
+            plugins.finish();
+        }
         return;
     }
     fn handle_line(
@@ -1411,43 +1968,11 @@ fn run_market_pnpm(
             flush(pending);
         }
     }
-    let mut exit = loop {
-        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => flush(&mut pending),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                flush(&mut pending);
-                let handle = plugins
-                    .child
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
-                break handle
-                    .and_then(|mut child| child.child.wait().ok())
-                    .and_then(|status| status.code());
-            }
-        }
-        if let Some(child) = plugins
-            .child
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_mut()
-        {
-            if let Some(status) = child.child.try_wait().ok().flatten() {
-                while let Ok((stream, line)) = rx.recv_timeout(std::time::Duration::from_millis(50))
-                {
-                    handle_line(&mut tail, &mut pending, &mut flush, stream, line);
-                }
-                flush(&mut pending);
-                break status.code();
-            }
-        }
-    };
-    *plugins
-        .child
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-    if exit == Some(0) {
+    let mut exit = supervise_plugin_output(&plugins, rx, |event| match event {
+        Some((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
+        None => flush(&mut pending),
+    });
+    if exit == Some(0) && !plugins.cancellation_requested() {
         if let Err(error) =
             crate::plugins::verify_and_mark_market_pending(&paths.dsh_home, &candidate)
         {
@@ -1461,12 +1986,46 @@ fn run_market_pnpm(
             flush(&mut pending);
             exit = Some(1);
         }
+    } else if exit == Some(0) {
+        handle_line(
+            &mut tail,
+            &mut pending,
+            &mut flush,
+            "verify".to_string(),
+            "market install completed, but activation remained disabled because cancellation was requested"
+                .to_string(),
+        );
+        flush(&mut pending);
+        exit = None;
     }
-    plugins.busy.store(false, Ordering::SeqCst);
-    let _ = app.emit(
-        "plugin-done",
-        serde_json::json!({ "exit": exit, "tail": tail.join("\n"), "op": "market-install" }),
+    emit_plugin_done(
+        &app,
+        &paths,
+        &plugins,
+        exit,
+        tail.join("\n"),
+        "market-install",
     );
+}
+
+fn spawn_plugin_worker(
+    app: AppHandle,
+    paths: crate::paths::RuntimePaths,
+    plugins: Arc<crate::plugins::PluginRunner>,
+    spec: String,
+    op: &'static str,
+) -> Result<(), String> {
+    let worker_plugins = plugins.clone();
+    std::thread::Builder::new()
+        .name(format!("plugin-{op}"))
+        .spawn(move || {
+            run_plugin_spec(app, paths, worker_plugins, spec, op);
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            plugins.finish();
+            format!("cannot start plugin operation worker: {error}")
+        })
 }
 
 fn spawn_plugin_spec(
@@ -1476,21 +2035,22 @@ fn spawn_plugin_spec(
     spec: String,
     op: &'static str,
 ) -> Result<(), String> {
-    if plugins.busy.swap(true, Ordering::SeqCst) {
-        return Err("an operation is already running".to_string());
-    }
+    begin_plugin_mutation(&plugins, runtime)?;
     if let Err(error) = ensure_no_plugin_recovery(runtime) {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
         return Err(error);
     }
     let Some(paths) = runtime.paths() else {
-        plugins.busy.store(false, Ordering::SeqCst);
+        plugins.finish();
         return Err("runtime paths are not resolved yet".to_string());
     };
-    std::thread::spawn(move || {
-        run_plugin_spec(app, paths, plugins, spec, op);
-    });
-    Ok(())
+    if let Err(error) = crate::plugins::ensure_no_pending_market_plugins(&paths.dsh_home) {
+        plugins.finish();
+        return Err(format!(
+            "cannot start a generic plugin addition safely: {error}"
+        ));
+    }
+    spawn_plugin_worker(app, paths, plugins, spec, op)
 }
 
 fn plugin_op(
@@ -1506,6 +2066,10 @@ fn plugin_op(
     spawn_plugin_spec(app, runtime, plugins, spec, op)
 }
 
+fn manual_plugin_install_allowed(store_build: bool) -> bool {
+    !store_build
+}
+
 #[tauri::command]
 pub fn install_plugin(
     app: AppHandle,
@@ -1513,8 +2077,12 @@ pub fn install_plugin(
     plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
     name: String,
 ) -> Result<(), String> {
-    if crate::build_info::STORE_BUILD && !crate::curated_plugins::is_allowed(&name) {
-        return Err("仅允许安装 cordis.run 已审核插件".to_string());
+    // Store installs must always cross the live market candidate gate. A
+    // local allowlist alone cannot prove current blocked/deprecated state,
+    // exact version/integrity, scripts-disabled installation, or pending
+    // activation. Keep this generic npm-name command for website builds only.
+    if !manual_plugin_install_allowed(crate::build_info::STORE_BUILD) {
+        return Err("Microsoft Store 版只能通过 cordis.run 插件市场安装并显式激活插件".to_string());
     }
     plugin_op(app, &runtime, plugins.inner().clone(), name, "add")
 }
@@ -1560,16 +2128,47 @@ pub fn uninstall_plugin(
     plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
     name: String,
 ) -> Result<(), String> {
-    plugin_op(app, &runtime, plugins.inner().clone(), name, "remove")
+    if !crate::plugins::is_valid_package_name(&name) {
+        return Err(format!("invalid package name: {name:?}"));
+    }
+    let plugins = plugins.inner().clone();
+    begin_plugin_mutation(&plugins, &runtime)?;
+    if let Err(error) = ensure_no_plugin_recovery(&runtime) {
+        plugins.finish();
+        return Err(error);
+    }
+    let Some(paths) = runtime.paths() else {
+        plugins.finish();
+        return Err("runtime paths are not resolved yet".to_string());
+    };
+    if plugins.cancellation_requested() {
+        plugins.finish();
+        return Err("plugin uninstall was cancelled before profile mutation".to_string());
+    }
+    // Repair any valid pending receipt left active by an older build before
+    // touching the requested package. Corrupt optional receipt state must not
+    // block the one operation users need to remove an unsafe plugin.
+    let _ = crate::plugins::reconcile_market_receipts(&paths.dsh_home);
+    if let Err(error) = crate::plugins::pre_disable_installed_plugin(&paths.dsh_home, &name) {
+        plugins.finish();
+        return Err(error);
+    }
+    spawn_plugin_worker(app, paths, plugins, name, "remove")
+        .map_err(|error| format!("{error}; the requested plugin remains safely disabled"))
 }
 
 #[tauri::command]
-pub fn cancel_plugin_op(plugins: State<'_, Arc<crate::plugins::PluginRunner>>) {
-    let child = plugins
-        .child
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
+pub fn cancel_plugin_op(
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+) -> Result<(), String> {
+    // Latch first: the operation may still be in async market preparation or
+    // between spawn and child registration. The worker checks this before and
+    // after registering its handle, closing the old cancel-before-store race.
+    let plugins = plugins.inner().clone();
+    let (accepted, child) = plugins.request_cancel();
+    if !accepted {
+        return Ok(());
+    }
     if let Some(mut child) = child {
         // Polite signal first. On Windows graceful() only works when the
         // shell initialized a hidden console (see main) — when it reports
@@ -1578,16 +2177,28 @@ pub fn cancel_plugin_op(plugins: State<'_, Arc<crate::plugins::PluginRunner>>) {
         // Give the tree a moment, then finish the job — the same escalation
         // as the sidecar's shutdown path. Taking the handle also prevents
         // the done-path from racing the kill.
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(if polite { 2 } else { 0 }));
-            // If the tree already exited and the run thread reaped it, skip
-            // the kill: the pgid may already have been recycled.
-            if child.child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            child.force();
-        });
+        let termination_plugins = plugins.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("plugin-cancel".to_string())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(if polite { 2 } else { 0 }));
+                if child.child.try_wait().ok().flatten().is_none() {
+                    child.force();
+                }
+                // PlatformChild::drop also tears down descendants after the
+                // direct child exits (Job Object / process group guarantee).
+                drop(child);
+                termination_plugins.child_termination_finished();
+            })
+        {
+            // The failed Builder drops the captured PlatformChild, whose Drop
+            // tears down the whole tree. Re-open the gate only after that
+            // synchronous drop has completed.
+            plugins.child_termination_finished();
+            return Err(format!("cannot start plugin cancellation worker: {error}"));
+        }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,14 +2272,30 @@ fn create_remote_preset_dir(
     Ok((dir.clone(), dir.join("archive.dshpreset")))
 }
 
+fn remove_reparse_leaf(path: &std::path::Path, metadata: &std::fs::Metadata) {
+    #[cfg(windows)]
+    {
+        if metadata.is_dir() {
+            let _ = std::fs::remove_dir(path);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn remove_remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) {
     if !valid_request_id(request_id) {
         return;
     }
     let dir = remote_preset_dir(dsh_home, request_id);
     match std::fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(&dir);
+        Ok(meta) if crate::secure_fs::is_symlink_or_reparse(&meta) => {
+            remove_reparse_leaf(&dir, &meta);
         }
         Ok(meta) if meta.is_dir() => {
             let _ = std::fs::remove_dir_all(&dir);
@@ -1684,7 +2311,18 @@ pub fn sweep_stale_sideloads(runtime: &Runtime) {
     let Some(paths) = runtime.paths() else {
         return;
     };
-    let referenced: std::collections::HashSet<std::path::PathBuf> = read_web_deps(&paths)
+    sweep_stale_sideloads_paths(&paths);
+}
+
+fn sweep_stale_sideloads_paths(paths: &crate::paths::RuntimePaths) {
+    // A missing/corrupt/unreadable profile is uncertainty, not proof that no
+    // sideload is referenced. Fail closed so a transient profile read during
+    // startup, shutdown, or a killed pnpm write cannot destroy the retained
+    // archive needed by an installed `file:` dependency.
+    let Some(dependencies) = read_web_deps(paths) else {
+        return;
+    };
+    let referenced: std::collections::HashSet<std::path::PathBuf> = dependencies
         .values()
         .filter_map(serde_json::Value::as_str)
         .filter_map(|spec| spec.strip_prefix("file:"))
@@ -1698,7 +2336,7 @@ fn sweep_sideloads_root(
     referenced: &std::collections::HashSet<std::path::PathBuf>,
 ) {
     match std::fs::symlink_metadata(tools) {
-        Ok(meta) if meta.file_type().is_symlink() => return,
+        Ok(meta) if crate::secure_fs::is_symlink_or_reparse(&meta) => return,
         Ok(meta) if !meta.is_dir() => return,
         Ok(_) => {}
         Err(_) => return,
@@ -1711,10 +2349,7 @@ fn sweep_sideload_dir(
     referenced: &std::collections::HashSet<std::path::PathBuf>,
 ) {
     match std::fs::symlink_metadata(dir) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(dir);
-            return;
-        }
+        Ok(meta) if crate::secure_fs::is_symlink_or_reparse(&meta) => return,
         Ok(meta) if !meta.is_dir() => return,
         Ok(_) => {}
         Err(_) => return,
@@ -1733,8 +2368,7 @@ fn sweep_sideload_dir(
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
-        if meta.file_type().is_symlink() {
-            let _ = std::fs::remove_file(&path);
+        if crate::secure_fs::is_symlink_or_reparse(&meta) {
             continue;
         }
         if !referenced.contains(&path) {
@@ -1743,22 +2377,13 @@ fn sweep_sideload_dir(
     }
 }
 
-fn read_web_deps(paths: &crate::paths::RuntimePaths) -> serde_json::Map<String, serde_json::Value> {
-    let path = paths
-        .dsh_home
-        .join("profiles")
-        .join("web")
-        .join("package.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return serde_json::Map::new();
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return serde_json::Map::new();
-    };
+fn read_web_deps(
+    paths: &crate::paths::RuntimePaths,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let (_, json) = crate::plugins::read_profile_manifest(&paths.dsh_home).ok()?;
     json.get("dependencies")
         .and_then(serde_json::Value::as_object)
         .cloned()
-        .unwrap_or_default()
 }
 
 fn remote_preset_dir(dsh_home: &std::path::Path, request_id: &str) -> std::path::PathBuf {
@@ -1777,8 +2402,8 @@ pub fn sweep_remote_preset_temp(runtime: &Runtime) {
     };
     let root = paths.dsh_home.join(".desktop-tools").join("preset-remote");
     match std::fs::symlink_metadata(&root) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(&root);
+        Ok(meta) if crate::secure_fs::is_symlink_or_reparse(&meta) => {
+            remove_reparse_leaf(&root, &meta);
         }
         Ok(meta) if meta.is_dir() => {
             let _ = std::fs::remove_dir_all(&root);

@@ -1,4 +1,5 @@
-//! In-app plugin installation via the official `dsh plugin` CLI.
+//! In-app plugin installation through the official `dsh plugin` add path and
+//! precise scripts-disabled removal through the bundled pnpm entry point.
 //!
 //! Process-tree guarantees come from reusing dsh-sidecar's `PlatformChild`
 //! (unix process group / Windows Job Object): cancel and app-exit always
@@ -200,8 +201,16 @@ const MARKET_PENDING_FILE: &str = "market-pending.json";
 const MARKET_ACTIVE_FILE: &str = "market-active.json";
 const MARKET_PENDING_MAX_BYTES: u64 = 256 * 1024;
 const PROFILE_LOCK_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const PROFILE_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const INSTALLED_MANIFEST_MAX_BYTES: u64 = 256 * 1024;
+const BUNDLE_PATCH_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const BUNDLE_PATCH_PATH_MAX_BYTES: usize = 1024;
+const PROFILE_NPMRC_MAX_BYTES: u64 = 64 * 1024;
+const PNPM_MODULES_STATE_MAX_BYTES: u64 = 1024 * 1024;
+const PNPM_STORE_PATH_MAX_BYTES: usize = 4096;
+const MAX_INSTALLED_PLUGINS: usize = 512;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketPendingPlugin {
     pub slug: String,
@@ -267,8 +276,10 @@ pub struct InstalledPlugin {
 fn checked_real_dir(path: &Path, label: &str) -> Result<(), String> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|e| format!("cannot inspect {label}: {e}"))?;
-    if metadata.file_type().is_symlink() {
-        return Err(format!("{label} must not be a symbolic link"));
+    if crate::secure_fs::is_symlink_or_reparse(&metadata) {
+        return Err(format!(
+            "{label} must not be a symbolic link or reparse point"
+        ));
     }
     if !metadata.is_dir() {
         return Err(format!("{label} is not a directory"));
@@ -314,6 +325,22 @@ fn write_active(dsh_home: &Path, active: &MarketActiveFile) -> Result<(), String
         .map_err(|e| format!("cannot serialize active market receipt: {e}"))?;
     crate::secure_fs::atomic_write(&path, &bytes, MARKET_PENDING_MAX_BYTES as usize)
         .map_err(|e| format!("cannot write active market receipt: {e}"))
+}
+
+/// Persist exact live-reviewed provenance before any caller enables a market
+/// bundle. Writing this first makes both normal activation and recovery
+/// rollback crash-safe: an inactive orphan receipt is pruned, while an enabled
+/// bundle never exists without the receipt needed for future gated recovery.
+pub(crate) fn record_active_market_receipt(
+    dsh_home: &Path,
+    candidate: &crate::market::MarketInstallCandidate,
+) -> Result<(), String> {
+    let mut active = load_active(dsh_home)?;
+    active.plugins.insert(
+        candidate.package_name.clone(),
+        MarketPendingPlugin::from(candidate),
+    );
+    write_active(dsh_home, &active)
 }
 
 fn receipt_matches_active_profile(
@@ -366,6 +393,153 @@ pub(crate) fn reconcile_active_market_receipts(dsh_home: &Path) -> Result<(), St
     Ok(())
 }
 
+fn reconcile_pending_market_receipts(dsh_home: &Path) -> Result<(), String> {
+    let mut pending = load_pending(dsh_home)?;
+    if pending.plugins.is_empty() {
+        return Ok(());
+    }
+    // Remember every structurally credible pending name before pruning stale
+    // source/version receipts. If an old global reconciliation activated one
+    // and its dependency was then replaced, dropping only the stale marker
+    // would leave unreviewed content enabled. Stale pending authority must be
+    // removed from both the marker file and the active bundle layer.
+    let pending_names: HashSet<String> = pending
+        .plugins
+        .iter()
+        .filter(|(name, receipt)| is_valid_package_name(name) && receipt.package_name == **name)
+        .map(|(name, _)| name.clone())
+        .collect();
+    let active = load_active(dsh_home)?;
+    let (profile, mut manifest) = read_profile_manifest(dsh_home)?;
+    let dependencies = profile_dependencies(&manifest)?;
+    let before = pending.plugins.len();
+    let mut retained = BTreeMap::new();
+    for (package_name, receipt) in &pending.plugins {
+        let source_matches = is_valid_package_name(package_name)
+            && receipt.package_name == *package_name
+            && dependencies.get(package_name).and_then(Value::as_str)
+                == Some(receipt.tarball.as_str());
+        let installed_version = read_installed_plugin_version(&profile, package_name)
+            .ok()
+            .flatten();
+        if source_matches && installed_version.as_deref() == Some(receipt.version.as_str()) {
+            retained.insert(package_name.clone(), receipt.clone());
+        }
+    }
+    pending.plugins = retained;
+
+    // A generic upstream `dsh plugin` mutation reconciles every installed
+    // bundle, not only its target. If a previous Desktop build or an
+    // interrupted operation let that reconciliation add a still-pending
+    // market package, restore the explicit-Activate boundary before exposing
+    // the profile again. Only receipts whose exact tarball and installed
+    // version still match retain this authority.
+    let bundles = profile_bundles_mut(&mut manifest)?;
+    for bundle in bundles.iter() {
+        if bundle.as_str().is_none() {
+            return Err("web profile bundles contains a non-string value".to_string());
+        }
+    }
+    // Activate persists an exact active receipt BEFORE writing bundles and
+    // removes the pending marker afterwards. A crash between those final two
+    // writes is an explicitly authorized activation, not the old global-
+    // reconcile bug: preserve its bundle and complete marker cleanup. A
+    // pending bundle without the matching active receipt was never approved
+    // and must be removed before Harness starts.
+    let explicitly_committed: HashSet<String> = bundles
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|name| {
+            pending
+                .plugins
+                .get(*name)
+                .is_some_and(|receipt| active.plugins.get(*name) == Some(receipt))
+        })
+        .map(str::to_string)
+        .collect();
+    let bundle_count = bundles.len();
+    bundles.retain(|bundle| {
+        bundle
+            .as_str()
+            .is_none_or(|name| !pending_names.contains(name) || explicitly_committed.contains(name))
+    });
+    pending
+        .plugins
+        .retain(|name, _| !explicitly_committed.contains(name));
+    if bundles.len() != bundle_count {
+        write_profile_manifest(&profile, &manifest)?;
+    }
+    if pending.plugins.len() != before {
+        write_pending(dsh_home, &pending)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn reconcile_market_receipts(dsh_home: &Path) -> Result<(), String> {
+    reconcile_pending_market_receipts(dsh_home)?;
+    reconcile_active_market_receipts(dsh_home)
+}
+
+/// Generic `dsh plugin add` reconciles every dependency and can therefore
+/// activate an unrelated market package that is still awaiting explicit
+/// confirmation. Keep generic/sideload additions unavailable until all
+/// pending market decisions have been resolved; direct market installs do
+/// not use the upstream reconciliation path and are unaffected.
+pub(crate) fn ensure_no_pending_market_plugins(dsh_home: &Path) -> Result<(), String> {
+    ensure_generic_plugin_layout(dsh_home)?;
+    reconcile_market_receipts(dsh_home)?;
+    if load_pending(dsh_home)?.plugins.is_empty() {
+        Ok(())
+    } else {
+        Err(
+            "a market plugin is awaiting explicit activation; activate or uninstall it before adding another plugin"
+                .to_string(),
+        )
+    }
+}
+
+/// The upstream add path initializes a missing profile itself, so it cannot
+/// use `profile_dir` (which requires an existing manifest). Validate every
+/// hierarchy component that already exists before handing paths to Node;
+/// missing components remain available for the official initializer.
+fn ensure_generic_plugin_layout(dsh_home: &Path) -> Result<(), String> {
+    checked_real_dir(dsh_home, "DSH_HOME")?;
+    let profiles = dsh_home.join("profiles");
+    match std::fs::symlink_metadata(&profiles) {
+        Ok(_) => checked_real_dir(&profiles, "profiles directory")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect profiles directory: {error}")),
+    }
+    let profile = profiles.join("web");
+    match std::fs::symlink_metadata(&profile) {
+        Ok(_) => checked_real_dir(&profile, "web profile directory")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect web profile directory: {error}")),
+    }
+    let manifest = profile.join("package.json");
+    match std::fs::symlink_metadata(&manifest) {
+        Ok(metadata)
+            if crate::secure_fs::is_symlink_or_reparse(&metadata) || !metadata.is_file() =>
+        {
+            return Err("web profile package.json must be a regular file".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot inspect web profile package.json: {error}")),
+    }
+    let node_modules = profile.join("node_modules");
+    match std::fs::symlink_metadata(&node_modules) {
+        Ok(_) => checked_real_dir(&node_modules, "plugin profile node_modules")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect plugin profile node_modules: {error}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn remove_active_market_receipt(
     dsh_home: &Path,
     package_name: &str,
@@ -373,6 +547,14 @@ pub(crate) fn remove_active_market_receipt(
     let mut active = load_active(dsh_home)?;
     if active.plugins.remove(package_name).is_some() {
         write_active(dsh_home, &active)?;
+    }
+    Ok(())
+}
+
+fn remove_pending_market_receipt(dsh_home: &Path, package_name: &str) -> Result<(), String> {
+    let mut pending = load_pending(dsh_home)?;
+    if pending.plugins.remove(package_name).is_some() {
+        write_pending(dsh_home, &pending)?;
     }
     Ok(())
 }
@@ -438,7 +620,7 @@ pub(crate) fn profile_dir(dsh_home: &Path) -> Result<PathBuf, String> {
     let manifest = web.join("package.json");
     let metadata = std::fs::symlink_metadata(&manifest)
         .map_err(|e| format!("cannot inspect web profile package.json: {e}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if crate::secure_fs::is_symlink_or_reparse(&metadata) || !metadata.is_file() {
         return Err("web profile package.json must be a regular file".to_string());
     }
     Ok(web)
@@ -451,12 +633,135 @@ pub fn market_profile_dir(dsh_home: &Path) -> Result<PathBuf, String> {
     profile_dir(dsh_home)
 }
 
+/// Recover the store root already bound to this profile's `node_modules`.
+/// pnpm refuses to operate when a command selects a different store, so a
+/// newly introduced Desktop-private store would break every profile created
+/// by an earlier release. pnpm 11 records the versioned directory (…/v11)
+/// in `.modules.yaml`; the CLI expects its parent as `--store-dir`.
+pub(crate) fn pnpm_store_base(
+    profile: &Path,
+    bundled_pnpm_major: u64,
+) -> Result<Option<PathBuf>, String> {
+    if bundled_pnpm_major == 0 {
+        return Err("bundled pnpm has an invalid major version".to_string());
+    }
+    let node_modules = profile.join("node_modules");
+    match std::fs::symlink_metadata(&node_modules) {
+        Ok(_) => checked_real_dir(&node_modules, "plugin profile node_modules")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect plugin profile node_modules: {error}"
+            ))
+        }
+    }
+    let modules_state = node_modules.join(".modules.yaml");
+    let Some(bytes) = crate::secure_fs::read_bounded(&modules_state, PNPM_MODULES_STATE_MAX_BYTES)?
+    else {
+        return Ok(None);
+    };
+
+    // pnpm 11 writes JSON (which is valid YAML). Retain a narrow fallback for
+    // profiles created by older supported runtimes that wrote a scalar YAML
+    // field instead.
+    let recorded = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => value
+            .get("storeDir")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| "pnpm modules state has no string storeDir".to_string())?,
+        Err(_) => {
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|error| format!("pnpm modules state is not valid UTF-8: {error}"))?;
+            text.lines()
+                .find_map(|line| line.strip_prefix("storeDir:").map(yaml_scalar))
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| "pnpm modules state has no storeDir".to_string())?
+        }
+    };
+    if recorded.len() > PNPM_STORE_PATH_MAX_BYTES || recorded.chars().any(char::is_control) {
+        return Err("pnpm modules state has an invalid storeDir".to_string());
+    }
+    let versioned = PathBuf::from(&recorded);
+    if !versioned.is_absolute() {
+        return Err("pnpm modules state storeDir must be absolute".to_string());
+    }
+    let expected_layout = format!("v{bundled_pnpm_major}");
+    if versioned.file_name().and_then(|part| part.to_str()) != Some(expected_layout.as_str()) {
+        return Err(format!(
+            "plugin profile uses an incompatible pnpm store layout ({recorded}); expected {expected_layout}"
+        ));
+    }
+    let base = versioned
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "pnpm modules state storeDir has no usable parent".to_string())?;
+    Ok(Some(base.to_path_buf()))
+}
+
+/// Return the store already bound to an initialized generic-plugin profile,
+/// while allowing the official add path to initialize a genuinely missing
+/// profile. Every existing hierarchy component was validated by the caller's
+/// generic-layout gate before this helper is used.
+pub(crate) fn generic_profile_store_base(
+    dsh_home: &Path,
+    bundled_pnpm_major: u64,
+) -> Result<Option<PathBuf>, String> {
+    ensure_generic_plugin_layout(dsh_home)?;
+    let manifest = dsh_home.join("profiles/web/package.json");
+    match std::fs::symlink_metadata(&manifest) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot inspect web profile package.json: {error}")),
+        Ok(_) => {
+            let profile = profile_dir(dsh_home)?;
+            pnpm_store_base(&profile, bundled_pnpm_major)
+        }
+    }
+}
+
+/// pnpm applies `pnpm.patchedDependencies` after validating the registry
+/// tarball. That would let the extracted package differ from the Cordis
+/// integrity while the lockfile still reports the reviewed SHA-512, so the
+/// strict market path refuses this local content-transform feature.
+pub fn ensure_market_install_config(dsh_home: &Path) -> Result<(), String> {
+    let (profile, manifest) = read_profile_manifest(dsh_home)?;
+    if let Some(npmrc) =
+        crate::secure_fs::read_bounded(&profile.join(".npmrc"), PROFILE_NPMRC_MAX_BYTES)?
+    {
+        if npmrc.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            return Err(
+                "market installation requires the web profile .npmrc to be absent or empty; local pnpm configuration could redirect the reviewed install"
+                    .to_string(),
+            );
+        }
+    }
+    let Some(pnpm) = manifest.get("pnpm") else {
+        return Ok(());
+    };
+    let pnpm = pnpm
+        .as_object()
+        .ok_or_else(|| "web profile package.json has an invalid pnpm configuration".to_string())?;
+    if let Some(patched) = pnpm.get("patchedDependencies") {
+        let patched = patched.as_object().ok_or_else(|| {
+            "web profile package.json has invalid pnpm.patchedDependencies".to_string()
+        })?;
+        if !patched.is_empty() {
+            return Err(
+                "market installation requires pnpm.patchedDependencies to be empty so reviewed integrity cannot be transformed"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn read_profile_manifest(dsh_home: &Path) -> Result<(PathBuf, Value), String> {
     let profile = profile_dir(dsh_home)?;
     let manifest = profile.join("package.json");
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| format!("cannot read web profile package.json: {e}"))?;
-    let value: Value = serde_json::from_str(&text)
+    let bytes = crate::secure_fs::read_bounded(&manifest, PROFILE_MANIFEST_MAX_BYTES)?
+        .ok_or_else(|| "web profile package.json is missing".to_string())?;
+    let value: Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("web profile package.json is invalid JSON: {e}"))?;
     if !value.is_object() {
         return Err("web profile package.json must contain an object".to_string());
@@ -472,10 +777,13 @@ pub(crate) fn write_profile_manifest(profile: &Path, value: &Value) -> Result<()
 }
 
 pub(crate) fn write_profile_bytes(profile: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() as u64 > PROFILE_MANIFEST_MAX_BYTES {
+        return Err("web profile package.json exceeds 4 MiB".to_string());
+    }
     let path = profile.join("package.json");
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|e| format!("cannot inspect web profile package.json: {e}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if crate::secure_fs::is_symlink_or_reparse(&metadata) || !metadata.is_file() {
         return Err("web profile package.json must be a regular file".to_string());
     }
     let millis = std::time::SystemTime::now()
@@ -487,21 +795,29 @@ pub(crate) fn write_profile_bytes(profile: &Path, bytes: &[u8]) -> Result<(), St
         std::process::id(),
         millis
     ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|e| format!("cannot create web profile package.json temp file: {e}"))?;
-    file.write_all(bytes)
-        .map_err(|e| format!("cannot write web profile package.json: {e}"))?;
-    file.sync_all()
-        .map_err(|e| format!("cannot sync web profile package.json: {e}"))?;
-    #[cfg(unix)]
-    {
-        std::fs::set_permissions(&temp, metadata.permissions())
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("cannot create web profile package.json temp file: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("cannot write web profile package.json: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync web profile package.json: {e}"))?;
+        #[cfg(unix)]
+        file.set_permissions(metadata.permissions())
             .map_err(|e| format!("cannot preserve web profile package.json permissions: {e}"))?;
+        // Windows replacement must not depend on delete-sharing behavior for
+        // an open temp handle. On Unix this also makes the durability boundary
+        // and publication order explicit.
+        drop(file);
+        replace_existing_file(&temp, &path, "web profile package.json")
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    replace_existing_file(&temp, &path, "web profile package.json")
+    result
 }
 
 pub(crate) fn profile_bundles_mut(value: &mut Value) -> Result<&mut Vec<Value>, String> {
@@ -550,16 +866,61 @@ pub fn pre_disable_market_plugin(
     dsh_home: &Path,
     candidate: &crate::market::MarketInstallCandidate,
 ) -> Result<(), String> {
+    pre_disable_plugin(dsh_home, &candidate.package_name)?;
+    remove_active_market_receipt(dsh_home, &candidate.package_name)?;
+    remove_pending_market_receipt(dsh_home, &candidate.package_name)
+}
+
+/// Remove exactly one dependency from the active bundle layer before pnpm
+/// mutates it. This is intentionally narrower than upstream's global
+/// reconciliation: uninstalling package B must never activate unrelated
+/// pending market package A.
+pub fn pre_disable_plugin(dsh_home: &Path, package_name: &str) -> Result<(), String> {
+    if !is_valid_package_name(package_name) {
+        return Err("cannot pre-disable an invalid plugin package name".to_string());
+    }
     let (profile, mut manifest) = read_profile_manifest(dsh_home)?;
-    let bundles = profile_bundles_mut(&mut manifest)?;
+    pre_disable_profile_bundle(&profile, &mut manifest, package_name)
+}
+
+/// Uninstall is exposed over IPC, so it must not let a caller disable an
+/// in-box bundle merely by naming it. Require a real, non-empty dependency
+/// entry before applying the exact pre-disable mutation; a missing installed
+/// tree is still removable so broken installations remain recoverable.
+pub fn pre_disable_installed_plugin(dsh_home: &Path, package_name: &str) -> Result<(), String> {
+    if !is_valid_package_name(package_name) {
+        return Err("cannot pre-disable an invalid plugin package name".to_string());
+    }
+    let (profile, mut manifest) = read_profile_manifest(dsh_home)?;
+    let installed = profile_dependencies(&manifest)?
+        .get(package_name)
+        .and_then(Value::as_str)
+        .is_some_and(|spec| !spec.is_empty());
+    if !installed {
+        return Err(format!(
+            "plugin {package_name} is not an installed web-profile dependency"
+        ));
+    }
+    pre_disable_profile_bundle(&profile, &mut manifest, package_name)
+}
+
+fn pre_disable_profile_bundle(
+    profile: &Path,
+    manifest: &mut Value,
+    package_name: &str,
+) -> Result<(), String> {
+    let bundles = profile_bundles_mut(manifest)?;
     for bundle in bundles.iter() {
         if bundle.as_str().is_none() {
             return Err("web profile bundles contains a non-string value".to_string());
         }
     }
-    bundles.retain(|bundle| bundle.as_str() != Some(candidate.package_name.as_str()));
-    write_profile_manifest(&profile, &manifest)?;
-    remove_active_market_receipt(dsh_home, &candidate.package_name)
+    let before = bundles.len();
+    bundles.retain(|bundle| bundle.as_str() != Some(package_name));
+    if bundles.len() != before {
+        write_profile_manifest(profile, manifest)?;
+    }
+    Ok(())
 }
 
 fn lockfile_package_key(line: &str) -> Option<&str> {
@@ -646,16 +1007,10 @@ fn inline_lockfile_integrity(line: &str) -> Option<&str> {
 
 fn lockfile_integrity(profile: &Path, package_name: &str, version: &str) -> Result<String, String> {
     let path = profile.join("pnpm-lock.yaml");
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|e| format!("cannot inspect pnpm lockfile: {e}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("pnpm lockfile must be a regular file".to_string());
-    }
-    if metadata.len() > PROFILE_LOCK_MAX_BYTES {
-        return Err("pnpm lockfile exceeds 4 MiB".to_string());
-    }
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("cannot read pnpm lockfile: {e}"))?;
+    let bytes = crate::secure_fs::read_bounded(&path, PROFILE_LOCK_MAX_BYTES)?
+        .ok_or_else(|| "pnpm lockfile is missing".to_string())?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|e| format!("pnpm lockfile is not valid UTF-8: {e}"))?;
     let expected_key = format!("{package_name}@{version}");
     let mut in_packages = false;
     let mut in_target = false;
@@ -700,6 +1055,39 @@ fn lockfile_integrity(profile: &Path, package_name: &str, version: &str) -> Resu
     ))
 }
 
+/// A bundle patch is resolved by upstream relative to the installed package
+/// directory. Keep the declaration portable and reject every form that could
+/// escape that directory on either Unix or Windows before activation.
+fn is_safe_bundle_patch_path(path: &str) -> bool {
+    if path.is_empty()
+        || path.len() > BUNDLE_PATCH_PATH_MAX_BYTES
+        || path.starts_with('/')
+        || path.contains(['\\', ':'])
+        || path.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let relative = path.strip_prefix("./").unwrap_or(path);
+    !relative.is_empty()
+        && relative
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn checked_installed_package_dir(profile: &Path, package_name: &str) -> Result<PathBuf, String> {
+    let node_modules = profile.join("node_modules");
+    checked_real_dir(&node_modules, "market profile node_modules")?;
+    let package = if let Some((scope, name)) = package_name.split_once('/') {
+        let scope_dir = node_modules.join(scope);
+        checked_real_dir(&scope_dir, "market package scope directory")?;
+        scope_dir.join(name)
+    } else {
+        node_modules.join(package_name)
+    };
+    checked_real_dir(&package, "installed market package directory")?;
+    Ok(package)
+}
+
 /// Verify all installation facts pnpm materialized. No build script can run
 /// in the market pnpm invocation, and normal pending verification requires
 /// the profile to stay pre-disabled throughout this check.
@@ -722,13 +1110,11 @@ pub(crate) fn verify_market_installation(
         return Err("market package became active before explicit activation".to_string());
     }
 
-    let installed_manifest = profile
-        .join("node_modules")
-        .join(&candidate.package_name)
-        .join("package.json");
-    let text = std::fs::read_to_string(&installed_manifest)
-        .map_err(|e| format!("cannot read installed market package: {e}"))?;
-    let installed: Value = serde_json::from_str(&text)
+    let installed_package = checked_installed_package_dir(&profile, &candidate.package_name)?;
+    let installed_manifest = installed_package.join("package.json");
+    let bytes = crate::secure_fs::read_bounded(&installed_manifest, INSTALLED_MANIFEST_MAX_BYTES)?
+        .ok_or_else(|| "installed market package manifest is missing".to_string())?;
+    let installed: Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("installed market package has invalid JSON: {e}"))?;
     if installed.get("name").and_then(Value::as_str) != Some(candidate.package_name.as_str())
         || installed.get("version").and_then(Value::as_str) != Some(candidate.version.as_str())
@@ -737,17 +1123,30 @@ pub(crate) fn verify_market_installation(
             "installed market package name/version differs from the reviewed source".to_string(),
         );
     }
-    if installed
+    let patch = installed
         .get("dsh")
         .and_then(Value::as_object)
         .and_then(|dsh| dsh.get("bundle"))
         .and_then(Value::as_object)
         .and_then(|bundle| bundle.get("patch"))
         .and_then(Value::as_str)
-        .filter(|patch| !patch.is_empty())
-        .is_none()
-    {
-        return Err("installed market package is not a DSH bundle".to_string());
+        .ok_or_else(|| "installed market package is not a DSH bundle".to_string())?;
+    if !is_safe_bundle_patch_path(patch) {
+        return Err("installed market package has an unsafe dsh.bundle.patch path".to_string());
+    }
+    let patch_path = installed_package.join(patch);
+    let package_root = std::fs::canonicalize(&installed_package)
+        .map_err(|error| format!("cannot resolve installed market package directory: {error}"))?;
+    let resolved_patch = std::fs::canonicalize(&patch_path).map_err(|error| {
+        format!("cannot resolve installed market package bundle patch: {error}")
+    })?;
+    if !resolved_patch.starts_with(&package_root) || resolved_patch == package_root {
+        return Err(
+            "installed market package bundle patch escapes its package directory".to_string(),
+        );
+    }
+    if crate::secure_fs::read_bounded(&patch_path, BUNDLE_PATCH_MAX_BYTES)?.is_none() {
+        return Err("installed market package bundle patch is missing".to_string());
     }
     if lockfile_integrity(&profile, &candidate.package_name, &candidate.version)?
         != candidate.integrity
@@ -805,12 +1204,7 @@ pub fn activate_market_plugin(
     // source-mismatched receipts are ignored and pruned by mutation paths; the
     // reverse ordering could leave an active market plugin that recovery
     // cannot revalidate.
-    let mut active = load_active(dsh_home)?;
-    active.plugins.insert(
-        candidate.package_name.clone(),
-        MarketPendingPlugin::from(candidate),
-    );
-    write_active(dsh_home, &active)?;
+    record_active_market_receipt(dsh_home, candidate)?;
 
     let (profile, mut manifest) = read_profile_manifest(dsh_home)?;
     let bundles = profile_bundles_mut(&mut manifest)?;
@@ -849,24 +1243,29 @@ pub fn installed_plugins(dsh_home: &Path) -> Vec<InstalledPlugin> {
     };
     let bundles = profile_bundles(&manifest).unwrap_or_default();
     let pending = load_pending(dsh_home).unwrap_or_default();
-    let mut entries = Vec::new();
-    for name in dependencies.keys() {
-        let version =
-            std::fs::read_to_string(profile.join("node_modules").join(name).join("package.json"))
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                .and_then(|package| {
-                    package
-                        .get("version")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| "—".to_string());
-        let marker = pending
-            .plugins
-            .get(name)
-            .filter(|marker| marker.version == version);
-        let (state, slug, entry_revision) = if bundles.contains(name.as_str()) {
+    let mut names: Vec<&str> = dependencies
+        .iter()
+        .filter_map(|(name, spec)| {
+            (is_valid_package_name(name) && spec.as_str().is_some_and(|value| !value.is_empty()))
+                .then_some(name.as_str())
+        })
+        .collect();
+    names.sort_unstable();
+    names.truncate(MAX_INSTALLED_PLUGINS);
+
+    let mut entries = Vec::with_capacity(names.len());
+    for name in names {
+        let version = read_installed_plugin_version(&profile, name)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "—".to_string());
+        let dependency_spec = dependencies.get(name).and_then(Value::as_str);
+        let marker = pending.plugins.get(name).filter(|marker| {
+            marker.package_name == name
+                && marker.version == version
+                && dependency_spec == Some(marker.tarball.as_str())
+        });
+        let (state, slug, entry_revision) = if bundles.contains(name) {
             ("active".to_string(), None, None)
         } else if let Some(marker) = marker {
             (
@@ -878,22 +1277,50 @@ pub fn installed_plugins(dsh_home: &Path) -> Vec<InstalledPlugin> {
             ("installed".to_string(), None, None)
         };
         entries.push(InstalledPlugin {
-            name: name.clone(),
+            name: name.to_string(),
             version,
             state,
             slug,
             entry_revision,
         });
     }
-    entries.sort_by(|left, right| left.name.cmp(&right.name));
     entries
 }
 
-/// The runner state managed by the shell: single-flight flag, app-exit
-/// latch, and the live child handle (for cancel and for app-exit cleanup).
+fn read_installed_plugin_version(
+    profile: &Path,
+    package_name: &str,
+) -> Result<Option<String>, String> {
+    let path = checked_installed_package_dir(profile, package_name)?.join("package.json");
+    let Some(bytes) = crate::secure_fs::read_bounded(&path, INSTALLED_MANIFEST_MAX_BYTES)? else {
+        return Ok(None);
+    };
+    let package: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("installed plugin manifest is invalid JSON: {error}"))?;
+    if package.get("name").and_then(Value::as_str) != Some(package_name) {
+        return Err("installed plugin manifest name does not match its dependency".to_string());
+    }
+    let version = package
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|version| {
+            !version.is_empty() && version.len() <= 128 && !version.chars().any(char::is_control)
+        })
+        .ok_or_else(|| "installed plugin manifest has an invalid version".to_string())?;
+    Ok(Some(version.to_string()))
+}
+
+/// The runner state managed by the shell: single-flight flag, cancellation
+/// latch, app-exit latch, and the live child handle. `operation_gate` makes
+/// begin/cancel/finish one atomic state transition so a cancel arriving
+/// before the child handle is registered cannot be lost or applied to the
+/// next operation.
 pub struct PluginRunner {
     pub busy: AtomicBool,
     pub exiting: AtomicBool,
+    cancel_requested: AtomicBool,
+    terminating_child: AtomicBool,
+    operation_gate: Mutex<()>,
     pub child: Mutex<Option<PlatformChild>>,
 }
 
@@ -902,12 +1329,104 @@ impl PluginRunner {
         PluginRunner {
             busy: AtomicBool::new(false),
             exiting: AtomicBool::new(false),
+            cancel_requested: AtomicBool::new(false),
+            terminating_child: AtomicBool::new(false),
+            operation_gate: Mutex::new(()),
             child: Mutex::new(None),
         }
     }
 
-    /// App-exit cleanup (C1 process-tree guarantee): a running `dsh plugin`
-    /// tree is a separate process group / Job Object from the sidecar's
+    pub fn try_begin(&self) -> bool {
+        let _gate = self
+            .operation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.exiting.load(Ordering::SeqCst)
+            || self.busy.load(Ordering::SeqCst)
+            || self.terminating_child.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        self.busy.store(true, Ordering::SeqCst);
+        true
+    }
+
+    pub fn finish(&self) {
+        self.finish_with(|| ());
+    }
+
+    /// Publish a completion side effect before another operation can claim
+    /// the single-flight gate. In particular, queue `plugin-done` while the
+    /// transition is still exclusive so a delayed event cannot belong to a
+    /// newly started operation.
+    pub fn finish_with<T>(&self, action: impl FnOnce() -> T) -> T {
+        let _gate = self
+            .operation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        self.busy.store(false, Ordering::SeqCst);
+        action()
+    }
+
+    pub fn request_cancel(&self) -> (bool, Option<PlatformChild>) {
+        let _gate = self
+            .operation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.busy.load(Ordering::SeqCst)
+            || self.exiting.load(Ordering::SeqCst)
+            || self.cancel_requested.load(Ordering::SeqCst)
+        {
+            return (false, None);
+        }
+        self.cancel_requested.store(true, Ordering::SeqCst);
+        let child = self
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.terminating_child
+            .store(child.is_some(), Ordering::SeqCst);
+        (true, child)
+    }
+
+    pub fn child_termination_finished(&self) {
+        self.terminating_child.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst) || self.terminating_child.load(Ordering::SeqCst)
+    }
+
+    pub fn cancellation_requested(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    /// Run a short profile boundary only when no plugin/recovery mutation is
+    /// active. Holding the transition gate for the action prevents a new
+    /// operation from starting between the idle check and the protected read
+    /// or write, without misreporting the boundary itself as a plugin job.
+    pub fn with_idle_profile<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gate = self
+            .operation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.exiting.load(Ordering::SeqCst)
+            || self.busy.load(Ordering::SeqCst)
+            || self.terminating_child.load(Ordering::SeqCst)
+        {
+            return Err("插件操作仍在进行，完成或取消后才能重启 Harness".to_string());
+        }
+        action()
+    }
+
+    /// App-exit cleanup (C1 process-tree guarantee): a running plugin
+    /// mutation tree is a separate process group / Job Object from the sidecar's
     /// Harness tree, so it must be killed explicitly — on unix it would
     /// otherwise be orphaned once the shell exits. Taking the handle also
     /// keeps the done-path from racing the kill. Polite signal first, then
@@ -918,7 +1437,12 @@ impl PluginRunner {
     /// that window would find `child == None` — the latch makes the spawn
     /// path kill the fresh tree itself.
     pub fn shutdown(&self) {
+        let _gate = self
+            .operation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.exiting.store(true, Ordering::SeqCst);
+        self.cancel_requested.store(true, Ordering::SeqCst);
         if let Some(child) = self
             .child
             .lock()
@@ -1000,6 +1524,40 @@ mod tests {
     }
 
     #[test]
+    fn recovery_reactivation_restores_provenance_before_the_bundle() {
+        let home = std::env::temp_dir().join(format!(
+            "dshd-recovery-receipt-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        record_active_market_receipt(&home, &candidate).unwrap();
+
+        pre_disable_plugin(&home, &candidate.package_name).unwrap();
+        reconcile_market_receipts(&home).unwrap();
+        assert!(load_active(&home).unwrap().plugins.is_empty());
+
+        // The command's market-gated recovery path records provenance first,
+        // then restores the exact backed-up bundle profile.
+        record_active_market_receipt(&home, &candidate).unwrap();
+        let (profile, mut manifest) = read_profile_manifest(&home).unwrap();
+        profile_bundles_mut(&mut manifest)
+            .unwrap()
+            .push(Value::String(candidate.package_name.clone()));
+        write_profile_manifest(&profile, &manifest).unwrap();
+        reconcile_market_receipts(&home).unwrap();
+
+        assert_eq!(
+            active_market_receipt(&home, &candidate.package_name)
+                .unwrap()
+                .as_ref(),
+            Some(&MarketPendingPlugin::from(&candidate))
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn package_names_accept_reject() {
         for ok in [
             "is-odd",
@@ -1047,6 +1605,97 @@ mod tests {
         ] {
             assert!(!is_valid_package_name(bad), "should reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn runner_latches_cancel_before_a_child_is_registered() {
+        let runner = PluginRunner::new();
+        assert!(runner.try_begin());
+        assert!(runner.busy.load(Ordering::SeqCst));
+        assert!(runner.request_cancel().0);
+        assert!(runner.cancellation_requested());
+        assert!(
+            !runner.request_cancel().0,
+            "repeated cancellation must be idempotent"
+        );
+        assert!(!runner.try_begin(), "single-flight must remain held");
+
+        runner.finish();
+        assert!(!runner.busy.load(Ordering::SeqCst));
+        assert!(!runner.cancellation_requested());
+        assert!(
+            !runner.request_cancel().0,
+            "idle cancel must not poison the next run"
+        );
+        assert!(runner.try_begin());
+        assert!(!runner.cancellation_requested());
+        runner.finish();
+    }
+
+    #[test]
+    fn terminating_child_keeps_the_single_flight_gate_closed() {
+        let runner = PluginRunner::new();
+        assert!(runner.try_begin());
+        runner.terminating_child.store(true, Ordering::SeqCst);
+        runner.finish();
+        assert!(runner.is_busy());
+        assert!(!runner.try_begin());
+        runner.child_termination_finished();
+        assert!(!runner.is_busy());
+        assert!(runner.try_begin());
+        runner.finish();
+    }
+
+    #[test]
+    fn idle_profile_boundary_does_not_overlap_a_plugin_mutation() {
+        let runner = PluginRunner::new();
+        assert_eq!(runner.with_idle_profile(|| Ok(7)).unwrap(), 7);
+        assert!(!runner.is_busy(), "a restart boundary is not a plugin job");
+
+        assert!(runner.try_begin());
+        let mut called = false;
+        let error = runner
+            .with_idle_profile(|| {
+                called = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.contains("插件操作仍在进行"), "{error}");
+        assert!(!called, "busy profile boundary must not run its action");
+        runner.finish();
+    }
+
+    #[test]
+    fn completion_is_published_before_the_next_operation_can_begin() {
+        let runner = std::sync::Arc::new(PluginRunner::new());
+        assert!(runner.try_begin());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let finish_runner = runner.clone();
+        let finisher = std::thread::spawn(move || {
+            finish_runner.finish_with(|| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        entered_rx.recv().unwrap();
+
+        let (begin_tx, begin_rx) = std::sync::mpsc::channel();
+        let begin_runner = runner.clone();
+        let beginner = std::thread::spawn(move || {
+            begin_tx.send(begin_runner.try_begin()).unwrap();
+        });
+        assert!(
+            begin_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "the next operation must wait until completion publication returns"
+        );
+        release_tx.send(()).unwrap();
+        finisher.join().unwrap();
+        assert!(begin_rx.recv().unwrap());
+        beginner.join().unwrap();
+        runner.finish();
     }
 
     #[test]
@@ -1218,6 +1867,14 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
+            profile
+                .join("node_modules")
+                .join(&candidate.package_name)
+                .join("cordis.patch.yml"),
+            "[]\n",
+        )
+        .unwrap();
+        std::fs::write(
             profile.join("pnpm-lock.yaml"),
             format!(
                 "lockfileVersion: '9.0'\n\npackages:\n\n  {}@{}:\n    resolution: {{integrity: {}}}\n\nsnapshots:\n",
@@ -1225,6 +1882,403 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn existing_pnpm_store_is_reused_without_changing_layout() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-pnpm-store-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let profile = home.join("profiles/web");
+        let node_modules = profile.join("node_modules");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{},"dsh":{"profile":{"bundles":[]}}}"#,
+        )
+        .unwrap();
+        let store_base = home.join("shared-pnpm-store");
+        let versioned = store_base.join("v11");
+        std::fs::write(
+            node_modules.join(".modules.yaml"),
+            serde_json::to_vec(&serde_json::json!({"storeDir": versioned})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pnpm_store_base(&profile, 11).unwrap(), Some(store_base));
+        assert_eq!(
+            generic_profile_store_base(&home, 11).unwrap(),
+            Some(home.join("shared-pnpm-store"))
+        );
+
+        let wrong = home.join("legacy-store/v10");
+        std::fs::write(
+            node_modules.join(".modules.yaml"),
+            serde_json::to_vec(&serde_json::json!({"storeDir": wrong})).unwrap(),
+        )
+        .unwrap();
+        let error = pnpm_store_base(&profile, 11).unwrap_err();
+        assert!(error.contains("incompatible pnpm store layout"), "{error}");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn pending_receipt_repairs_accidental_activation_and_blocks_generic_add() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-pending-activation-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        pre_disable_market_plugin(&home, &candidate).unwrap();
+        verify_and_mark_market_pending(&home, &candidate).unwrap();
+
+        // Simulate the old upstream global reconciliation adding the pending
+        // dependency while an unrelated plugin was changed.
+        let (profile, mut manifest) = read_profile_manifest(&home).unwrap();
+        profile_bundles_mut(&mut manifest)
+            .unwrap()
+            .push(Value::String(candidate.package_name.clone()));
+        write_profile_manifest(&profile, &manifest).unwrap();
+
+        let error = ensure_no_pending_market_plugins(&home).unwrap_err();
+        assert!(error.contains("awaiting explicit activation"), "{error}");
+        let (_, repaired) = read_profile_manifest(&home).unwrap();
+        assert!(!profile_bundles(&repaired)
+            .unwrap()
+            .contains(candidate.package_name.as_str()));
+        assert!(load_pending(&home)
+            .unwrap()
+            .plugins
+            .contains_key(&candidate.package_name));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn uninstall_pre_disable_requires_a_dependency_and_changes_only_its_target() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-exact-pre-disable-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        let (profile, mut manifest) = read_profile_manifest(&home).unwrap();
+        profile_bundles_mut(&mut manifest)
+            .unwrap()
+            .push(Value::String("other-plugin".to_string()));
+        write_profile_manifest(&profile, &manifest).unwrap();
+
+        let error = pre_disable_installed_plugin(&home, "other-plugin").unwrap_err();
+        assert!(error.contains("not an installed"), "{error}");
+        pre_disable_installed_plugin(&home, &candidate.package_name).unwrap();
+        let (_, manifest) = read_profile_manifest(&home).unwrap();
+        let bundles = profile_bundles(&manifest).unwrap();
+        assert!(!bundles.contains(candidate.package_name.as_str()));
+        assert!(bundles.contains("other-plugin"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_add_refuses_a_symlinked_node_modules_before_spawn() {
+        use std::os::unix::fs::symlink;
+
+        let home = std::env::temp_dir().join(format!(
+            "dsh-generic-layout-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let profile = home.join("profiles/web");
+        let outside = home.join("outside");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(outside.join("is-odd")).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{"is-odd":"3.0.1"},"dsh":{"profile":{"bundles":[]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            outside.join("is-odd/package.json"),
+            r#"{"name":"is-odd","version":"9.9.9"}"#,
+        )
+        .unwrap();
+        symlink(&outside, profile.join("node_modules")).unwrap();
+
+        let error = ensure_no_pending_market_plugins(&home).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        let rows = installed_plugins(&home);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].version, "—");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn installed_list_uses_production_parser_and_rejects_path_like_dependency_keys() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-installed-list-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let profile = home.join("profiles").join("web");
+        std::fs::create_dir_all(profile.join("node_modules/is-odd")).unwrap();
+        std::fs::create_dir_all(profile.join("outside")).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{
+              "dependencies": {
+                "../outside": "9.9.9",
+                "is-odd": "^3.0.1",
+                "not-a-string": false,
+                "zz-top": "1.0.0"
+              },
+              "dsh": {"profile": {"bundles": []}}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join("node_modules/is-odd/package.json"),
+            r#"{"name":"is-odd","version":"3.0.1"}"#,
+        )
+        .unwrap();
+        // This is exactly where the old `node_modules.join("../outside")`
+        // traversal landed. Its version must never become a bootstrap row.
+        std::fs::write(
+            profile.join("outside/package.json"),
+            r#"{"name":"../outside","version":"9.9.9"}"#,
+        )
+        .unwrap();
+
+        let rows = installed_plugins(&home);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "is-odd");
+        assert_eq!(rows[0].version, "3.0.1");
+        assert_eq!(rows[1].name, "zz-top");
+        assert_eq!(rows[1].version, "—");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn installed_list_does_not_trust_a_mismatched_or_oversized_package_manifest() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-installed-manifest-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let profile = home.join("profiles").join("web");
+        std::fs::create_dir_all(profile.join("node_modules/is-odd")).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{"is-odd":"3.0.1"},"dsh":{"profile":{"bundles":[]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join("node_modules/is-odd/package.json"),
+            r#"{"name":"different-package","version":"3.0.1"}"#,
+        )
+        .unwrap();
+        assert_eq!(installed_plugins(&home)[0].version, "—");
+
+        std::fs::write(
+            profile.join("node_modules/is-odd/package.json"),
+            vec![b' '; INSTALLED_MANIFEST_MAX_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert_eq!(installed_plugins(&home)[0].version, "—");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn profile_manifest_reads_are_bounded() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-profile-bound-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let profile = home.join("profiles").join("web");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            vec![b' '; PROFILE_MANIFEST_MAX_BYTES as usize + 1],
+        )
+        .unwrap();
+        let error = read_profile_manifest(&home).unwrap_err();
+        assert!(error.contains("byte limit"), "{error}");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn market_install_rejects_local_patched_dependency_transforms() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-market-patched-dependency-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        let (profile, mut manifest) = read_profile_manifest(&home).unwrap();
+        manifest["pnpm"] = serde_json::json!({
+            "patchedDependencies": {
+                "fixture-plugin@1.0.0": "patches/fixture.patch"
+            }
+        });
+        write_profile_manifest(&profile, &manifest).unwrap();
+
+        let error = ensure_market_install_config(&home).unwrap_err();
+        assert!(error.contains("patchedDependencies"), "{error}");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn market_install_rejects_profile_local_npmrc_redirects() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-market-npmrc-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        std::fs::write(home.join("profiles/web/.npmrc"), "global=true\n").unwrap();
+
+        let error = ensure_market_install_config(&home).unwrap_err();
+        assert!(error.contains(".npmrc"), "{error}");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn pending_state_requires_the_exact_reviewed_dependency_source() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-pending-source-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        pre_disable_market_plugin(&home, &candidate).unwrap();
+        verify_and_mark_market_pending(&home, &candidate).unwrap();
+        assert_eq!(installed_plugins(&home)[0].state, "pending");
+
+        let (profile, mut manifest) = read_profile_manifest(&home).unwrap();
+        manifest["dependencies"][&candidate.package_name] =
+            Value::String(candidate.version.clone());
+        profile_bundles_mut(&mut manifest)
+            .unwrap()
+            .push(Value::String(candidate.package_name.clone()));
+        write_profile_manifest(&profile, &manifest).unwrap();
+        assert_eq!(installed_plugins(&home)[0].state, "active");
+        reconcile_market_receipts(&home).unwrap();
+        assert!(load_pending(&home).unwrap().plugins.is_empty());
+        assert!(!profile_bundles(&read_profile_manifest(&home).unwrap().1)
+            .unwrap()
+            .contains(candidate.package_name.as_str()));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn pending_reconciliation_prunes_an_unreadable_installed_manifest() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-pending-invalid-manifest-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        pre_disable_market_plugin(&home, &candidate).unwrap();
+        verify_and_mark_market_pending(&home, &candidate).unwrap();
+        std::fs::write(
+            home.join("profiles/web/node_modules")
+                .join(&candidate.package_name)
+                .join("package.json"),
+            "not json",
+        )
+        .unwrap();
+
+        reconcile_market_receipts(&home).unwrap();
+        assert!(load_pending(&home).unwrap().plugins.is_empty());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn market_verifier_rejects_bundle_patch_path_escape() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-market-patch-escape-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        pre_disable_market_plugin(&home, &candidate).unwrap();
+        let manifest_path = home
+            .join("profiles/web/node_modules")
+            .join(&candidate.package_name)
+            .join("package.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&serde_json::json!({
+                "name": candidate.package_name,
+                "version": candidate.version,
+                "dsh": {"bundle": {"patch": "../../../outside.yml"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(home.join("outside.yml"), "[]\n").unwrap();
+
+        let error = verify_market_installation(&home, &candidate, true).unwrap_err();
+        assert!(error.contains("unsafe dsh.bundle.patch"), "{error}");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn bundle_patch_path_contract_is_cross_platform() {
+        for valid in ["cordis.patch.yml", "./cordis.patch.yml", "patches/base.yml"] {
+            assert!(is_safe_bundle_patch_path(valid), "should accept {valid:?}");
+        }
+        for invalid in [
+            "",
+            "/etc/passwd",
+            "../outside.yml",
+            "a/../../outside.yml",
+            "./../outside.yml",
+            "C:/Windows/system.ini",
+            "..\\outside.yml",
+            "patches//base.yml",
+            "patches/./base.yml",
+        ] {
+            assert!(
+                !is_safe_bundle_patch_path(invalid),
+                "should reject {invalid:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn market_verifier_rejects_bundle_patch_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let home = std::env::temp_dir().join(format!(
+            "dsh-market-patch-link-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let candidate = market_candidate();
+        setup_market_profile(&home, &candidate);
+        pre_disable_market_plugin(&home, &candidate).unwrap();
+        let package = home
+            .join("profiles/web/node_modules")
+            .join(&candidate.package_name);
+        let outside = home.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("patch.yml"), "[]\n").unwrap();
+        symlink(&outside, package.join("patches")).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": candidate.package_name,
+                "version": candidate.version,
+                "dsh": {"bundle": {"patch": "patches/patch.yml"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = verify_market_installation(&home, &candidate, true).unwrap_err();
+        assert!(error.contains("escapes its package directory"), "{error}");
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -1344,8 +2398,15 @@ mod tests {
         pre_disable_market_plugin(&home, &candidate).expect("pre-disable");
         verify_and_mark_market_pending(&home, &candidate).expect("verified pending");
 
-        // Simulate a crash after the activation profile write but before the
-        // pending marker can be removed.
+        // Activation persists exact provenance before enabling the bundle.
+        // Simulate a crash after both writes but before the pending marker can
+        // be removed.
+        let mut active = MarketActiveFile::default();
+        active.plugins.insert(
+            candidate.package_name.clone(),
+            MarketPendingPlugin::from(&candidate),
+        );
+        write_active(&home, &active).expect("simulate active receipt write");
         let (profile, mut manifest) = read_profile_manifest(&home).expect("profile");
         profile_bundles_mut(&mut manifest)
             .expect("bundle list")
@@ -1353,11 +2414,23 @@ mod tests {
         write_profile_manifest(&profile, &manifest).expect("simulate activation write");
 
         assert_eq!(installed_plugins(&home)[0].state, "active");
-        activate_market_plugin(&home, &candidate).expect("recovery activation");
+        reconcile_market_receipts(&home).expect("startup reconciliation");
         assert!(load_pending(&home)
             .expect("pending state")
             .plugins
             .is_empty());
+        assert!(
+            profile_bundles(&read_profile_manifest(&home).expect("reconciled profile").1)
+                .expect("bundle list")
+                .contains(candidate.package_name.as_str())
+        );
+        assert_eq!(
+            load_active(&home)
+                .expect("active state")
+                .plugins
+                .get(&candidate.package_name),
+            Some(&MarketPendingPlugin::from(&candidate))
+        );
 
         let _ = std::fs::remove_dir_all(&home);
     }

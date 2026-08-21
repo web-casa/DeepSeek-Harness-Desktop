@@ -124,7 +124,7 @@ kill -KILL "-$pgid" 2>/dev/null || :"#,
             // Injection-safe environment: Command inherits the FULL parent
             // env by default and `.envs()` only overlays — so a key omitted
             // from the overlay would still leak through. env_clear() first,
-            // then re-add the sanitized snapshot (parent env minus node/npm
+            // then re-add the sanitized snapshot (parent env minus node/npm/pnpm
             // control keys), then the start command's own overrides (DSH_HOME
             // etc.) which are exempt from the filter by design.
             cmd.env_clear()
@@ -469,7 +469,7 @@ mod imp {
         }
         unsafe { FreeEnvironmentStringsW(raw) };
 
-        // Injection-safe environment: strip node/npm control keys at the
+        // Injection-safe environment: strip node/npm/pnpm control keys at the
         // UTF-16 level (no lossy round-trip), then apply the overrides —
         // overrides come last, so they win and are exempt from the filter.
         let mut lines = crate::sanitize_env_lines(lines);

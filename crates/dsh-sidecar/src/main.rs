@@ -1164,7 +1164,11 @@ mod tests {
             // removed while ordinary keys (PATH) still flow through.
             let inherited = vec![
                 ("NODE_OPTIONS".into(), "--require=/evil.js".into()),
+                ("NODE_TLS_REJECT_UNAUTHORIZED".into(), "0".into()),
+                ("NODE_EXTRA_CA_CERTS".into(), "/tmp/evil-ca.pem".into()),
+                ("npm_execpath".into(), "/tmp/evil-npm-cli.js".into()),
                 ("npm_config_cache".into(), "/tmp/evil-cache".into()),
+                ("pnpm_config_store_dir".into(), "/tmp/evil-store".into()),
                 (
                     "PATH".into(),
                     std::env::var_os("PATH").expect("PATH set in test env"),
@@ -1172,7 +1176,7 @@ mod tests {
             ];
             let child = PlatformChild::spawn(
                 &spec(
-                    "test -z \"${NODE_OPTIONS}\" && test -z \"${npm_config_cache}\" && test -n \"${PATH}\"",
+                    "test -z \"${NODE_OPTIONS}\" && test -z \"${NODE_TLS_REJECT_UNAUTHORIZED}\" && test -z \"${NODE_EXTRA_CA_CERTS}\" && test -z \"${npm_execpath}\" && test -z \"${npm_config_cache}\" && test -z \"${pnpm_config_store_dir}\" && test -n \"${PATH}\"",
                 ),
                 &inherited,
             );
@@ -1287,8 +1291,13 @@ mod tests {
             ("PATH".into(), "/usr/bin".into()),
             ("NODE_OPTIONS".into(), "--require=/evil".into()),
             ("node_path".into(), "/evil".into()),
+            ("Node_Tls_Reject_Unauthorized".into(), "0".into()),
+            ("NODE_EXTRA_CA_CERTS".into(), "/evil-ca.pem".into()),
+            ("Npm_ExecPath".into(), "/evil-npm-cli.js".into()),
             ("npm_config_cache".into(), "/c".into()),
             ("Npm_Config_Foo".into(), "1".into()),
+            ("pnpm_config_store_dir".into(), "/store".into()),
+            ("PnPm_CoNfIg_Registry".into(), "https://evil.invalid".into()),
             ("ELECTRON_RUN_AS_NODE".into(), "1".into()),
             ("HOME".into(), "/home/u".into()),
         ];
@@ -1334,7 +1343,12 @@ mod tests {
         let lines = vec![
             u("NODE_OPTIONS=--require=x"),
             u("npm_config_foo=1"),
+            u("pnpm_config_store_dir=C:\\evil"),
+            u("PnPm_CoNfIg_Registry=https://evil.invalid"),
             u("Node_Path=/evil"),
+            u("NODE_TLS_REJECT_UNAUTHORIZED=0"),
+            u("node_extra_ca_certs=C:\\evil-ca.pem"),
+            u("NPM_EXECPATH=C:\\evil-npm-cli.js"),
             u("DYLD_INSERT_LIBRARIES=/evil.dylib"),
             u("LD_PRELOAD=/evil.so"),
             path_line,

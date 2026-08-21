@@ -48,7 +48,10 @@ proptest = "1"
 # Needed for no-follow private-file handles and atomic replacement of
 # Desktop-owned state. This is already pinned by dsh-sidecar; declare it
 # directly because Rust crates may not rely on transitive dependencies.
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemInformation",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Finder-launched GUI apps cannot rely on shell locale variables. Read the

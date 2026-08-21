@@ -129,29 +129,40 @@ pub fn quote_arg(arg: &str) -> String {
 // ---------------------------------------------------------------------------
 // Child environment hygiene: the sidecar inherits the parent's (Tauri shell's)
 // environment and forwards it to the bundled Node. A user launching the app
-// from a shell with NODE_OPTIONS / NODE_PATH / npm_config_* set would otherwise
-// inject code (`--require=…`) or config into the Harness process. These keys
-// are stripped before spawn. The `env` overrides carried by the start command
-// are applied AFTER the filter and are NOT filtered — they are the app's own
-// contract (DSH_HOME etc.). Also scrubbed: ELECTRON_RUN_AS_NODE, which would
-// turn a bundled Electron's node into a Harness host if one is ever reused,
-// and the dynamic-linker injection primitives (DYLD_*/LD_*).
+// from a shell with NODE_OPTIONS / NODE_PATH / npm_config_* / pnpm_config_*
+// set would otherwise inject code (`--require=…`) or config into the Harness
+// process. Node TLS controls are also stripped: NODE_TLS_REJECT_UNAUTHORIZED
+// can silently disable verification, while NODE_EXTRA_CA_CERTS can append an
+// attacker-controlled certificate authority. The `env` overrides carried by
+// the start command are applied AFTER the filter and are NOT filtered —
+// they are the app's own contract (DSH_HOME etc.). Also scrubbed:
+// ELECTRON_RUN_AS_NODE, which would turn a bundled Electron's node into a
+// Harness host if one is ever reused, and the dynamic-linker injection
+// primitives (DYLD_*/LD_*).
 // ---------------------------------------------------------------------------
 
-const FORBIDDEN_ENV_KEYS: [&str; 7] = [
+const FORBIDDEN_ENV_KEYS: [&str; 10] = [
     "node_options",
     "node_path",
+    "node_tls_reject_unauthorized",
+    "node_extra_ca_certs",
+    // npm/pnpm use this self-referential control value when spawning helpers;
+    // Desktop always supplies its own bundled entrypoint instead.
+    "npm_execpath",
     "electron_run_as_node",
     "dyld_insert_libraries",
     "dyld_library_path",
     "ld_preload",
     "ld_library_path",
 ];
-const FORBIDDEN_ENV_PREFIX: &str = "npm_config_";
+const FORBIDDEN_ENV_PREFIXES: [&str; 2] = ["npm_config_", "pnpm_config_"];
 
 fn env_key_forbidden(key: &str) -> bool {
     let folded = key.to_ascii_lowercase();
-    FORBIDDEN_ENV_KEYS.contains(&folded.as_str()) || folded.starts_with(FORBIDDEN_ENV_PREFIX)
+    FORBIDDEN_ENV_KEYS.contains(&folded.as_str())
+        || FORBIDDEN_ENV_PREFIXES
+            .iter()
+            .any(|prefix| folded.starts_with(prefix))
 }
 
 /// Filter an inherited environment snapshot (the unix path).
@@ -187,7 +198,10 @@ pub fn fold_ascii_u16(w: u16) -> u16 {
 /// surrogates — are forwarded verbatim. Entries without '=' and entries with
 /// an empty key (the `=C:=…` per-drive entries) are never filter targets.
 pub fn sanitize_env_lines(lines: Vec<Vec<u16>>) -> Vec<Vec<u16>> {
-    let prefix: Vec<u16> = FORBIDDEN_ENV_PREFIX.encode_utf16().collect();
+    let prefixes: Vec<Vec<u16>> = FORBIDDEN_ENV_PREFIXES
+        .iter()
+        .map(|prefix| prefix.encode_utf16().collect())
+        .collect();
     lines
         .into_iter()
         .filter(|line| {
@@ -201,7 +215,7 @@ pub fn sanitize_env_lines(lines: Vec<Vec<u16>>) -> Vec<Vec<u16>> {
             !FORBIDDEN_ENV_KEYS
                 .iter()
                 .any(|k| folded == k.encode_utf16().collect::<Vec<u16>>())
-                && !folded.starts_with(&prefix)
+                && !prefixes.iter().any(|prefix| folded.starts_with(prefix))
         })
         .collect()
 }
