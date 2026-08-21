@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 # Least privilege: every job here only reads the checkout (quality.yml brings
 # its own block); nothing in this workflow needs write access to the repo.
@@ -48,6 +49,41 @@ jobs:
           cache: npm
           cache-dependency-path: runtime/package-lock.json
 
+      # Compile the native shell on a real Mac whenever its Rust/build inputs
+      # change. Event SHAs are data, never shell source: validate them before
+      # use and fail closed (run the check) when a comparison is unavailable.
+      - name: Detect macOS shell changes
+        id: macos-shell
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          run_check=true
+          sha_pattern='^[0-9a-fA-F]{40}$'
+          if [[ "$BASE_SHA" =~ $sha_pattern && "$HEAD_SHA" =~ $sha_pattern && ! "$BASE_SHA" =~ ^0+$ ]]; then
+            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              if ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+                printf '%s\n' 'Base commit unavailable; running macOS shell check.'
+                printf 'run=true\n' >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            if git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null && git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+              .github/workflows/test.yml \
+              Cargo.lock \
+              rust-toolchain.toml \
+              src-tauri/Cargo.toml \
+              src-tauri/build.rs \
+              src-tauri/src \
+              src-tauri/tauri.conf.json; then
+              run_check=false
+            fi
+          fi
+          printf 'run=%s\n' "$run_check" >> "$GITHUB_OUTPUT"
+
       # The exact P0 acceptance chain, on every platform:
       # sidecar → bundled node → dsh web --port 0 → readiness → HTTP 200
       # → restart → HTTP 200 → shutdown → no orphan processes.
@@ -62,6 +98,11 @@ jobs:
 
       - name: Check staged runtime links are relocatable
         run: node scripts/check-runtime-links.ts
+
+      - name: Compile native macOS shell
+        if: runner.os == 'macOS' && steps.macos-shell.outputs.run == 'true'
+        timeout-minutes: 10
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
 
       - name: Runtime smoke
         run: node scripts/verify-runtime.ts
