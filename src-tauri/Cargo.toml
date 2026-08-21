@@ -20,7 +20,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Remote .dshpreset download and cordis.run market requests. rustls keeps the
 # supply chain to a single TLS backend (already transitive via
 # tauri-plugin-updater); no native-tls/OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
 getrandom = "0.2"
 # The sidecar's library surface: PlatformChild gives the plugin installer the
