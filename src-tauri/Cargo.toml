@@ -22,7 +22,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # tauri-plugin-updater); no native-tls/OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
-getrandom = "0.2"
+getrandom = "0.4"
 # The sidecar's library surface: PlatformChild gives the plugin installer the
 # SAME process-tree guarantees (unix process group / Windows Job Object).
 # The version must stay in lockstep with crates/dsh-sidecar/Cargo.toml —
