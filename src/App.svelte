@@ -759,10 +759,15 @@
         // fast setup failure or a webview reload can miss `plugin-done`;
         // polling backend truth prevents the UI from remaining busy forever.
         pluginError ??=
-          "插件操作已经结束，但完成事件未送达；请检查安装日志和当前插件列表。";
+          expectedOp === "market-install"
+            ? "市场插件操作已经结束，但完成事件未送达；请刷新当前插件列表。仅在显式 Activate 后重启 Harness 才会加载该插件。"
+            : "插件操作已经结束，但完成事件未送达；请检查安装日志和当前插件列表。";
         if (expectedOp === "remove") {
           pluginRestartNotice =
             "插件移除操作已经结束；请重启 Harness 停止当前进程中的旧插件，并核对列表后按需重试。";
+        } else if (expectedOp === "add") {
+          pluginRestartNotice =
+            "插件安装操作已经结束；请重启 Harness 后核对当前插件列表并验证是否生效。";
         }
         pluginLogsOpen = true;
       }

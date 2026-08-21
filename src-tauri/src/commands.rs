@@ -6,8 +6,7 @@
 
 use crate::diagnostics::redact;
 use crate::harness::{
-    child_alive, open_harness_window, publish_snapshot, request_restart, send_raw,
-    snapshot_payload, Runtime, Status, CMD_ID_SHUTDOWN,
+    open_harness_window, request_restart, request_shutdown, snapshot_payload, Runtime, Status,
 };
 use dsh_sidecar::platform::{PlatformChild, SpawnSpec};
 use serde_json::Value;
@@ -83,39 +82,8 @@ pub fn restart(_runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub fn shutdown(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), String> {
-    if !child_alive(&runtime) {
-        // Keep the real status (Stopped/Idle stays what it is) — only the
-        // message explains why nothing happened.
-        let error = "sidecar 未运行，无需停止".to_string();
-        runtime
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .last_error = Some(error.clone());
-        publish_snapshot(&app, &runtime.state);
-        return Err(error);
-    }
-
-    if let Err(error) = send_raw(
-        &runtime,
-        &serde_json::json!({"id": CMD_ID_SHUTDOWN, "command": "shutdown"}),
-    ) {
-        {
-            // Scope the lock: publish_snapshot takes the same mutex and a
-            // held guard here would deadlock the command.
-            let mut s = runtime
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            s.last_error = Some(error.clone());
-            s.status = crate::harness::Status::Crashed;
-        }
-        publish_snapshot(&app, &runtime.state);
-        return Err(error);
-    }
-
-    Ok(())
+pub fn shutdown(app: AppHandle) -> Result<(), String> {
+    request_shutdown(&app)
 }
 
 #[tauri::command]

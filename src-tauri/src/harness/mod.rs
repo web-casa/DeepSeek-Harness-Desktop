@@ -69,8 +69,10 @@ pub struct Runtime {
     /// Bumped on every sidecar launch; watcher threads hold the value they
     /// started with and must never touch a newer generation's resources.
     gen: Arc<AtomicU64>,
-    /// Bumped on every user-initiated restart; cancels queued auto-restarts.
-    restart_gen: Arc<AtomicU64>,
+    /// Serializes explicit stop/restart requests with deferred auto-restarts.
+    /// The generation makes an already-queued automatic restart stale when a
+    /// user chooses a different lifecycle action.
+    restart: Arc<RestartControl>,
 }
 
 /// The readiness origin currently authorized for the Harness window.
@@ -84,6 +86,11 @@ pub struct WindowOrigin(pub Arc<Mutex<Option<String>>>);
 /// Crash auto-restart policy: up to this many consecutive attempts with
 /// exponential backoff, then give up and surface the error.
 const MAX_RESTART_ATTEMPTS: u32 = 3;
+/// A plugin operation may safely defer a restart briefly while it atomically
+/// updates the profile. It must not keep a crashed Harness in "Starting"
+/// forever when pnpm or its network request stalls.
+const MAX_AUTO_RESTART_PLUGIN_DEFER: std::time::Duration = std::time::Duration::from_secs(120);
+const AUTO_RESTART_DEFER_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// NDJSON command ids — one place to change protocol bookkeeping.
 pub(crate) const CMD_ID_START: u64 = 1;
@@ -99,46 +106,97 @@ enum AutoRestartOutcome {
     Superseded,
 }
 
+/// Coordinate all sidecar lifecycle commands. The generation is deliberately
+/// separate from the sidecar generation: it answers whether a *queued crash
+/// restart* still reflects the user's latest intention.
+#[derive(Default)]
+struct RestartControl {
+    generation: AtomicU64,
+    transition_gate: Mutex<()>,
+}
+
+impl RestartControl {
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn supersede_queued_auto_restarts(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn is_superseded(&self, expected_generation: u64) -> bool {
+        self.current_generation() != expected_generation
+    }
+
+    fn with_exclusive_transition<T>(&self, action: impl FnOnce() -> T) -> T {
+        let _gate = self
+            .transition_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        action()
+    }
+}
+
+fn auto_restart_is_superseded(runtime: &Runtime, expected_generation: u64) -> bool {
+    runtime.shutting_down.load(Ordering::SeqCst)
+        || runtime.restart.is_superseded(expected_generation)
+}
+
+fn auto_restart_defer_expired(started_at: std::time::Instant, now: std::time::Instant) -> bool {
+    now.saturating_duration_since(started_at) >= MAX_AUTO_RESTART_PLUGIN_DEFER
+}
+
+/// A policy/receipt error prevented an automatic start; it is not evidence
+/// that an active plugin caused a terminal startup failure. Keep recovery
+/// mutations closed and show the user a normal crashed-state diagnostic.
+fn abandon_auto_restart(state: &Mutex<SharedState>, message: impl Into<String>) {
+    set_error(state, message);
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .terminal_startup_failure = false;
+}
+
 /// Try one crash auto-restart while holding the same transition gate as every
 /// plugin/profile mutation. A busy plugin operation defers the attempt; it
 /// must never be interrupted by a sidecar restart that reads a half-written
 /// profile or loads a market package still awaiting explicit activation.
 fn try_auto_restart(app: &AppHandle, expected_gen: u64) -> Result<AutoRestartOutcome, String> {
     let runtime = app.state::<Runtime>();
-    if runtime.shutting_down.load(Ordering::SeqCst)
-        || runtime.restart_gen.load(Ordering::SeqCst) != expected_gen
-    {
+    if auto_restart_is_superseded(&runtime, expected_gen) {
         return Ok(AutoRestartOutcome::Superseded);
     }
 
     let action = || {
-        // Recheck after acquiring the plugin transition gate: a user restart
-        // or app exit may have superseded this waiter while it was deferred.
-        if runtime.shutting_down.load(Ordering::SeqCst)
-            || runtime.restart_gen.load(Ordering::SeqCst) != expected_gen
-        {
-            return Ok(AutoRestartOutcome::Superseded);
-        }
-        let paths = runtime
-            .paths
-            .as_ref()
-            .ok_or_else(|| "运行时路径不可用".to_string())?;
-        enforce_plugin_activation_boundary(paths)?;
-        send_raw(
-            &runtime,
-            &serde_json::json!({"id": CMD_ID_RESTART, "command": "restart"}),
-        )?;
-        {
-            let mut state = runtime
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.status = Status::Starting;
-            state.last_error = None;
-            state.terminal_startup_failure = false;
-        }
-        publish_snapshot(app, &runtime.state);
-        Ok(AutoRestartOutcome::Sent)
+        runtime.restart.with_exclusive_transition(|| {
+            // Recheck after acquiring both transition gates: an explicit stop,
+            // user restart, or app exit may have superseded this waiter while
+            // it was deferred. Holding this gate through send_raw prevents a
+            // stop command from being followed by a stale automatic restart.
+            if auto_restart_is_superseded(&runtime, expected_gen) {
+                return Ok(AutoRestartOutcome::Superseded);
+            }
+            let paths = runtime
+                .paths
+                .as_ref()
+                .ok_or_else(|| "运行时路径不可用".to_string())?;
+            enforce_plugin_activation_boundary(paths)?;
+            send_raw(
+                &runtime,
+                &serde_json::json!({"id": CMD_ID_RESTART, "command": "restart"}),
+            )?;
+            {
+                let mut state = runtime
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.status = Status::Starting;
+                state.last_error = None;
+                state.terminal_startup_failure = false;
+            }
+            publish_snapshot(app, &runtime.state);
+            Ok(AutoRestartOutcome::Sent)
+        })
     };
 
     let Some(plugin_runner) = app.try_state::<Arc<crate::plugins::PluginRunner>>() else {
@@ -150,10 +208,7 @@ fn try_auto_restart(app: &AppHandle, expected_gen: u64) -> Result<AutoRestartOut
     match plugin_runner.with_idle_profile(action) {
         Ok(outcome) => Ok(outcome),
         Err(_error) if plugin_runner.is_busy() => Ok(AutoRestartOutcome::Deferred),
-        Err(_)
-            if runtime.shutting_down.load(Ordering::SeqCst)
-                || runtime.restart_gen.load(Ordering::SeqCst) != expected_gen =>
-        {
+        Err(_) if auto_restart_is_superseded(&runtime, expected_gen) => {
             Ok(AutoRestartOutcome::Superseded)
         }
         Err(error) => Err(error),
@@ -165,30 +220,39 @@ fn try_auto_restart(app: &AppHandle, expected_gen: u64) -> Result<AutoRestartOut
 /// attempt pending and retry the local gate instead of starting Harness early.
 fn schedule_auto_restart(app: &AppHandle, attempts: u32) {
     let app_c = app.clone();
-    let my_gen = app.state::<Runtime>().restart_gen.load(Ordering::SeqCst);
+    let my_gen = app.state::<Runtime>().restart.current_generation();
     let spawn = std::thread::Builder::new()
         .name("harness-auto-restart".to_string())
         .spawn(move || {
             let backoff =
                 std::time::Duration::from_secs(1u64 << (attempts.saturating_sub(1).min(3)));
             std::thread::sleep(backoff);
+            let mut deferred_since = None;
             loop {
                 match try_auto_restart(&app_c, my_gen) {
                     Ok(AutoRestartOutcome::Sent | AutoRestartOutcome::Superseded) => return,
                     Ok(AutoRestartOutcome::Deferred) => {
-                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        let started_at = deferred_since.get_or_insert_with(std::time::Instant::now);
+                        if auto_restart_defer_expired(*started_at, std::time::Instant::now()) {
+                            let runtime = app_c.state::<Runtime>();
+                            abandon_auto_restart(
+                                &runtime.state,
+                                format!(
+                                    "Harness 自动重启等待插件操作超过 {} 秒，已停止自动重启；请取消或完成插件操作后手动重新启动 Harness。",
+                                    MAX_AUTO_RESTART_PLUGIN_DEFER.as_secs()
+                                ),
+                            );
+                            publish_snapshot(&app_c, &runtime.state);
+                            return;
+                        }
+                        std::thread::sleep(AUTO_RESTART_DEFER_POLL);
                     }
                     Err(error) => {
                         let runtime = app_c.state::<Runtime>();
-                        set_error(
+                        abandon_auto_restart(
                             &runtime.state,
                             format!("Harness 自动重启被插件安全门禁阻止：{error}"),
                         );
-                        runtime
-                            .state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .terminal_startup_failure = true;
                         publish_snapshot(&app_c, &runtime.state);
                         return;
                     }
@@ -678,7 +742,7 @@ struct RuntimeArcs {
     shutting_down: Arc<AtomicBool>,
     restart_attempts: Arc<AtomicU32>,
     gen: Arc<AtomicU64>,
-    restart_gen: Arc<AtomicU64>,
+    restart: Arc<RestartControl>,
 }
 
 /// Shared init-failure path: manage an errored Runtime so the UI has a state
@@ -698,7 +762,7 @@ fn fail_init(app: &AppHandle, arcs: RuntimeArcs, paths: Option<RuntimePaths>, me
         restart_attempts: arcs.restart_attempts,
         paths,
         gen: arcs.gen,
-        restart_gen: arcs.restart_gen,
+        restart: arcs.restart,
     });
     // fail_init historically emitted nothing — the tray/UI must see it too.
     if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>() {
@@ -917,7 +981,7 @@ pub fn init(app: &AppHandle) {
     let shutting_down = Arc::new(AtomicBool::new(false));
     let restart_attempts = Arc::new(AtomicU32::new(0));
     let gen = Arc::new(AtomicU64::new(0));
-    let restart_gen = Arc::new(AtomicU64::new(0));
+    let restart = Arc::new(RestartControl::default());
     app.manage(WindowOrigin::default());
     let arcs = RuntimeArcs {
         stdin: stdin_arc.clone(),
@@ -925,7 +989,7 @@ pub fn init(app: &AppHandle) {
         shutting_down: shutting_down.clone(),
         restart_attempts: restart_attempts.clone(),
         gen: gen.clone(),
-        restart_gen: restart_gen.clone(),
+        restart: restart.clone(),
     };
 
     let paths = match resolve(app) {
@@ -987,7 +1051,7 @@ pub fn init(app: &AppHandle) {
         restart_attempts: restart_attempts.clone(),
         paths: Some(paths.clone()),
         gen: gen.clone(),
-        restart_gen: restart_gen.clone(),
+        restart,
     });
     let runtime = app.state::<Runtime>();
 
@@ -1030,16 +1094,49 @@ pub fn request_restart(app: &AppHandle) -> Result<(), String> {
 
 fn request_restart_inner(app: &AppHandle) -> Result<(), String> {
     let runtime = app.state::<Runtime>();
-    // App teardown has begun (shutdown_blocking sets this before dropping the
-    // stdin pipe): a respawn now would be EOF-killed moments later — refuse
-    // instead of spawning an orphan. Closes the tray-restart vs exit race.
-    if runtime.shutting_down.load(Ordering::SeqCst) {
-        return Err("应用正在退出，无法重启".to_string());
-    }
-    // Supersede any queued crash auto-restart: the user is in control now.
-    runtime.restart_gen.fetch_add(1, Ordering::SeqCst);
-    if !child_alive(&runtime) {
-        let result = respawn_sidecar(app);
+    runtime.restart.with_exclusive_transition(|| {
+        // App teardown has begun (shutdown_blocking sets this before dropping
+        // the stdin pipe): a respawn now would be EOF-killed moments later —
+        // refuse instead of spawning an orphan. Closes the tray-restart vs
+        // exit race.
+        if runtime.shutting_down.load(Ordering::SeqCst) {
+            return Err("应用正在退出，无法重启".to_string());
+        }
+        // Supersede any queued crash auto-restart: the user is in control now.
+        runtime.restart.supersede_queued_auto_restarts();
+        if !child_alive(&runtime) {
+            let result = respawn_sidecar(app);
+            if let Err(e) = &result {
+                let mut s = runtime
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                s.last_error = Some(e.clone());
+                s.status = Status::Crashed;
+                s.terminal_startup_failure = false;
+            } else {
+                reset_restart_attempts(&runtime);
+                let mut s = runtime
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                s.last_error = None;
+                s.terminal_startup_failure = false;
+            }
+            publish_snapshot(app, &runtime.state);
+            return result;
+        }
+
+        let paths = runtime
+            .paths
+            .as_ref()
+            .ok_or_else(|| "运行时路径不可用".to_string())?;
+        enforce_plugin_activation_boundary(paths)?;
+
+        let result = send_raw(
+            &runtime,
+            &serde_json::json!({"id": CMD_ID_RESTART, "command": "restart"}),
+        );
         if let Err(e) = &result {
             let mut s = runtime
                 .state
@@ -1055,42 +1152,51 @@ fn request_restart_inner(app: &AppHandle) -> Result<(), String> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             s.last_error = None;
+            s.status = Status::Starting;
             s.terminal_startup_failure = false;
         }
         publish_snapshot(app, &runtime.state);
-        return result;
-    }
+        result
+    })
+}
 
-    let paths = runtime
-        .paths
-        .as_ref()
-        .ok_or_else(|| "运行时路径不可用".to_string())?;
-    enforce_plugin_activation_boundary(paths)?;
+/// Explicitly stop the Harness while keeping the Desktop/sidecar available.
+/// This is a user lifecycle choice, so it must invalidate a queued automatic
+/// crash restart even when the sidecar is already down.
+pub fn request_shutdown(app: &AppHandle) -> Result<(), String> {
+    let runtime = app.state::<Runtime>();
+    runtime.restart.with_exclusive_transition(|| {
+        runtime.restart.supersede_queued_auto_restarts();
+        if !child_alive(&runtime) {
+            // Keep the real status (Stopped/Idle stays what it is) — only the
+            // message explains why nothing happened.
+            let error = "sidecar 未运行，无需停止".to_string();
+            runtime
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .last_error = Some(error.clone());
+            publish_snapshot(app, &runtime.state);
+            return Err(error);
+        }
 
-    let result = send_raw(
-        &runtime,
-        &serde_json::json!({"id": CMD_ID_RESTART, "command": "restart"}),
-    );
-    if let Err(e) = &result {
-        let mut s = runtime
+        // Block a just-clicked plugin mutation before the sidecar has time to
+        // emit its asynchronous `stopping` event.
+        runtime
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        s.last_error = Some(e.clone());
-        s.status = Status::Crashed;
-        s.terminal_startup_failure = false;
-    } else {
-        reset_restart_attempts(&runtime);
-        let mut s = runtime
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        s.last_error = None;
-        s.status = Status::Starting;
-        s.terminal_startup_failure = false;
-    }
-    publish_snapshot(app, &runtime.state);
-    result
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status = Status::Stopping;
+        let result = send_raw(
+            &runtime,
+            &serde_json::json!({"id": CMD_ID_SHUTDOWN, "command": "shutdown"}),
+        );
+        if let Err(error) = &result {
+            set_error(&runtime.state, error.clone());
+        }
+        publish_snapshot(app, &runtime.state);
+        result
+    })
 }
 
 /// Re-launch the sidecar after it died unexpectedly (user presses the restart
@@ -1157,10 +1263,13 @@ pub fn child_alive(runtime: &Runtime) -> bool {
 pub fn shutdown_blocking(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
     runtime.shutting_down.store(true, Ordering::SeqCst);
-    let _ = send_raw(
-        &runtime,
-        &serde_json::json!({"id": CMD_ID_EXIT_SHUTDOWN, "command": "shutdown"}),
-    );
+    runtime.restart.supersede_queued_auto_restarts();
+    runtime.restart.with_exclusive_transition(|| {
+        let _ = send_raw(
+            &runtime,
+            &serde_json::json!({"id": CMD_ID_EXIT_SHUTDOWN, "command": "shutdown"}),
+        );
+    });
 
     let grace = std::env::var("DSH_SHUTDOWN_GRACE_MS")
         .ok()
@@ -1216,6 +1325,41 @@ mod tests {
             AtomicBool::new(false),
             AtomicU32::new(0),
         )
+    }
+
+    #[test]
+    fn explicit_stop_supersedes_a_queued_auto_restart() {
+        let restart = RestartControl::default();
+        let queued_generation = restart.current_generation();
+        restart.supersede_queued_auto_restarts();
+        assert!(restart.is_superseded(queued_generation));
+    }
+
+    #[test]
+    fn auto_restart_plugin_deferral_has_a_hard_deadline() {
+        let started_at = std::time::Instant::now();
+        assert!(!auto_restart_defer_expired(
+            started_at,
+            started_at + MAX_AUTO_RESTART_PLUGIN_DEFER - std::time::Duration::from_millis(1)
+        ));
+        assert!(auto_restart_defer_expired(
+            started_at,
+            started_at + MAX_AUTO_RESTART_PLUGIN_DEFER
+        ));
+    }
+
+    #[test]
+    fn auto_restart_gate_failure_does_not_authorize_plugin_recovery() {
+        let state = Mutex::new(SharedState {
+            status: Status::Starting,
+            terminal_startup_failure: true,
+            ..Default::default()
+        });
+        abandon_auto_restart(&state, "corrupt pending receipt");
+        let state = state.lock().unwrap();
+        assert_eq!(state.status, Status::Crashed);
+        assert_eq!(state.last_error.as_deref(), Some("corrupt pending receipt"));
+        assert!(!state.terminal_startup_failure);
     }
 
     #[test]

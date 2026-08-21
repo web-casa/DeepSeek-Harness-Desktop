@@ -277,8 +277,8 @@ async function main(): Promise<void> {
   info(`isolated DSH_HOME ${home} · store ${storeDir}`);
 
   // --- add -------------------------------------------------------------
-  const addOut = await runPlugin(["add", "is-odd"], "dsh plugin add is-odd");
-  ok("dsh plugin add is-odd exited 0");
+  const addOut = await runPlugin(["add", "is-odd@3.0.1"], "dsh plugin add is-odd@3.0.1");
+  ok("dsh plugin add is-odd@3.0.1 exited 0");
   if (!existsSync(join(profileDir, "package.json"))) fail("initProfile did not write profiles/web/package.json");
   ok("upstream initProfile wrote profiles/web/package.json");
   if (!existsSync(join(profileDir, "cordis.patch.yml"))) fail("initProfile did not write cordis.patch.yml");
@@ -303,7 +303,7 @@ async function main(): Promise<void> {
   const installedVersion = JSON.parse(
     readFileSync(join(profileDir, "node_modules", "is-odd", "package.json"), "utf8"),
   ) as { version?: string };
-  if (typeof installedVersion.version !== "string" || !installedVersion.version.startsWith("3.")) {
+  if (installedVersion.version !== "3.0.1") {
     fail(`unexpected installed is-odd version: ${JSON.stringify(installedVersion.version)}`);
   }
   ok(`installed version readable from node_modules/is-odd/package.json (v${installedVersion.version})`);

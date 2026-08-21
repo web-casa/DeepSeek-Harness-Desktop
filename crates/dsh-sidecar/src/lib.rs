@@ -131,19 +131,24 @@ pub fn quote_arg(arg: &str) -> String {
 // environment and forwards it to the bundled Node. A user launching the app
 // from a shell with NODE_OPTIONS / NODE_PATH / npm_config_* / pnpm_config_*
 // set would otherwise inject code (`--require=…`) or config into the Harness
-// process. NODE_TLS_REJECT_UNAUTHORIZED is also stripped so inherited shell
-// state cannot silently disable TLS verification. The `env` overrides carried
-// by the start command are applied AFTER the filter and are NOT filtered —
+// process. Node TLS controls are also stripped: NODE_TLS_REJECT_UNAUTHORIZED
+// can silently disable verification, while NODE_EXTRA_CA_CERTS can append an
+// attacker-controlled certificate authority. The `env` overrides carried by
+// the start command are applied AFTER the filter and are NOT filtered —
 // they are the app's own contract (DSH_HOME etc.). Also scrubbed:
 // ELECTRON_RUN_AS_NODE, which would turn a bundled Electron's node into a
 // Harness host if one is ever reused, and the dynamic-linker injection
 // primitives (DYLD_*/LD_*).
 // ---------------------------------------------------------------------------
 
-const FORBIDDEN_ENV_KEYS: [&str; 8] = [
+const FORBIDDEN_ENV_KEYS: [&str; 10] = [
     "node_options",
     "node_path",
     "node_tls_reject_unauthorized",
+    "node_extra_ca_certs",
+    // npm/pnpm use this self-referential control value when spawning helpers;
+    // Desktop always supplies its own bundled entrypoint instead.
+    "npm_execpath",
     "electron_run_as_node",
     "dyld_insert_libraries",
     "dyld_library_path",

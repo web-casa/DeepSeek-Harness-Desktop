@@ -45,3 +45,14 @@ test("an operation that remains busy preserves its completion contract", () => {
     { doneExpected: false, missedDone: false },
   );
 });
+
+test("an in-flight asynchronous operation keeps expecting its completion event", () => {
+  assert.deepEqual(
+    reconcilePluginCompletion({
+      frontendBusy: true,
+      backendBusy: true,
+      doneExpected: true,
+    }),
+    { doneExpected: true, missedDone: false },
+  );
+});
