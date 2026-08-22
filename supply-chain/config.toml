@@ -1583,6 +1583,11 @@ criteria = "safe-to-deploy"
 version = "0.2.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.typed-path]]
+version = "0.12.3"
+criteria = "safe-to-deploy"
+notes = "Reviewed as zip 8's only new transitive dependency: no build script or native code; its unsafe code is confined to documented UTF-8 representation conversions and transparent path casts. The application does not expose typed-path directly."
+
 [[exemptions.typeid]]
 version = "1.0.3"
 criteria = "safe-to-deploy"
@@ -2028,6 +2033,11 @@ notes = "Shell-UX chain pulled in by tauri-plugin-dialog / tauri-plugin-opener (
 version = "4.6.1"
 criteria = "safe-to-deploy"
 notes = "Zip archive handling pulled in by tauri-plugin-updater (update package extraction); upstream of the updater plugin, verified via plugin pin."
+
+[[exemptions.zip]]
+version = "8.6.0"
+criteria = "safe-to-deploy"
+notes = "Direct preset/diagnostics archive dependency, source-reviewed: no build script; default, encryption, native and zlib-rs backends remain disabled. Application uses only safe ZipArchive/ZipWriter APIs and retains bounded, traversal-safe preset extraction tests."
 
 [[exemptions.zmij]]
 version = "1.0.23"

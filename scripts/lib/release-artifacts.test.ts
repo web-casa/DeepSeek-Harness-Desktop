@@ -292,9 +292,40 @@ test("dependency review is blocking with a graph-unavailable fallback", () => {
   assert.match(dependencyWorkflow, /403\|404\)/);
   assert.match(dependencyWorkflow, /pnpm audit --audit-level low/);
   assert.match(dependencyWorkflow, /npm audit --audit-level=low/);
-  assert.match(dependencyWorkflow, /cargo metadata --locked/);
+  assert.match(
+    dependencyWorkflow,
+    /cargo metadata --locked --all-features --format-version 1 > \/dev\/null/,
+  );
+  assert.doesNotMatch(dependencyWorkflow, /cargo metadata --locked --format-version 1 --no-deps/);
+  assert.match(dependencyWorkflow, /git diff --exit-code -- Cargo\.lock/);
   assert.match(dependencyWorkflow, /cargo vet --locked/);
   assert.match(dependencyWorkflow, /verify-js-licenses\.ts --format pnpm/);
+
+  const qualityWorkflow = readFileSync(
+    new URL("../../.github/workflows/quality.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    qualityWorkflow,
+    /cargo metadata --locked --all-features --format-version 1/,
+  );
+  assert.match(qualityWorkflow, /git diff --exit-code -- Cargo\.lock/);
+});
+
+test("zip 8 selects an explicit portable flate2 backend on every target", () => {
+  const cargo = readFileSync(new URL("../../src-tauri/Cargo.toml", import.meta.url), "utf8");
+  // zip's deflate-flate2 feature enables its API but deliberately leaves the
+  // flate2 backend unset. Linux happened to receive one through PNG; Windows
+  // did not, so keep the application-level pure-Rust choice contractual.
+  assert.match(
+    cargo,
+    /zip = \{ version = "8", default-features = false, features = \["deflate-flate2"\] \}/,
+  );
+  assert.match(
+    cargo,
+    /flate2 = \{ version = "1\.1\.9", default-features = false, features = \["rust_backend"\] \}/,
+  );
+  assert.doesNotMatch(cargo, /deflate-flate2-zlib|deflate-flate2-zlib-ng|deflate-zopfli/);
 });
 
 test("release verifies external contracts before publishing", () => {

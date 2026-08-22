@@ -334,7 +334,7 @@ impl MarketClient {
                     .to_string(),
             );
         }
-        let http = reqwest::Client::builder()
+        let http = crate::tls::client_builder()?
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(format!("dsh-desktop/{}", env!("CARGO_PKG_VERSION")))

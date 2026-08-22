@@ -137,7 +137,12 @@ jobs:
       - name: Rust fallback gate
         if: steps.dependency-changes.outputs.rust == 'true'
         run: |
-          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          # --no-deps validates only the root manifests; it does not prove
+          # that their requirements are satisfiable by the committed lock.
+          # Resolve the complete, all-feature graph before any audit so an
+          # uncommitted Cargo.lock rewrite cannot be hidden by later commands.
+          cargo metadata --locked --all-features --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
           cargo deny --manifest-path crates/dsh-sidecar/Cargo.toml check
           cargo deny --manifest-path src-tauri/Cargo.toml check
           cargo vet --locked

@@ -8,7 +8,7 @@
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| 版本 | v0.2.12 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · macOS 已签名/公证 · [English](README.en.md) |
+| 版本 | v0.2.13 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · macOS 已签名/公证 · [English](README.en.md) |
 
 > **macOS 用户**：v0.2.9 起，DMG 使用 Developer ID Application 签名并经
 > Apple 公证、staple 与 Gatekeeper 复验。请只从本仓库 Releases 下载；若官方
@@ -152,6 +152,6 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 - CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发五个原生构建目标（Windows x64、macOS x64/arm64、Linux x64/arm64）及 Store MSIX x64/arm64，再经完整资产清单门禁发布 draft release + `latest.json`。
 - Microsoft Store：`v*` tag 同时构建 x64/arm64 MSIX（`build-msix` job，Store 模式关闭应用内更新并限制插件为 cordis.run 审核列表）。MSIX 产物作为 workflow artifact 下载后上传 Partner Center，不发布到 GitHub Release。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
-- 当前状态：v0.2.12 发布候选；包含多格式安装包、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复。
+- 当前发布版本：v0.2.13；包含多格式安装包、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复。
 - 已知边界：Windows GitHub 安装包尚未配置 Authenticode，可能触发 SmartScreen；macOS 更新清单尚未接入；Linux 包当前以 SHA-256 保护，尚无独立软件仓库签名。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。

@@ -18,12 +18,18 @@ mod presentation;
 mod preset;
 mod recovery;
 mod secure_fs;
+mod tls;
 mod tray;
 
 #[cfg(any(target_os = "macos", test))]
 mod app_menu;
 
 fn main() {
+    if let Err(error) = tls::install_process_default() {
+        eprintln!("[dsh-desktop] TLS provider initialization failed: {error}");
+        std::process::exit(1);
+    }
+
     // Windows: give the shell a private hidden console before any plugin
     // child exists. Plugin children are spawned WITHOUT CREATE_NO_WINDOW so
     // they inherit it — that inheritance is what makes PlatformChild's

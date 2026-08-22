@@ -2511,7 +2511,11 @@ pub async fn confirm_remote_preset_download(
         }
     };
 
-    let client = reqwest::Client::builder()
+    let client = crate::tls::client_builder()
+        .map_err(|error| {
+            fail(&pending, &arbiter, &request_id, None);
+            format!("client init failed: {error}")
+        })?
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
