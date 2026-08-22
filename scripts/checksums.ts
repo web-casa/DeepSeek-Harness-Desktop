@@ -10,19 +10,35 @@ import {
   bundleArtifactCandidates,
   type PublicBundle,
 } from "./lib/release-artifacts.ts";
+import {
+  isWindowsWixInstallerLocale,
+  type WindowsWixInstallerLocale,
+} from "./lib/windows-installer-locales.ts";
 
 const bundleArg = process.argv.indexOf("--bundle");
 const bundleType = bundleArg >= 0 ? process.argv[bundleArg + 1] : undefined;
 if (bundleType === undefined || !Object.hasOwn(BUNDLE_SPECS, bundleType)) {
   fail(
-    `usage: node scripts/checksums.ts --bundle <${Object.keys(BUNDLE_SPECS).join("|")}>`,
+    `usage: node scripts/checksums.ts --bundle <${Object.keys(BUNDLE_SPECS).join("|")}> [--installer-locale <en-US|zh-CN>]`,
   );
 }
 const bundle = bundleType as PublicBundle;
-const artifacts = bundleArtifactCandidates(repoRoot, bundle);
+const localeIndex = process.argv.indexOf("--installer-locale");
+const installerLocale = localeIndex >= 0 ? process.argv[localeIndex + 1] : undefined;
+if (installerLocale !== undefined && !isWindowsWixInstallerLocale(installerLocale)) {
+  fail("--installer-locale must be en-US or zh-CN");
+}
+if ((bundle === "msi") !== (installerLocale !== undefined)) {
+  fail("--installer-locale is required for MSI and forbidden for other bundles");
+}
+const artifacts = bundleArtifactCandidates(
+  repoRoot,
+  bundle,
+  installerLocale as WindowsWixInstallerLocale | undefined,
+);
 if (artifacts.length !== 1) {
   fail(
-    `expected exactly one ${BUNDLE_SPECS[bundle].suffix} artifact in ${BUNDLE_SPECS[bundle].directory}, found: ${artifacts.map((path) => basename(path)).join(", ") || "none"}`,
+    `expected exactly one ${bundle}${installerLocale ? ` (${installerLocale})` : ""} artifact in ${BUNDLE_SPECS[bundle].directory}, found: ${artifacts.map((path) => basename(path)).join(", ") || "none"}`,
   );
 }
 

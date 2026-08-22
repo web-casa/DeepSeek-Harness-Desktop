@@ -8,7 +8,7 @@
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| 版本 | v0.2.13 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · macOS 已签名/公证 · [English](README.en.md) |
+| 当前版本 | v0.2.13 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · macOS 已签名/公证 · [English](README.en.md) |
 
 > **macOS 用户**：v0.2.9 起，DMG 使用 Developer ID Application 签名并经
 > Apple 公证、staple 与 Gatekeeper 复验。请只从本仓库 Releases 下载；若官方
@@ -16,7 +16,7 @@
 
 | 平台 | GitHub Release 安装包 |
 |---|---|
-| Windows x64 | NSIS `*-setup.exe`、WiX `.msi` |
+| Windows（下一版起） | 原生 x64 与 ARM64：双语 NSIS `*-setup.exe`、WiX `.msi` |
 | macOS | arm64 与 x64 `.dmg` |
 | Linux | x64 与 arm64 `.AppImage`、`.deb`、`.rpm`、`.flatpak` |
 
@@ -24,16 +24,22 @@
 保持为独立、未签名的 Partner Center workflow artifact，不会混入公开 Release；
 这类包由商店完成签名，不能作为普通侧载包使用。
 
+WiX MSI 名称最后的 `_en-US` 或 `_zh-CN` **仅代表安装向导语言**，不是
+Desktop 控制器的可用语言：两种包内的控制器都支持简体中文和 English。NSIS
+则是一份同时含中英文资源的安装器，可按系统语言选择或让用户手动选择。发布
+流水线会在各原生架构上验证 MSI 的实际 `ProductLanguage`，避免语言后缀沦为
+仅文件名上的声明。
+
 ## 特性一览
 
 | | |
 |---|---|
 | 🔌 **插件生态** | Cordis 插件体系随包携带；插件市场浏览/搜索/一键安装；预设安全导入导出；离线 `.tgz` 侧载 |
-| 🔄 **自动更新**（Windows） | 更新包由内嵌 minisign 公钥校验；macOS 更新清单仍待发布接入 |
+| 🔄 **自动更新**（下一版起：Windows NSIS） | x64/ARM64 更新包各自由内嵌 minisign 公钥校验；MSI、Store、macOS 与 Linux 走其各自安全更新路径 |
 | 💓 **挂死自愈** | 心跳检测 Harness「活着但无响应」并自动重启（退避+上限） |
 | 🛡️ **安全边界** | Harness 窗口零 IPC 权限；桌面命令仅授权本地窗口；环境消毒 |
 | 🔒 **隐私默认值** | 会话遥测默认关闭；子进程环境消毒（NODE_OPTIONS/loader 注入键等） |
-| 🧰 **诊断与反馈** | 一键导出诊断 zip（尽力脱敏）、复制诊断、预填 issue 报告 |
+| 🧰 **诊断与反馈** | 一键导出诊断 zip（尽力脱敏）、复制诊断、预填 issue 报告；用户显式开启后可为一次复现保留有界的本地 stderr/Desktop 错误证据 |
 | 🪟 **桌面体验** | 单实例、窗口状态记忆、崩溃自动恢复、macOS 关闭=隐藏；托盘按 Harness 实时状态安全开放控制器/Harness、启动/重启与停止；控制器、托盘与 macOS 菜单可跟随系统语言或手选简体中文 / English，窗口标题同步但产品名保持 DSH Desktop |
 
 ## ✨ 插件生态
@@ -54,6 +60,16 @@ $env:DSH_HOME="<诊断页 dshHome>"; node "<安装目录>\runtime\harness\node_m
 ```
 
 插件装入 `<dshHome>/profiles/web/`（用户数据目录，不写安装目录），装完在应用里「重新启动 Harness」生效。
+
+如果升级中断或手动删除过插件文件，控制器会只读检查「`package.json` 仍声明、
+直接包入口却缺失」的 Web profile 漂移。它绝不自动改写用户配置；只有能够证明
+为无自定义配置、且属于**未启用包**的简单 `cordis.patch.yml` 条目时，才会展示逐项
+预览并要求再次确认后移除该条目。已启用 bundle、符号链接、复杂 YAML 与其他不确定
+状态只报告，留给 Harness 的安全恢复流程或用户人工处理。
+
+### 详细诊断（主动开启）
+
+控制器默认只持久化有界的生命周期事实。遇到需要更完整错误线索的问题，可开启**详细诊断**、重启 Harness 后复现。开启期间，Desktop 只在本地记录尽力脱敏且有界的 Harness/插件 **stderr** 与 Desktop 自身错误；不会记录 Harness stdout、会话、提示词或工作区文件，也不会上传任何数据。只有你显式选择导出诊断 zip 时，这些记录才会进入压缩包。问题排查完成后请关闭该模式，并在不再需要导出包时使用「清除详细日志」；stderr 仍可能包含私密信息，分享前请逐项检查。
 
 **预设**（`.dshpreset`）：把一组插件行打包成可分享的智能体配置。设置页提供安全导入/导出/删除——路径/符号链接/配额/密钥扫描 → 两阶段确认 → 原子安装到 `<dshHome>/.agent-presets/`，Harness 设置页立即可见。设置页还逐次复核预设根健康：损坏（`agent.cordis.yml` 缺失/不可读/为空，上游会拒绝挂载）、不安全（符号链接等上游跳过但占用 id 的条目）、缺元数据（`preset.yml`）即时可见并可删除。删除预设前请留意：桌面层直接移除目录，不清理 Harness 的默认预设设置——若删除的是当前默认预设，需在 Harness 设置页改选默认，否则下次会话可能无法启动。
 
@@ -135,7 +151,7 @@ Microsoft Store 构建要求插件同时通过生产 API 的实时安装门禁�
 | Rust | `cargo nextest`（sidecar 与 Tauri，Windows 宿主亦实跑）· llvm-cov ≥50%/55% · `clippy -D warnings` |
 | 供应链 | `cargo deny` · `cargo vet --locked`（70 全审 + 2 delta + 豁免基线）· `npm audit`/`pnpm audit` 阻断 high |
 | 安全扫描 | CodeQL（rust/js-ts/actions）· Dependency Review（Graph 不可用时自动切换锁文件门禁） |
-| 安装包 | 7 种公开格式统一 `verify-bundle` + Windows/macOS `verify-signing`（fail-closed）+ 每包 SHA-256 |
+| 安装包 | 7 种公开格式、16 个公开安装包统一 `verify-bundle` + Windows/macOS `verify-signing`（fail-closed）+ 每包 SHA-256 |
 | 发布 | 5 分钟负载 soak · updater 产物与 `latest.json` |
 
 ### 目录
@@ -149,9 +165,9 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 
 ## 发布与版本
 
-- CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发五个原生构建目标（Windows x64、macOS x64/arm64、Linux x64/arm64）及 Store MSIX x64/arm64，再经完整资产清单门禁发布 draft release + `latest.json`。
+- CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发六个**原生**构建目标（Windows x64/ARM64、macOS x64/arm64、Linux x64/arm64）及 Store MSIX x64/arm64，再经完整资产清单门禁创建 draft release、生成并校验 `latest.json`，最后才自动公开 Release。每一 lane 都会同时核对 Node、Rust host triple 与目标架构；Windows on ARM 另加 x64 兼容性安装 smoke，不把它误称为原生构建。
 - Microsoft Store：`v*` tag 同时构建 x64/arm64 MSIX（`build-msix` job，Store 模式关闭应用内更新并限制插件为 cordis.run 审核列表）。MSIX 产物作为 workflow artifact 下载后上传 Partner Center，不发布到 GitHub Release。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
-- 当前发布版本：v0.2.13；包含多格式安装包、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复。
-- 已知边界：Windows GitHub 安装包尚未配置 Authenticode，可能触发 SmartScreen；macOS 更新清单尚未接入；Linux 包当前以 SHA-256 保护，尚无独立软件仓库签名。
+- 当前发布版本：v0.2.13；包含多格式安装包、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复。下一次 GitHub Release 起，Windows 公开下载新增原生 ARM64 包和中英文 MSI 安装器；历史 v0.2.13 文件名中的 `_en-US` 只表示其安装向导为英文。
+- 已知边界：Windows GitHub 安装包尚未配置 Authenticode，可能触发 SmartScreen；应用内更新只接受与当前 CPU 架构及 NSIS 安装方式完全匹配的 payload，MSI 不会自动切换到 NSIS；macOS 仍待“公证后 updater archive + 原生升级 smoke”闭环；Linux 包当前以 SHA-256 保护，尚无独立软件仓库签名。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。

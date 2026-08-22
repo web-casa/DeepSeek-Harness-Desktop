@@ -102,5 +102,8 @@ test("dictionaries interpolate values and preserve controller-owned safety copy"
   assert.match(translate("en", "dialog.deepLinkWarning"), /Rust-validated Cordis slug/);
   assert.equal(translate("en", "window.controllerTitle"), "DSH Desktop — Controller");
   assert.equal(translate("zh-CN", "window.controllerTitle"), "DSH Desktop — 控制器");
+  assert.match(translate("en", "diagnostics.modeDescription"), /stderr/);
+  assert.match(translate("zh-CN", "diagnostics.modeWarning"), /私密/);
+  assert.match(translate("en", "diagnostics.modeDisabledSessionOnly"), /revert/);
   assert.match(formatControllerDate("en", 0), /1970/);
 });

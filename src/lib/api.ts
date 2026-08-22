@@ -32,6 +32,17 @@ export const getLogs = (): Promise<[string, string][]> => invoke("get_logs");
 export const getVersions = (): Promise<Versions> => invoke("get_versions");
 export const getDiagnostics = (): Promise<Record<string, unknown>> =>
   invoke("get_diagnostics");
+export interface DiagnosticModeState {
+  enabled: boolean;
+  persisted: boolean;
+  hasCapturedLogs: boolean;
+}
+
+export const getDiagnosticMode = (): Promise<DiagnosticModeState> =>
+  invoke("get_diagnostic_mode");
+export const setDiagnosticMode = (enabled: boolean): Promise<DiagnosticModeState> =>
+  invoke("set_diagnostic_mode", { enabled });
+export const clearDiagnosticLogs = (): Promise<void> => invoke("clear_diagnostic_logs");
 export const restart = (): Promise<void> => invoke("restart");
 export const shutdown = (): Promise<void> => invoke("shutdown");
 export const openHarness = (): Promise<void> => invoke("open_harness");
@@ -60,11 +71,19 @@ export async function onEvent(
   return unlisten;
 }
 
+export type UpdateUnsupportedReason =
+  | "store"
+  | "manual"
+  | "architecture"
+  | "msi"
+  | "installer";
+
 export interface UpdateInfo {
   available: boolean;
   version?: string;
   notes?: string;
   unsupported?: boolean;
+  unsupportedReason?: UpdateUnsupportedReason;
 }
 
 export const checkUpdate = (): Promise<UpdateInfo> => invoke("check_update");
@@ -121,8 +140,31 @@ export interface PluginEntry {
   entryRevision?: string | null;
 }
 
+export type ProfileConsistencyIssueKind = "missingDependency";
+
+/** Bounded, read-only Web-profile drift evidence from the trusted backend. */
+export interface ProfileConsistencyIssue {
+  kind: ProfileConsistencyIssueKind;
+  packageName: string;
+  active: boolean;
+  cleanupAvailable: boolean;
+}
+
+export interface ProfileConsistencyReport {
+  issues: ProfileConsistencyIssue[];
+  cleanupEligibleCount: number;
+}
+
+/** A volatile, explicit-confirmation-only profile patch cleanup preview. */
+export interface ProfileCleanupPreview {
+  transactionId: string;
+  packages: string[];
+  removalCount: number;
+}
+
 export interface PluginList {
   plugins: PluginEntry[];
+  consistency: ProfileConsistencyReport;
   busy: boolean;
 }
 
@@ -143,6 +185,12 @@ export const installPlugin = (name: string): Promise<void> =>
 export const uninstallPlugin = (name: string): Promise<void> =>
   invoke("uninstall_plugin", { name });
 export const cancelPluginOp = (): Promise<void> => invoke("cancel_plugin_op");
+export const previewProfilePatchCleanup = (): Promise<ProfileCleanupPreview> =>
+  invoke("preview_profile_patch_cleanup");
+export const applyProfilePatchCleanup = (
+  transactionId: string,
+): Promise<ProfileCleanupPreview> =>
+  invoke("apply_profile_patch_cleanup", { transactionId });
 
 export type PluginRecoveryPhase =
   | "prepared"
