@@ -14,6 +14,7 @@ mod market;
 mod observability;
 mod paths;
 mod plugins;
+mod presentation;
 mod preset;
 mod recovery;
 mod secure_fs;
@@ -100,8 +101,11 @@ fn main() {
                 .build(),
         )
         .setup(|app| {
+            // Native presentation state must be ready before the tray/menu so
+            // a saved language preference is visible even before Svelte loads.
+            presentation::init(app.handle());
             #[cfg(target_os = "macos")]
-            app_menu::init(app.handle());
+            app_menu::init(app.handle(), presentation::current_locale(app.handle()));
             // Observability is independent from DSH_HOME and must exist before
             // Harness resolution so initialization failures are still visible.
             // Failure to persist evidence does not block the application.
@@ -152,6 +156,8 @@ fn main() {
             commands::get_logs,
             commands::get_versions,
             commands::get_diagnostics,
+            presentation::get_presentation_locale,
+            presentation::set_presentation_locale,
             commands::restart,
             commands::shutdown,
             commands::open_harness,

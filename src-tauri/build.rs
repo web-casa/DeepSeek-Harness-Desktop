@@ -13,6 +13,8 @@ fn main() {
         "get_logs",
         "get_versions",
         "get_diagnostics",
+        "get_presentation_locale",
+        "set_presentation_locale",
         "restart",
         "shutdown",
         "open_harness",

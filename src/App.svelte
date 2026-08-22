@@ -6,7 +6,9 @@
     getLogs,
     getVersions,
     getDiagnostics,
+    getPresentationLocale,
     restart,
+    setPresentationLocale,
     shutdown,
     openHarness,
     checkUpdate,
@@ -65,6 +67,7 @@
     type PluginInstallRequest,
     type PluginRecoveryCandidate,
     type PluginRecoveryOverview,
+    type PresentationLocaleState,
   } from "./lib/api";
   import {
     arbitratePluginRequest,
@@ -79,10 +82,12 @@
     formatControllerDate,
     isLocalePreference,
     loadLocalePreference,
+    nativePreferenceMigration,
     resolveControllerLocale,
     saveLocalePreference,
     translate,
     type LocalePreference,
+    type ControllerLocale,
     type TranslationKey,
     type TranslationValues,
   } from "./lib/controller-i18n";
@@ -161,7 +166,12 @@
 
   let localePreference = $state<LocalePreference>(loadLocalePreference());
   let systemLanguages = $state<string[]>(browserLanguages());
-  let controllerLocale = $derived(resolveControllerLocale(localePreference, systemLanguages));
+  let nativeControllerLocale = $state<ControllerLocale | null>(null);
+  let localeSaving = $state(false);
+  let localeRequest = 0;
+  let controllerLocale = $derived(
+    nativeControllerLocale ?? resolveControllerLocale(localePreference, systemLanguages),
+  );
 
   const STATUS_TEXT: Record<Status, TranslationKey> = {
     idle: "status.idle",
@@ -191,11 +201,59 @@
     return translate(controllerLocale, key, values);
   }
 
-  function setLocalePreference(event: Event) {
+  function applyNativeLocale(snapshot: PresentationLocaleState, notifyPersistenceFailure = false) {
+    localePreference = snapshot.preference;
+    nativeControllerLocale = snapshot.locale;
+    // Keep the v0.2.12 browser-only key in sync so a future browser-mode
+    // session, or a downgrade, never silently loses the user's choice.
+    saveLocalePreference(snapshot.preference);
+    if (notifyPersistenceFailure && !snapshot.persisted) {
+      showToast(t("locale.sessionOnly"));
+    }
+  }
+
+  async function synchronizeNativeLocale() {
+    const request = ++localeRequest;
+    const legacyPreference = loadLocalePreference();
+    try {
+      let snapshot = await getPresentationLocale();
+      if (request !== localeRequest) return;
+      // Native state is authoritative once it exists. The only migration path
+      // is a first-run native default plus a valid prior manual browser choice.
+      const migration = nativePreferenceMigration(snapshot.persisted, legacyPreference);
+      if (migration) {
+        snapshot = await setPresentationLocale(migration, browserLanguages());
+      }
+      if (request !== localeRequest) return;
+      applyNativeLocale(snapshot);
+    } catch {
+      // A partial/older desktop build must remain usable with the v0.2.12
+      // localStorage fallback. Do not mark it as browser mode: core IPC works.
+      if (request === localeRequest) nativeControllerLocale = null;
+    }
+  }
+
+  async function setLocalePreference(event: Event) {
     const value = (event.currentTarget as HTMLSelectElement).value;
     const preference = isLocalePreference(value) ? value : "system";
-    localePreference = preference;
-    saveLocalePreference(preference);
+    const languages = browserLanguages();
+    systemLanguages = languages;
+    if (!inTauri) {
+      localePreference = preference;
+      saveLocalePreference(preference);
+      return;
+    }
+
+    const request = ++localeRequest;
+    localeSaving = true;
+    try {
+      const snapshot = await setPresentationLocale(preference, languages);
+      if (request === localeRequest) applyNativeLocale(snapshot, true);
+    } catch {
+      if (request === localeRequest) showToast(t("locale.updateFailed"));
+    } finally {
+      if (request === localeRequest) localeSaving = false;
+    }
   }
 
   function marketFailureMessage(context: TranslationKey, error: unknown): string {
@@ -937,19 +995,35 @@
     await prepareMarketInstall(request.slug);
   }
 
-  // The browser does not expose a portable locale store, but it does emit this
-  // event when its language preferences change. Only the explicit “system”
-  // mode follows it; a manual controller choice remains stable and persisted.
+  // Browsers notify language-preference changes, but do not expose a portable
+  // native store. In Tauri, refresh the native state too so tray/menu/window
+  // labels remain synchronized; browser mode stays local-only.
   onMount(() => {
     const syncSystemLanguages = () => {
-      systemLanguages = browserLanguages();
+      const languages = browserLanguages();
+      systemLanguages = languages;
+      if (!inTauri || localeSaving || localePreference !== "system") return;
+      const request = ++localeRequest;
+      void setPresentationLocale("system", languages)
+        .then((snapshot) => {
+          if (request === localeRequest) applyNativeLocale(snapshot);
+        })
+        .catch(() => {
+          // Preserve the last synchronized native locale rather than making a
+          // failed IPC call change only one of the native and Svelte surfaces.
+        });
     };
     window.addEventListener("languagechange", syncSystemLanguages);
     return () => window.removeEventListener("languagechange", syncSystemLanguages);
   });
 
   $effect(() => {
-    if (typeof document !== "undefined") document.documentElement.lang = controllerLocale;
+    if (typeof document === "undefined") return;
+    document.documentElement.lang = controllerLocale;
+    // Native windows are titled by Rust. Updating document.title there could
+    // race the fixed window-chrome title; browser mode still gets a localized
+    // tab title.
+    if (!inTauri) document.title = t("window.controllerTitle");
   });
 
   // Initial data load (async onMount is fine here — no cleanup needed).
@@ -963,6 +1037,7 @@
     } catch {
       inTauri = false;
     }
+    if (inTauri) await synchronizeNativeLocale();
     refreshPresets();
     refreshPlugins();
     refreshRecovery();
@@ -1246,7 +1321,12 @@
     <div class="spacer"></div>
     <label class="locale-control">
       <span>{t("locale.label")}</span>
-      <select value={localePreference} onchange={setLocalePreference} aria-label={t("locale.label")}>
+      <select
+        value={localePreference}
+        onchange={setLocalePreference}
+        aria-label={t("locale.label")}
+        disabled={localeSaving}
+      >
         <option value="system">{t("locale.system")}</option>
         <option value="zh-CN">{t("locale.zhCN")}</option>
         <option value="en">{t("locale.en")}</option>

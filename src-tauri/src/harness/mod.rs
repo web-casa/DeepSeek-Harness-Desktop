@@ -377,12 +377,13 @@ pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
         }
 
         let navigation_origin = authorized_origin.clone();
+        let title_app = app_in.clone();
         let result = tauri::WebviewWindowBuilder::new(
             &app_in,
             "harness",
             tauri::WebviewUrl::External(parsed),
         )
-        .title("DSH Desktop")
+        .title(crate::presentation::harness_window_title_for(&app_in))
         .inner_size(1280.0, 800.0)
         .min_inner_size(960.0, 600.0)
         .on_navigation(move |candidate| {
@@ -390,6 +391,12 @@ pub(crate) fn open_harness_window(app: &AppHandle, url: &str) {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             matches_authorized_origin(candidate, authorized.as_deref())
+        })
+        // The remote Harness is allowed to render its own web document, but
+        // never to control native window chrome. Reassert the locally chosen
+        // title on every document-title update.
+        .on_document_title_changed(move |window, _document_title| {
+            let _ = window.set_title(crate::presentation::harness_window_title_for(&title_app));
         })
         .build();
         if let Err(error) = result {
@@ -682,9 +689,17 @@ fn record_lifecycle_event(app: &AppHandle, event: &Value) {
 /// the tray can never go stale (watcher, fail_init, command errors included).
 pub(crate) fn publish_snapshot(app: &AppHandle, state: &Arc<Mutex<SharedState>>) {
     let snapshot = snapshot_payload(state);
-    if let Some(status) = snapshot.get("status").and_then(|v| v.as_str()) {
-        crate::tray::update_status(app, &crate::tray::status_label(status));
-    }
+    let (status, harness_ready) = {
+        let state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            state.status,
+            state.status == Status::Running
+                && state.url.as_deref().is_some_and(is_valid_readiness_url),
+        )
+    };
+    crate::tray::update_status(app, status, harness_ready);
     let _ = app.emit_to("bootstrap", "harness-event", &snapshot);
 }
 

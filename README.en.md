@@ -36,7 +36,7 @@ workflow artifacts. They are Store-signing inputs, not public sideload files.
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |
 | 🔒 **Privacy defaults** | Session telemetry OFF; child env sanitized (NODE_OPTIONS, loader injection keys, …) |
 | 🧰 **Diagnostics & feedback** | One-click diagnostics zip (best-effort redaction), copy diagnostics, prefilled issue reports |
-| 🪟 **Desktop UX** | Single instance, window-state memory, crash auto-restart, macOS close-to-tray; controller language can follow the system or be set to Simplified Chinese / English |
+| 🪟 **Desktop UX** | Single instance, window-state memory, crash auto-restart, macOS close-to-tray; the tray exposes Controller/Harness, start/restart, and stop only when the live Harness state permits it; controller, tray, and macOS menu language can follow the system or be set to Simplified Chinese / English, with synchronized window titles while the product name remains DSH Desktop |
 
 ## ✨ Plugin ecosystem
 
@@ -92,7 +92,7 @@ may fail to start.
 
 ```
 Tauri 2 shell
- ├─ bootstrap window: local Svelte UI · limited desktop IPC (22 commands, ACL-gated)
+ ├─ bootstrap window: local Svelte UI · limited desktop IPC (ACL-gated)
  └─ harness window: http://127.0.0.1:<random port> · original Harness Web UI · zero IPC
         │ NDJSON (stdin/stdout)
 dsh-sidecar (Rust, no heavy dependencies)

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ControllerLocale, LocalePreference } from "./controller-i18n";
 
 export type Status =
   | "idle"
@@ -34,6 +35,21 @@ export const getDiagnostics = (): Promise<Record<string, unknown>> =>
 export const restart = (): Promise<void> => invoke("restart");
 export const shutdown = (): Promise<void> => invoke("shutdown");
 export const openHarness = (): Promise<void> => invoke("open_harness");
+
+/** Native presentation state is shared with the tray and window chrome. */
+export interface PresentationLocaleState {
+  preference: LocalePreference;
+  locale: ControllerLocale;
+  persisted: boolean;
+}
+
+export const getPresentationLocale = (): Promise<PresentationLocaleState> =>
+  invoke("get_presentation_locale");
+export const setPresentationLocale = (
+  preference: LocalePreference,
+  systemLanguages: string[],
+): Promise<PresentationLocaleState> =>
+  invoke("set_presentation_locale", { preference, systemLanguages });
 
 export async function onEvent(
   handler: (payload: StatusPayload) => void,

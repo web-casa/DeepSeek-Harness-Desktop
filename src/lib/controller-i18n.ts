@@ -19,6 +19,9 @@ const en = {
   "locale.system": "Follow system",
   "locale.zhCN": "简体中文",
   "locale.en": "English",
+  "locale.sessionOnly": "The language changed for this session, but could not be saved for the next launch.",
+  "locale.updateFailed": "Could not update the desktop language. Your current choice was kept.",
+  "window.controllerTitle": "DSH Desktop — Controller",
   "value.unknown": "unknown",
   "header.subtitle": "Desktop distribution layer · Original Harness Web UI · Bundled Node runtime",
   "browser.warning": "Running in browser mode (not embedded in Tauri, so IPC is unavailable). Use",
@@ -255,6 +258,9 @@ const zhCN: Record<TranslationKey, string> = {
   "locale.system": "跟随系统",
   "locale.zhCN": "简体中文",
   "locale.en": "English",
+  "locale.sessionOnly": "语言已在本次运行中切换，但无法保存到下次启动。",
+  "locale.updateFailed": "无法更新桌面语言，已保留当前选择。",
+  "window.controllerTitle": "DSH Desktop — 控制器",
   "value.unknown": "未知",
   "header.subtitle": "桌面发行层 · 原版 Harness Web UI · 内置 Node Runtime",
   "browser.warning": "当前以浏览器模式运行（未嵌入 Tauri，IPC 不可用）。请使用",
@@ -534,8 +540,12 @@ export function isLocalePreference(value: unknown): value is LocalePreference {
 }
 
 function defaultStorage(): KeyValueStorage | null {
-  if (typeof localStorage === "undefined") return null;
   try {
+    // In privacy-restricted WebViews, merely resolving `localStorage` can
+    // throw SecurityError. Keep both the probe and the value access inside
+    // this boundary: this function is evaluated as a default argument while
+    // the controller initializes, so letting it throw would blank the UI.
+    if (typeof localStorage === "undefined") return null;
     return localStorage;
   } catch {
     return null;
@@ -563,6 +573,18 @@ export function saveLocalePreference(
     // Privacy modes and restrictive WebViews can reject writes. The controller
     // stays usable and simply falls back to system language next launch.
   }
+}
+
+/**
+ * The native store is authoritative after it has persisted a preference. On
+ * the first native-capable launch only, preserve a manual v0.2.12 browser
+ * choice instead of silently replacing it with the native default.
+ */
+export function nativePreferenceMigration(
+  nativePersisted: boolean,
+  legacyPreference: LocalePreference,
+): LocalePreference | null {
+  return !nativePersisted && legacyPreference !== "system" ? legacyPreference : null;
 }
 
 export function resolveControllerLocale(

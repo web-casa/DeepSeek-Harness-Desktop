@@ -5,6 +5,7 @@ import {
   detectSystemLocale,
   formatControllerDate,
   loadLocalePreference,
+  nativePreferenceMigration,
   resolveControllerLocale,
   saveLocalePreference,
   translate,
@@ -61,6 +62,34 @@ test("preference persistence accepts only the reviewed enum and fails open", () 
   assert.doesNotThrow(() => saveLocalePreference("zh-CN", blocked));
 });
 
+test("a throwing localStorage getter cannot prevent controller initialization", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  // Node's test host exposes either no localStorage or a configurable one.
+  // Keep this guard so the regression test remains valid in stricter hosts.
+  if (previous && !previous.configurable) return;
+
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() {
+      throw new Error("SecurityError: storage access denied");
+    },
+  });
+  try {
+    assert.equal(loadLocalePreference(), "system");
+    assert.doesNotThrow(() => saveLocalePreference("zh-CN"));
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "localStorage", previous);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+});
+
+test("first native launch migrates only a manual legacy preference", () => {
+  assert.equal(nativePreferenceMigration(false, "en"), "en");
+  assert.equal(nativePreferenceMigration(false, "zh-CN"), "zh-CN");
+  assert.equal(nativePreferenceMigration(false, "system"), null);
+  assert.equal(nativePreferenceMigration(true, "en"), null);
+});
+
 test("dictionaries interpolate values and preserve controller-owned safety copy", () => {
   assert.equal(
     translate("en", "dialog.claimedPackage", { name: "@cordisjs/example" }),
@@ -71,5 +100,7 @@ test("dictionaries interpolate values and preserve controller-owned safety copy"
     "安装失败：exit 1",
   );
   assert.match(translate("en", "dialog.deepLinkWarning"), /Rust-validated Cordis slug/);
+  assert.equal(translate("en", "window.controllerTitle"), "DSH Desktop — Controller");
+  assert.equal(translate("zh-CN", "window.controllerTitle"), "DSH Desktop — 控制器");
   assert.match(formatControllerDate("en", 0), /1970/);
 });
