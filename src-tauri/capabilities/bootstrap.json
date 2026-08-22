@@ -11,6 +11,8 @@
     "allow-get-logs",
     "allow-get-versions",
     "allow-get-diagnostics",
+    "allow-get-presentation-locale",
+    "allow-set-presentation-locale",
     "allow-restart",
     "allow-shutdown",
     "allow-open-harness",

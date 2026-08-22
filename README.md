@@ -34,7 +34,7 @@
 | 🛡️ **安全边界** | Harness 窗口零 IPC 权限；桌面命令仅授权本地窗口；环境消毒 |
 | 🔒 **隐私默认值** | 会话遥测默认关闭；子进程环境消毒（NODE_OPTIONS/loader 注入键等） |
 | 🧰 **诊断与反馈** | 一键导出诊断 zip（尽力脱敏）、复制诊断、预填 issue 报告 |
-| 🪟 **桌面体验** | 单实例、窗口状态记忆、崩溃自动恢复、macOS 关闭=隐藏 |
+| 🪟 **桌面体验** | 单实例、窗口状态记忆、崩溃自动恢复、macOS 关闭=隐藏；托盘按 Harness 实时状态安全开放控制器/Harness、启动/重启与停止；控制器、托盘与 macOS 菜单可跟随系统语言或手选简体中文 / English，窗口标题同步但产品名保持 DSH Desktop |
 
 ## ✨ 插件生态
 
@@ -63,7 +63,7 @@ $env:DSH_HOME="<诊断页 dshHome>"; node "<安装目录>\runtime\harness\node_m
 
 ```
 Tauri 2 壳
- ├─ bootstrap 窗口：本地 Svelte UI · 有限桌面 IPC（22 命令，ACL 授权）
+ ├─ bootstrap 窗口：本地 Svelte UI · 有限桌面 IPC（ACL 授权）
  └─ harness 窗口：http://127.0.0.1:<随机端口> · 原版 Harness Web UI · 零 IPC
         │ NDJSON (stdin/stdout)
 dsh-sidecar（Rust，无重依赖）

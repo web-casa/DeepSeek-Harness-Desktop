@@ -3,11 +3,7 @@
 //! The menu mirrors Tauri's default role-only surface. It intentionally adds
 //! no custom command, menu event, frontend IPC, reload, or developer action.
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MenuLanguage {
-    English,
-    SimplifiedChinese,
-}
+use crate::presentation::PresentationLocale;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MenuLabels {
@@ -79,37 +75,11 @@ const SIMPLIFIED_CHINESE: MenuLabels = MenuLabels {
     help: "帮助",
 };
 
-impl MenuLanguage {
-    const fn labels(self) -> &'static MenuLabels {
-        match self {
-            Self::English => &ENGLISH,
-            Self::SimplifiedChinese => &SIMPLIFIED_CHINESE,
-        }
+const fn labels(locale: PresentationLocale) -> &'static MenuLabels {
+    match locale {
+        PresentationLocale::English => &ENGLISH,
+        PresentationLocale::SimplifiedChinese => &SIMPLIFIED_CHINESE,
     }
-}
-
-fn classify_language_tag(tag: &str) -> Option<MenuLanguage> {
-    let normalized = tag.trim().replace('_', "-").to_ascii_lowercase();
-    if matches!(normalized.as_str(), "zh" | "zh-cn" | "zh-sg" | "zh-hans")
-        || normalized.starts_with("zh-hans-")
-    {
-        return Some(MenuLanguage::SimplifiedChinese);
-    }
-    if normalized == "en" || normalized.starts_with("en-") {
-        return Some(MenuLanguage::English);
-    }
-    None
-}
-
-fn language_from_preferences<I, S>(preferences: I) -> MenuLanguage
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    preferences
-        .into_iter()
-        .find_map(|tag| classify_language_tag(tag.as_ref()))
-        .unwrap_or(MenuLanguage::English)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -140,8 +110,7 @@ fn replace_with_fallback<T, E>(
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{language_from_preferences, replace_with_fallback, MenuLabels};
-    use objc2_foundation::NSLocale;
+    use super::{labels, replace_with_fallback, MenuLabels, PresentationLocale};
     use tauri::{
         menu::{
             AboutMetadata, Menu, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
@@ -149,13 +118,8 @@ mod macos {
         AppHandle, Wry,
     };
 
-    fn preferred_labels() -> &'static MenuLabels {
-        let preferences = NSLocale::preferredLanguages();
-        language_from_preferences(preferences.iter().map(|language| language.to_string())).labels()
-    }
-
-    fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
-        let labels = preferred_labels();
+    fn build_menu(app: &AppHandle, locale: PresentationLocale) -> tauri::Result<Menu<Wry>> {
+        let labels = labels(locale);
         let package = app.package_info();
         let app_name = package.name.clone();
         let config = app.config();
@@ -249,8 +213,8 @@ mod macos {
         )
     }
 
-    pub(crate) fn init(app: &AppHandle) {
-        let menu = match build_menu(app) {
+    pub(crate) fn apply_locale(app: &AppHandle, locale: PresentationLocale) {
+        let menu = match build_menu(app, locale) {
             Ok(menu) => menu,
             Err(error) => {
                 eprintln!(
@@ -279,10 +243,14 @@ mod macos {
             }
         }
     }
+
+    pub(crate) fn init(app: &AppHandle, locale: PresentationLocale) {
+        apply_locale(app, locale);
+    }
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use macos::init;
+pub(crate) use macos::{apply_locale, init};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -292,48 +260,48 @@ mod tests {
     #[test]
     fn selects_first_supported_preference_and_normalizes_separators() {
         assert_eq!(
-            language_from_preferences(["fr-FR", "zh_Hans_CN", "en-US"]),
-            MenuLanguage::SimplifiedChinese
+            crate::presentation::locale_from_language_tags(["fr-FR", "zh_Hans_CN", "en-US"]),
+            PresentationLocale::SimplifiedChinese
         );
         assert_eq!(
-            language_from_preferences(["ja-JP", "en_GB", "zh-CN"]),
-            MenuLanguage::English
+            crate::presentation::locale_from_language_tags(["ja-JP", "en_GB", "zh-CN"]),
+            PresentationLocale::English
         );
     }
 
     #[test]
     fn traditional_chinese_does_not_select_simplified_labels() {
         assert_eq!(
-            language_from_preferences(["zh-Hant-TW", "en-US"]),
-            MenuLanguage::English
+            crate::presentation::locale_from_language_tags(["zh-Hant-TW", "en-US"]),
+            PresentationLocale::English
         );
         assert_eq!(
-            language_from_preferences(["zh-TW", "zh-CN"]),
-            MenuLanguage::SimplifiedChinese
+            crate::presentation::locale_from_language_tags(["zh-TW", "zh-CN"]),
+            PresentationLocale::SimplifiedChinese
         );
     }
 
     #[test]
     fn empty_or_unsupported_preferences_fall_back_to_english() {
         assert_eq!(
-            language_from_preferences(std::iter::empty::<&str>()),
-            MenuLanguage::English
+            crate::presentation::locale_from_language_tags(std::iter::empty::<&str>()),
+            PresentationLocale::English
         );
         assert_eq!(
-            language_from_preferences(["fr-FR", "ja-JP"]),
-            MenuLanguage::English
+            crate::presentation::locale_from_language_tags(["fr-FR", "ja-JP"]),
+            PresentationLocale::English
         );
     }
 
     #[test]
     fn label_sets_cover_the_complete_native_surface() {
-        let english = MenuLanguage::English.labels();
+        let english = labels(PresentationLocale::English);
         assert_eq!(english.file, "File");
         assert_eq!(english.close_window, "Close Window");
         assert_eq!(english.fullscreen, "Enter Full Screen");
         assert_eq!(english.help, "Help");
 
-        let chinese = MenuLanguage::SimplifiedChinese.labels();
+        let chinese = labels(PresentationLocale::SimplifiedChinese);
         assert_eq!(chinese.file, "文件");
         assert_eq!(chinese.close_window, "关闭窗口");
         assert_eq!(chinese.fullscreen, "进入全屏幕");

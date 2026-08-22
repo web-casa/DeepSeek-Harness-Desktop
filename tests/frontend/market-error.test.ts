@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { marketFailureText } from "../../src/lib/market-error.ts";
+import { classifyMarketFailure, marketFailureText } from "../../src/lib/market-error.ts";
 
 const context = "市场搜索失败";
 
@@ -38,5 +38,17 @@ test("bounded API detail is retained but unknown error text is never reflected",
   assert.equal(
     marketFailureText(context, "socket failed at https://secret.invalid/?token=not-for-ui"),
     "市场搜索失败：市场请求失败，请稍后重试",
+  );
+});
+
+test("classification keeps only the bounded API detail for the localized controller", () => {
+  assert.deepEqual(
+    classifyMarketFailure("MARKET_API_ERROR: NOT_FOUND: no such slug (requestId: req-1)"),
+    { kind: "api", detail: "NOT_FOUND: no such slug (requestId: req-1)" },
+  );
+  assert.deepEqual(classifyMarketFailure("MARKET_API_ERROR:"), { kind: "api" });
+  assert.deepEqual(
+    classifyMarketFailure("socket failed at https://secret.invalid/?token=not-for-ui"),
+    { kind: "unknown" },
   );
 });
