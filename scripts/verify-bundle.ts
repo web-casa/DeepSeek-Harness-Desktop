@@ -26,6 +26,11 @@ import {
   type PublicBundle,
   type ReleaseArch,
 } from "./lib/release-artifacts.ts";
+import {
+  isWindowsWixInstallerLocale,
+  WINDOWS_WIX_PRODUCT_LANGUAGE,
+  type WindowsWixInstallerLocale,
+} from "./lib/windows-installer-locales.ts";
 import { DMG_TOOL_TIMEOUT_MS } from "./lib/macos-dmg.ts";
 import { FLATPAK_RUNTIME_REPO, flatpakMetadataProblems } from "./lib/flatpak.ts";
 
@@ -69,7 +74,7 @@ function parseBundle(value: string | undefined): PublicBundle {
     return value as PublicBundle;
   }
   fail(
-    `usage: node scripts/verify-bundle.ts --bundle <${Object.keys(BUNDLE_SPECS).join("|")}> --arch <x64|arm64> [--self-test]`,
+    `usage: node scripts/verify-bundle.ts --bundle <${Object.keys(BUNDLE_SPECS).join("|")}> --arch <x64|arm64> [--installer-locale <en-US|zh-CN>] [--self-test]`,
   );
 }
 
@@ -81,12 +86,20 @@ function parseArch(value: string | undefined): ReleaseArch {
   return resolved;
 }
 
-function artifactFor(bundle: PublicBundle): string {
-  const candidates = bundleArtifactCandidates(repoRoot, bundle);
+function parseInstallerLocale(value: string | undefined): WindowsWixInstallerLocale | undefined {
+  if (value === undefined) return undefined;
+  if (!isWindowsWixInstallerLocale(value)) {
+    fail("--installer-locale must be en-US or zh-CN");
+  }
+  return value;
+}
+
+function artifactFor(bundle: PublicBundle, installerLocale?: WindowsWixInstallerLocale): string {
+  const candidates = bundleArtifactCandidates(repoRoot, bundle, installerLocale);
   if (candidates.length !== 1) {
     const spec = BUNDLE_SPECS[bundle];
     fail(
-      `expected exactly one ${spec.suffix} artifact in ${spec.directory}, found: ${candidates.map((path) => basename(path)).join(", ") || "none"}`,
+      `expected exactly one ${bundle}${installerLocale ? ` (${installerLocale})` : ""} ${spec.suffix} artifact in ${spec.directory}, found: ${candidates.map((path) => basename(path)).join(", ") || "none"}`,
     );
   }
   return candidates[0];
@@ -372,7 +385,32 @@ function findUniqueRuntimeRoot(root: string, extension: string): string {
   return candidates[0];
 }
 
-function verifyMsi(artifact: string, arch: ReleaseArch): void {
+function verifyMsiProductLanguage(artifact: string, installerLocale: WindowsWixInstallerLocale): void {
+  const script = `
+$installer = New-Object -ComObject WindowsInstaller.Installer
+$database = $installer.OpenDatabase($env:DSH_MSI_ARTIFACT, 0)
+$view = $database.OpenView('SELECT \`Value\` FROM \`Property\` WHERE \`Property\` = ''ProductLanguage''')
+$view.Execute()
+$record = $view.Fetch()
+if ($null -eq $record) { throw 'MSI ProductLanguage property is missing' }
+[Console]::WriteLine($record.StringData(1))
+`;
+  const output = run("powershell", ["-NoProfile", "-Command", script], "MSI ProductLanguage query", {
+    env: { ...process.env, DSH_MSI_ARTIFACT: artifact },
+  }).trim();
+  const expected = String(WINDOWS_WIX_PRODUCT_LANGUAGE[installerLocale]);
+  if (output !== expected) {
+    throw new Error(`MSI ProductLanguage ${output || "missing"} != ${expected} for ${installerLocale}`);
+  }
+  ok(`MSI ProductLanguage is ${installerLocale} (${expected})`);
+}
+
+function verifyMsi(
+  artifact: string,
+  arch: ReleaseArch,
+  installerLocale: WindowsWixInstallerLocale,
+): void {
+  verifyMsiProductLanguage(artifact, installerLocale);
   // Keep the administrative-install root short. The bundled npm tree has
   // legitimate 160+ character relative paths; putting it below the GitHub
   // workspace can push msiexec over the traditional MAX_PATH limit and
@@ -717,17 +755,21 @@ if (process.argv.includes("--self-test")) {
 
 const bundle = parseBundle(argument("--bundle"));
 const arch = parseArch(argument("--arch"));
+const installerLocale = parseInstallerLocale(argument("--installer-locale"));
+if ((bundle === "msi") !== (installerLocale !== undefined)) {
+  fail("--installer-locale is required for MSI and forbidden for other bundles");
+}
 const schemes = config.plugins?.["deep-link"]?.desktop?.schemes ?? [];
 if (!schemes.includes("dsharness")) {
   fail(`tauri.conf.json must register dsharness, got ${schemes.join(", ") || "none"}`);
 }
 ok("tauri.conf.json registers the dsharness deep-link scheme");
 
-const artifact = artifactFor(bundle);
+const artifact = artifactFor(bundle, installerLocale);
 info(`verifying ${bundle} artifact: ${artifact}`);
 try {
   if (bundle === "nsis") verifyNsis(artifact, arch);
-  else if (bundle === "msi") verifyMsi(artifact, arch);
+  else if (bundle === "msi") verifyMsi(artifact, arch, installerLocale!);
   else if (bundle === "dmg") verifyDmg(artifact, arch);
   else if (bundle === "deb") verifyDeb(artifact, arch);
   else if (bundle === "rpm") verifyRpm(artifact, arch);

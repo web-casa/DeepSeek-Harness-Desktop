@@ -24,8 +24,11 @@ import { repoRoot, fail, ok, info } from "./lib/common.ts";
 import { expectedSigned, parseAuthenticode, toolRan, type Env } from "./lib/signing.ts";
 import {
   bundleArtifactCandidates,
-  type PublicBundle,
 } from "./lib/release-artifacts.ts";
+import {
+  isWindowsWixInstallerLocale,
+  type WindowsWixInstallerLocale,
+} from "./lib/windows-installer-locales.ts";
 
 function bundleArgValue(): string | undefined {
   const i = process.argv.indexOf("--bundle");
@@ -41,10 +44,24 @@ function phaseArgValue(): "final" | "pre-notarization" {
   return value;
 }
 
-function findArtifact(bundle: "nsis" | "msi" | "dmg"): string {
-  const candidates = bundleArtifactCandidates(repoRoot, bundle);
+function installerLocaleArgValue(): WindowsWixInstallerLocale | undefined {
+  const i = process.argv.indexOf("--installer-locale");
+  const value = i >= 0 ? process.argv[i + 1] : undefined;
+  if (value !== undefined && !isWindowsWixInstallerLocale(value)) {
+    fail("--installer-locale must be en-US or zh-CN");
+  }
+  return value;
+}
+
+function findArtifact(
+  bundle: "nsis" | "msi" | "dmg",
+  installerLocale?: WindowsWixInstallerLocale,
+): string {
+  const candidates = bundleArtifactCandidates(repoRoot, bundle, installerLocale);
   if (candidates.length !== 1) {
-    fail(`expected exactly one ${bundle} artifact, found: ${candidates.join(", ") || "none"}`);
+    fail(
+      `expected exactly one ${bundle}${installerLocale ? ` (${installerLocale})` : ""} artifact, found: ${candidates.join(", ") || "none"}`,
+    );
   }
   return candidates[0];
 }
@@ -196,18 +213,22 @@ if (process.argv.includes("--self-test")) {
 
 const bundleType = bundleArgValue();
 if (bundleType !== "nsis" && bundleType !== "msi" && bundleType !== "dmg") {
-  fail("usage: node scripts/verify-signing.ts --bundle <nsis|msi|dmg> [--self-test]");
+  fail("usage: node scripts/verify-signing.ts --bundle <nsis|msi|dmg> [--installer-locale <en-US|zh-CN>] [--self-test]");
 }
 
 const expect = expectedSigned(bundleType, process.env);
 const phase = phaseArgValue();
+const installerLocale = installerLocaleArgValue();
+if ((bundleType === "msi") !== (installerLocale !== undefined)) {
+  fail("--installer-locale is required for MSI and forbidden for NSIS/DMG");
+}
 if (phase === "pre-notarization" && bundleType !== "dmg") {
   fail("pre-notarization phase is only valid for DMG artifacts");
 }
 if (bundleType === "dmg") {
   verifyDmg(findArtifact("dmg"), expect, phase);
 } else {
-  verifyAuthenticode(findArtifact(bundleType), expect);
+  verifyAuthenticode(findArtifact(bundleType, installerLocale), expect);
 }
 ok(
   `signing state verified: ${bundleType} is ${expect ? "signed" : "unsigned (expected)"}`,

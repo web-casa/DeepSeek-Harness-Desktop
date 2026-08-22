@@ -8,6 +8,8 @@ import {
   githubNativeMatrix,
   githubMacosNotarizationMatrix,
   githubMsixMatrix,
+  publishedWindowsNsisUpdaterPlatforms,
+  publicArtifactsFor,
   releasePlanProblems,
 } from "./release-artifacts.ts";
 
@@ -21,14 +23,41 @@ test("release plan covers every requested public format exactly through reviewed
 
 test("native matrix uses current architecture-specific hosted runners", () => {
   const rows = githubNativeMatrix().include;
-  assert.equal(rows.length, 5);
+  assert.equal(rows.length, 6);
   assert.equal(rows.some((row) => row.os === "macos-14"), false);
   assert.equal(rows.some((row) => row.os === "macos-15-intel"), true);
   assert.equal(rows.some((row) => row.os === "ubuntu-22.04-arm"), true);
+  assert.equal(rows.some((row) => row.os === "windows-11-arm"), true);
+  assert.deepEqual(
+    rows.map((row) => [row.target, row.hostTriple]),
+    [
+      ["windows-x64", "x86_64-pc-windows-msvc"],
+      ["windows-arm64", "aarch64-pc-windows-msvc"],
+      ["macos-arm64", "aarch64-apple-darwin"],
+      ["macos-x64", "x86_64-apple-darwin"],
+      ["linux-x64", "x86_64-unknown-linux-gnu"],
+      ["linux-arm64", "aarch64-unknown-linux-gnu"],
+    ],
+  );
   for (const row of rows.filter((candidate) =>
     String(candidate.target).startsWith("macos-"),
   )) {
     assert.equal(row.tauriBundles, "app");
+  }
+});
+
+test("Windows public artifact contract expands only MSI installer UI locales", () => {
+  const windows = NATIVE_RELEASE_TARGETS.filter((target) => target.id.startsWith("windows-"));
+  assert.equal(windows.length, 2);
+  for (const target of windows) {
+    assert.deepEqual(publicArtifactsFor(target), [
+      { bundle: "nsis" },
+      { bundle: "msi", installerLocale: "en-US" },
+      { bundle: "msi", installerLocale: "zh-CN" },
+    ]);
+  }
+  for (const target of NATIVE_RELEASE_TARGETS.filter((target) => !target.id.startsWith("windows-"))) {
+    assert.equal(publicArtifactsFor(target).some((artifact) => artifact.installerLocale), false);
   }
 });
 
@@ -70,6 +99,10 @@ test("Store MSIX remains a separate exact x64 and arm64 matrix", () => {
     githubMsixMatrix().include.map((target) => target.artifact),
     ["dsh-desktop-store-msix-x64", "dsh-desktop-store-msix-arm64"],
   );
+  assert.deepEqual(
+    githubMsixMatrix().include.map((target) => target.nativeTarget),
+    ["windows-x64", "windows-arm64"],
+  );
 });
 
 test("every public artifact path includes both installer and SHA-256 sidecar", () => {
@@ -86,6 +119,22 @@ test("every public artifact path includes both installer and SHA-256 sidecar", (
       );
     }
   }
+});
+
+test("in-app updates publish only exact NSIS architecture targets", () => {
+  assert.deepEqual(publishedWindowsNsisUpdaterPlatforms(), [
+    "windows-x86_64-nsis",
+    "windows-aarch64-nsis",
+  ]);
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    workflow,
+    /--platforms windows-x86_64-nsis,windows-aarch64-nsis/,
+  );
+  assert.doesNotMatch(workflow, /--platforms windows-x86_64(?:\s|$)/);
 });
 
 test("both reusable quality jobs checkout the requested release revision", () => {
@@ -110,7 +159,17 @@ test("Windows installer smoke searches the preserved artifact tree exactly", () 
     workflow,
     /Get-ChildItem -Path artifacts -Recurse -File -Filter '\*\.msi'/,
   );
-  assert.equal(workflow.split("$installers.Count -ne 1").length - 1, 2);
+  // There are two exact NSIS selections: initial deep-link launch and the
+  // independent in-place reinstall/runtime smoke. The third is the MSI job.
+  assert.equal(workflow.split("$installers.Count -ne 1").length - 1, 3);
+  assert.equal(
+    workflow.split("Get-ChildItem -Path artifacts -Recurse -File -Filter '*-setup.exe'").length - 1,
+    2,
+  );
+  assert.match(workflow, /In-place NSIS reinstall and installed Harness smoke/);
+  assert.match(workflow, /installed Harness never became ready/);
+  assert.match(workflow, /\$_.Name\.EndsWith\("_\$locale\.msi", \[System\.StringComparison\]::Ordinal\)/);
+  assert.match(workflow, /MSI ProductLanguage \$productLanguage does not match \$locale/);
   assert.match(workflow, /\$quotedInstaller = '\"' \+ \$installer\.FullName \+ '\"'/);
   assert.match(workflow, /\/l\*v \$quotedLogPath/);
   assert.match(workflow, /\$process\.WaitForExit\(600000\)/);
@@ -132,10 +191,9 @@ test("Windows installer smoke can safely reuse one completed Release run", () =>
     workflow,
     /source_status" != "completed"/,
   );
-  assert.match(
-    workflow,
-    /select\(\.name == "deepseek-harness-desktop-windows-x64" and \.expired == false\)/,
-  );
+  assert.match(workflow, /deepseek-harness-desktop-windows-x64/);
+  assert.match(workflow, /deepseek-harness-desktop-windows-arm64/);
+  assert.match(workflow, /jq --arg name "\$artifact_name"/);
   const sourceRun =
     "run-id: ${{ github.event.inputs.windows_smoke_source_run_id || github.run_id }}";
   assert.equal(workflow.split(sourceRun).length - 1, 2);
@@ -163,6 +221,25 @@ test("Windows installer smoke can safely reuse one completed Release run", () =>
   );
   assert.ok(presetContract.includes(readOnlySourceRunGate));
   assert.ok(quality.includes(readOnlySourceRunGate));
+});
+
+test("release host and installer smokes cover each declared native architecture", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  assert.equal(
+    workflow.split('node scripts/verify-native-host.ts --target "$RELEASE_TARGET"').length - 1,
+    2,
+  );
+  assert.match(workflow, /RELEASE_TARGET: \$\{\{ matrix\.nativeTarget \}\}/);
+  assert.match(workflow, /os: windows-11-arm/);
+  assert.match(workflow, /artifact: deepseek-harness-desktop-windows-arm64/);
+  assert.match(workflow, /x64 compatibility on ARM64/);
+  assert.match(workflow, /matrix: \$\{\{ fromJSON\(needs\.release-plan\.outputs\.macos_notarization\) \}\}/);
+  assert.match(workflow, /runs-on: \$\{\{ matrix\.os \}\}/);
+  assert.match(workflow, /retention-days: 14/);
+  assert.match(workflow, /Require public-repository free runner policy/);
 });
 
 test("tag publication tolerates only the intentional transitive smoke-source skip", () => {
@@ -342,6 +419,21 @@ test("release verifies external contracts before publishing", () => {
   );
   const publish = releaseWorkflow.indexOf("uses: softprops/action-gh-release@");
   assert.equal(inventory > 0 && signatures > inventory && publish > signatures, true);
+});
+
+test("release publishes its draft only after the exact updater manifest is uploaded", () => {
+  const releaseWorkflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const draft = releaseWorkflow.indexOf("draft: true");
+  const manifest = releaseWorkflow.indexOf("name: Publish updater manifest (latest.json)");
+  const publish = releaseWorkflow.indexOf("name: Publish reviewed GitHub Release");
+  assert.equal(draft > 0 && manifest > draft && publish > manifest, true);
+  const finalStep = releaseWorkflow.slice(publish);
+  assert.match(finalStep, /gh release edit "\$RELEASE_TAG" --draft=false/);
+  assert.match(finalStep, /RELEASE_TAG: \$\{\{ github\.ref_name \}\}/);
+  assert.match(finalStep, /GH_TOKEN: \$\{\{ github\.token \}\}/);
 });
 
 test("MSI smoke accepts a valid 8.3 registry path but verifies the real file", () => {

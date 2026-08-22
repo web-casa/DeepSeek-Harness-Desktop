@@ -5,6 +5,7 @@
 
 use crate::harness::Runtime;
 use crate::observability::{EvidenceFile, Observability};
+use crate::redaction::redact;
 use crate::secure_fs;
 use serde_json::Value;
 use std::fs::File;
@@ -21,6 +22,7 @@ const SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
 
 const PRIVACY_NOTICE: &str = "DSH Desktop diagnostic archive\n\n\
 This archive contains Desktop status, a redacted in-memory log tail, and bounded Desktop lifecycle evidence.\n\
+If you explicitly enabled detailed diagnostics, it can also include a bounded redacted stderr/Desktop-error log.\n\
 It deliberately excludes Harness sessions, workspace files, prompts, tool output persisted by Harness, and memory dumps.\n\
 Redaction is best effort only. Review every file before sharing the archive.\n";
 
@@ -74,68 +76,11 @@ struct ArchiveEntry {
     bytes: Vec<u8>,
 }
 
-/// Mask common secret shapes. This remains explicitly best effort because
-/// arbitrary log content cannot be proven secret-free.
-pub fn redact(text: &str, dsh_home: &str) -> String {
-    let output = if dsh_home.is_empty() {
-        text.to_owned()
-    } else {
-        text.replace(dsh_home, "<DSH_HOME>")
-    };
-    let mut result = String::with_capacity(output.len());
-    let mut rest = output.as_str();
-    while !rest.is_empty() {
-        let bytes = rest.as_bytes();
-        if bytes.starts_with(b"sk-") {
-            let token = bytes
-                .iter()
-                .skip(3)
-                .take_while(|byte| byte.is_ascii_alphanumeric())
-                .count();
-            if token >= 16 {
-                result.push_str("sk-***");
-                rest = &rest[3 + token..];
-                continue;
-            }
-        }
-        if bytes.starts_with(b"Bearer ") {
-            let token = bytes
-                .iter()
-                .skip(7)
-                .take_while(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
-                })
-                .count();
-            if token >= 8 {
-                result.push_str("Bearer ***");
-                rest = &rest[7 + token..];
-                continue;
-            }
-        }
-        if bytes.starts_with(b"AKIA") {
-            let token = bytes
-                .iter()
-                .skip(4)
-                .take_while(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-                .count();
-            if token >= 12 {
-                result.push_str("AKIA***");
-                rest = &rest[4 + token..];
-                continue;
-            }
-        }
-        match rest.chars().next() {
-            Some(character) => {
-                result.push(character);
-                rest = &rest[character.len_utf8()..];
-            }
-            None => break,
-        }
-    }
-    result
-}
-
-pub fn snapshot(runtime: &Runtime, observability: &Observability) -> Value {
+pub fn snapshot(
+    runtime: &Runtime,
+    observability: &Observability,
+    diagnostic_mode: &crate::diagnostic_mode::DiagnosticMode,
+) -> Value {
     let state = runtime
         .state
         .lock()
@@ -153,6 +98,7 @@ pub fn snapshot(runtime: &Runtime, observability: &Observability) -> Value {
         // Do not place the persistence error itself in an archive: OS errors
         // commonly contain the user's absolute app-data path.
         "observabilityPersistent": observability.initialization_error().is_none(),
+        "detailedDiagnostics": diagnostic_mode.snapshot(),
         "logsTail": state.logs[tail_start..].iter().map(|(stream, line)| {
             serde_json::json!({ "stream": stream, "line": redact(line, &dsh_home) })
         }).collect::<Vec<_>>(),
@@ -164,6 +110,7 @@ pub async fn export_diagnostics(
     app: AppHandle,
     runtime: State<'_, Runtime>,
     observability: State<'_, Arc<Observability>>,
+    diagnostic_mode: State<'_, crate::diagnostic_mode::DiagnosticMode>,
     exporter: State<'_, Arc<DiagnosticExporter>>,
 ) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -189,7 +136,7 @@ pub async fn export_diagnostics(
             return Err("diagnostic destination is empty".to_string());
         }
 
-        let snapshot = snapshot(&runtime, &observability);
+        let snapshot = snapshot(&runtime, &observability, &diagnostic_mode);
         let dsh_home = runtime
             .state
             .lock()
@@ -197,7 +144,8 @@ pub async fn export_diagnostics(
             .dsh_home
             .clone()
             .unwrap_or_default();
-        let evidence = observability.evidence_files();
+        let mut evidence = observability.evidence_files();
+        evidence.extend(diagnostic_mode.evidence_files());
         let exporter_for_worker = Arc::clone(&exporter);
         let (result_tx, mut result_rx) = tauri::async_runtime::channel::<Result<(), String>>(1);
         std::thread::Builder::new()

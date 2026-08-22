@@ -8,28 +8,33 @@
 // Fail-closed: if a requested platform has no matching artifact+sig pair, the
 // script fails the job — a release must never go out with a broken manifest.
 //
-//   node scripts/updater-manifest.ts --tag v0.2.2 --platforms windows-x86_64
+//   node scripts/updater-manifest.ts --tag v0.2.2 --platforms windows-x86_64-nsis,windows-aarch64-nsis
 
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { fail, ok, info } from "./lib/common.ts";
+import {
+  assembleLatestJson,
+  githubReleaseAssetUrl,
+  isWindowsNsisUpdaterPlatform,
+  platformArtifactFor,
+  type UpdaterAsset,
+} from "./lib/updater-manifest.ts";
+import { publishedWindowsNsisUpdaterPlatforms } from "./lib/release-artifacts.ts";
 
-export interface Asset {
-  id: number;
-  name: string;
-}
 export interface ReleaseInfo {
   tag_name: string;
-  assets: Asset[];
+  assets: UpdaterAsset[];
   body: string | null;
 }
 
-const repo = process.env.GITHUB_REPOSITORY ?? (() => {
+function resolveRepo(): string {
+  if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY;
   const r = spawnSync("gh", ["repo", "view", "--json", "nameWithOwner"], { encoding: "utf8" });
   const name = JSON.parse(r.stdout || "{}").nameWithOwner as string | undefined;
   if (!name) fail("could not determine repository (set GITHUB_REPOSITORY)");
   return name;
-})();
+}
 
 function ghApi(path: string): { status: number | null; stdout: string; error?: Error } {
   const res = spawnSync("gh", ["api", path, "-H", "Accept: application/octet-stream"], {
@@ -44,72 +49,29 @@ function ghJson<T>(path: string): T {
   return JSON.parse(res.stdout ?? "") as T;
 }
 
-/// Pair a platform with its updater artifact and the matching .sig asset.
-/// We ship the BARE NSIS setup exe + its .sig: verified against the pinned
-/// tauri-plugin-updater 2.10.1 source that WindowsUpdaterType::extract
-/// sniffs the downloaded bytes and accepts BOTH a PE exe directly and a
-/// zip containing one — so basicUi installs the bare installer correctly.
-/// The zip variants stay as fallbacks should the bundler ever emit them.
-export function platformArtifactFor(
-  assets: Asset[],
-  platform: string,
-): { artifact: Asset; sig: Asset } | null {
-  const candidates = (() => {
-    if (platform === "windows-x86_64") {
-      return [/-setup\.exe$/i, /-setup\.nsis\.zip$/i, /x64\.zip$/i];
-    }
-    if (platform === "darwin-aarch64") {
-      return [/aarch64\.app\.tar\.gz$/i];
-    }
-    return [];
-  })();
-  for (const re of candidates) {
-    const artifact = assets.find((a) => re.test(a.name) && !a.name.endsWith(".sig"));
-    if (!artifact) continue;
-    const sig = assets.find((a) => a.name === `${artifact.name}.sig`);
-    if (sig) return { artifact, sig };
-  }
-  return null;
-}
-
-/// Pure assembly of the manifest document (unit-tested via --self-test).
-export function assembleLatestJson(
-  version: string,
-  notes: string,
-  pubDate: string,
-  platforms: Record<string, { signature: string; url: string }>,
-): string {
-  return (
-    JSON.stringify(
-      { version, notes, pub_date: pubDate, platforms },
-      null,
-      2,
-    ) + "\n"
-  );
-}
-
 function runSelfTest(): void {
-  const fixtures: Asset[] = [
+  const fixtures: UpdaterAsset[] = [
     { id: 1, name: "DeepSeek.Harness.Desktop_0.2.2_x64-setup.exe" },
     { id: 2, name: "DeepSeek.Harness.Desktop_0.2.2_x64-setup.exe.sig" },
     { id: 3, name: "DeepSeek.Harness.Desktop_0.2.2_x64-setup.exe.sha256" },
-    { id: 4, name: "DeepSeek.Harness.Desktop_0.2.2_aarch64.dmg" },
+    { id: 4, name: "DeepSeek.Harness.Desktop_0.2.2_arm64-setup.exe" },
+    { id: 5, name: "DeepSeek.Harness.Desktop_0.2.2_arm64-setup.exe.sig" },
   ];
-  const pair = platformArtifactFor(fixtures, "windows-x86_64");
+  const pair = platformArtifactFor(fixtures, "windows-x86_64-nsis");
   if (!pair || pair.artifact.name !== fixtures[0].name || pair.sig.name !== fixtures[1].name) {
     fail("self-test: windows artifact pairing wrong");
   }
-  if (platformArtifactFor(fixtures, "darwin-aarch64") !== null) {
-    fail("self-test: darwin must not match without an app.tar.gz");
+  if (platformArtifactFor(fixtures, "windows-aarch64-nsis")?.artifact.name !== fixtures[3].name) {
+    fail("self-test: ARM64 artifact pairing wrong");
   }
   const doc = assembleLatestJson(
     "0.2.2",
     "",
     "2026-08-16T00:00:00Z",
-    { "windows-x86_64": { signature: "SIG", url: "https://example/x-setup.exe" } },
+    { "windows-x86_64-nsis": { signature: "SIG", url: "https://example/x64-setup.exe" } },
   );
   const parsed = JSON.parse(doc);
-  if (parsed.platforms["windows-x86_64"].signature !== "SIG") {
+  if (parsed.platforms["windows-x86_64-nsis"].signature !== "SIG") {
     fail("self-test: manifest assembly wrong");
   }
   ok("self-test: updater-manifest pairing + assembly");
@@ -124,8 +86,23 @@ if (process.argv.includes("--self-test")) {
 const tag = tagIdx >= 0 ? process.argv[tagIdx + 1] : undefined;
 const platforms = platsIdx >= 0 ? (process.argv[platsIdx + 1] ?? "").split(",") : [];
 if (!tag || platforms.length === 0) {
-  fail("usage: node scripts/updater-manifest.ts --tag vX.Y.Z --platforms windows-x86_64[,darwin-aarch64] [--self-test]");
+  fail("usage: node scripts/updater-manifest.ts --tag vX.Y.Z --platforms windows-x86_64-nsis[,windows-aarch64-nsis] [--self-test]");
 }
+for (const platform of platforms) {
+  if (!isWindowsNsisUpdaterPlatform(platform)) {
+    fail(`unreviewed updater platform: ${platform}`);
+  }
+}
+const expectedPlatforms = publishedWindowsNsisUpdaterPlatforms();
+if (
+  platforms.length !== expectedPlatforms.length ||
+  platforms.some((platform, index) => platform !== expectedPlatforms[index])
+) {
+  fail(
+    `updater platform set drifted from the release plan: got ${platforms.join(",")}, expected ${expectedPlatforms.join(",")}`,
+  );
+}
+const repo = resolveRepo();
 
 // `releases/tags/<tag>` 404s for DRAFT releases (API quirk) — the list
 // endpoint is the only reliable lookup right after softprops creates one.
@@ -137,6 +114,9 @@ if (!release) {
 const version = tag.replace(/^v/, "");
 const entries: Record<string, { signature: string; url: string }> = {};
 for (const platform of platforms) {
+  // The validation above narrows this runtime string before we touch the
+  // architecture-specific matching table.
+  if (!isWindowsNsisUpdaterPlatform(platform)) fail(`unreviewed updater platform: ${platform}`);
   const pair = platformArtifactFor(release.assets, platform);
   if (!pair) {
     fail(`no updater artifact+sig pair for ${platform} on release ${tag} — refusing to publish a broken manifest`);
@@ -145,7 +125,7 @@ for (const platform of platforms) {
   if (sig.status !== 0 || !sig.stdout.trim()) {
     fail(`could not read .sig content for ${pair.sig.name} (${sig.error?.message ?? ""})`);
   }
-  const url = `https://github.com/${repo}/releases/download/${tag}/${pair.artifact.name}`;
+  const url = githubReleaseAssetUrl(repo, tag, pair.artifact.name);
   entries[platform] = { signature: sig.stdout.trim(), url };
   info(`${platform}: ${pair.artifact.name} (sig ${pair.sig.name})`);
 }

@@ -1,8 +1,9 @@
 # RELEASING.md — 发布手册
 
-发布流程全自动：在 `main` 上打 `v*` tag 即触发完整流水线（质量门 → 五个原生目标
-构建 → 内容/签名验证 → draft release）。人工职责只有四步：版本对齐、打 tag、
-审阅 draft、Publish。
+发布流程全自动：在 `main` 上打 `v*` tag 即触发完整流水线（质量门 → 六个原生目标
+构建 → 内容/签名验证 → draft release → `latest.json` 验证 → Publish）。草稿在
+全部公开资产与更新清单通过精确校验后才会自动公开；中途失败会保留为未公开草稿。
+人工职责是版本对齐、打 tag，并在发布后抽查公开资产。
 
 ## 1. 版本对齐（发布前本地完成）
 
@@ -38,8 +39,9 @@ git push origin v0.2.1
 1. `tag-gate`：tag 提交必须是 `origin/main` 祖先。
 2. `quality`（reusable）：fmt / clippy（含 Windows 宿主）/ nextest /
    llvm-cov / deny / vet / 脚本类型与 self-test。
-3. `build` ×5（Windows x64 EXE+MSI、macOS x64/arm64 DMG、Linux
-   x64/arm64 AppImage+DEB+RPM+Flatpak）：下载 Node（SHA-256）
+3. `build` ×6（Windows x64/ARM64 各一份双语 NSIS EXE + 英文/简体中文
+   WiX MSI、macOS x64/arm64 DMG、Linux x64/arm64
+   AppImage+DEB+RPM+Flatpak）：下载 Node（SHA-256）
    → prepare-harness（441+ 许可证 + 零链接断言）→ 构建 sidecar → 冒烟 →
    `tauri build`（macOS 只产生已签名 `.app`，DMG 由无 Finder 自动化的
    有界 `hdiutil -srcfolder` 路径生成；仅对已知的 DiskImages 瞬态故障最多
@@ -47,7 +49,9 @@ git push origin v0.2.1
    **verify-bundle**（包元数据、
    二进制架构、必需文件、scoped 许可证
    绊线、零符号链接、执行位、无 quarantine）→ **verify-signing**（见下）→
-   SHA-256 checksum → 上传制品。
+   SHA-256 checksum → 上传制品。每个构建起始处都将 `process.arch`、`rustc -vV`
+   host triple 与该 matrix 行交叉核对；不允许交叉编译或通过模拟器伪装原生构建。
+   Windows on ARM 另运行 x64 安装兼容性 smoke，但明确不属于原生构建证据。
 4. 签名 macOS 构建把“签名/构建”和“公证等待”分离：`build` 只提交一次，
    将 Submission ID、DMG SHA-256 与未 staple 的 DMG 保存为私有 handoff artifact；
    `notarize-macos` ×2 只查询该 ID（每次最多 20 分钟），Accepted 后 staple、
@@ -56,8 +60,16 @@ git push origin v0.2.1
 5. `build-msix` ×2：原生 Windows x64/arm64 Store 包、静态内容检查与 SHA-256；
    只保留为 Partner Center workflow artifact。
 6. `release`：tag 绑定 preflight（`--expect-tag`）→ 只下载
-   `deepseek-harness-desktop-*` 公开制品 → 校验 12 个安装包、12 个 checksum、
-   1 个 Windows updater signature 且没有 MSIX/未知文件 → **draft** GitHub Release。
+   `deepseek-harness-desktop-*` 公开制品 → 校验 16 个安装包、16 个 checksum、
+   2 个 Windows NSIS updater signature 且没有 MSIX/未知文件 → 创建 **draft** GitHub
+   Release → 上传并校验 `latest.json` → 自动 Publish。若最后两步失败，草稿保持
+   不公开，绝不会让客户端读取半成品更新清单。
+
+发布矩阵只使用 GitHub 标准 hosted runner：`windows-latest` / `windows-11-arm`、
+`macos-15-intel` / `macos-15`、`ubuntu-22.04` / `ubuntu-22.04-arm`。公开仓库的
+这些 runner 不计入 Actions 分钟费用；流水线在仓库变为 private 时会在 matrix
+之前 fail-closed，要求维护者先重新评审计费策略。所有临时 bundle artifact 采用
+7 天保留，MSIX 与公证 handoff 采用 14 天保留，防止存储无限累积。
 
 ### 3a. cordis.run preset 直返 ZIP 契约
 
@@ -74,7 +86,7 @@ git push origin v0.2.1
 
 ### 3b. Microsoft Store MSIX 构建
 
-`build-msix` job 与五目标 native build 并行，仅发布/演练时运行：
+`build-msix` job 与六目标 native build 并行，仅发布/演练时运行：
 
 - `STORE_BUILD=1`：Store 版关闭应用内更新，插件安装只允许
   `src-tauri/store-curated-plugins.json` 中的 cordis.run 审核列表。
@@ -122,11 +134,13 @@ Desktop 工作区直接改为公开发布。
   任一失败即阻断发布（fail-closed，防假签名）。Linux 安装包当前没有独立
   软件仓库签名，统一由发布资产的 SHA-256 sidecar 与完整清单门禁保护。
 
-## 5. 审阅并 Publish
+## 5. 发布后抽查
 
-1. 打开 releases 页的 draft `vX.Y.Z`：核对 12 个公开安装包
-   （EXE、MSI、双架构 DMG、双架构 AppImage/DEB/RPM/Flatpak）、各自
-   `.sha256`、1 个 Windows updater signature 与体积量级；确认没有 `.msix`。
+1. 打开已发布的 release `vX.Y.Z`：核对 16 个公开安装包
+   （双架构双语 NSIS EXE、双架构英文/简体中文 WiX MSI、双架构 DMG、双架构
+   AppImage/DEB/RPM/Flatpak）、各自 `.sha256`、2 个 Windows NSIS updater
+   signature（x64 与 ARM64，各一）与体积量级；确认没有 `.msix`。MSI 文件最后的 `_en-US` / `_zh-CN`
+   只表示安装向导语言，不是控制器语言限制；NSIS 是一个内含中英文资源的安装器。
    macOS 两个 job 会在本地强制检查各自 `.app.tar.gz.sig` 已生成，但在 updater
    尚未启用期间不上传这些同名、无对应公开更新包的 build-only tripwire。
 2. 抽查 checksum：`shasum -a 256 <下载文件>` 对照 `.sha256` 内容。
@@ -138,7 +152,8 @@ Desktop 工作区直接改为公开发布。
 
 ## 6. 回滚/重发
 
-- draft 阶段发现问题：删除 draft + tag 后重新打 tag（tag 重新指向新提交）。
+- 草稿/清单阶段发现问题：草稿不会自动公开；修复后重新运行失败 job。若需更换
+  提交，则删除 draft 和 tag 后重新打 tag（tag 重新指向新提交）。
 - 已发布：永不覆盖资产；bump patch 版本重新发布，旧版标注。
 - workflow_dispatch（不发布）可用于在**不打 tag** 的情况下全流程演练构建
   与验证；手动演练必须在受保护的 `main` 上启动，非 main workflow ref 不会进入
@@ -167,11 +182,27 @@ Desktop 工作区直接改为公开发布。
   `plugins.updater.pubkey`），与代码签名无关；私钥存于
   `TAURI_SIGNING_PRIVATE_KEY` secret，**丢失即全部更新失效**——轮换需
   重新生成密钥对、更新 pubkey、发布一次强制全量安装的新版本。
-- `latest.json` 由 publish job 的 `scripts/updater-manifest.ts` 在发布后
-  自动生成并上传（绝对资产 URL + .sig 内容），fail-closed：缺配对即失败。
-- **macOS updater 未启用**（未签名时 Gatekeeper 拒绝未公证更新，见
-  C2 评审结论）；签名+公证落地后在 manifest 参数中追加
-  `darwin-aarch64` 并启用对应 sig 上传。
+- `latest.json` 由 publish job 的 `scripts/updater-manifest.ts` 在草稿 release
+  创建后自动生成并上传（绝对资产 URL + .sig 内容），fail-closed：缺配对即失败；
+  随后 workflow 才会把草稿公开。因此 `/releases/latest/download/latest.json`
+  不会指向尚未通过资产校验的 release。
+  Windows 条目固定为 `windows-x86_64-nsis` 和
+  `windows-aarch64-nsis`，没有通用 `windows-*` fallback；这保证 MSI
+  安装不会静默切换到 NSIS 更新器。应用内更新接管前会先停止 Harness、清理
+  插件子进程树并写入生命周期收尾证据，因为 Tauri 的 Windows 更新安装器会
+  直接退出进程而不经过普通 `RunEvent::Exit`。
+- **macOS updater 未启用**。DMG 已可完成 Developer ID 签名与公证，但启用
+  前还必须产出并验证“公证并 staple 后”的 `.app.tar.gz` updater archive、
+  上传两种原生架构的签名资产、发布 `darwin-*-app` 精确 manifest 项，并在
+  原生 x64/ARM64 机器上完成从已安装应用升级的 smoke；不得把 DMG 的公证
+  成功误当作 updater 已可安全启用。
+- **Linux updater 未启用**。AppImage、DEB、RPM 与 Flatpak 都由对应包格式的
+  手工/包管理器升级路径处理；在有受签名的软件源或 Flathub 发布闭环前，不
+  发布看似可用的通用应用内更新。
+- 迁移说明：v0.2.13 的 NSIS 客户端会优先识别新的精确 NSIS key；该版本的
+  MSI 客户端则会因不再提供通用 Windows key 而提示“无适用更新”。这是有意
+  fail-closed，用户需手动安装一次同架构的下一版 MSI，之后控制器会明确说明
+  MSI 的手动/Store 更新路径，而不会安装错误的 NSIS 包。
 - 旧版本（无 pubkey 的 v0.2.x）没有自动更新迁移路径，用户需手动安装一次
   首个含 updater 的版本（v0.2.2+）。
 

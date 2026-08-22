@@ -44,8 +44,19 @@
     },
     "createUpdaterArtifacts": true,
     "windows": {
+      "wix": {
+        "language": [
+          "en-US",
+          "zh-CN"
+        ]
+      },
       "nsis": {
-        "installerHooks": "./windows/migration.nsh"
+        "installerHooks": "./windows/migration.nsh",
+        "languages": [
+          "English",
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": true
       }
     }
   },

@@ -8,8 +8,17 @@
 // platforms; `cargo test` covers the pure logic.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
   repoRoot,
   readManifest,
@@ -57,7 +66,9 @@ function runtimeFail(message: string): never {
 requireFile(sidecarPath, "sidecar binary");
 requireFile(nodePath, "bundled node");
 const dshBin = join(harnessDir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+const dshPackageManifest = join(harnessDir, "node_modules", "@deepseek-ai", "dsh", "package.json");
 requireFile(dshBin, "dsh entry (lib/bin.js)");
+requireFile(dshPackageManifest, "dsh package manifest");
 
 // Tauri can return resource paths in Win32's `\\?\` (verbatim) form. Node
 // currently cannot resolve a main entrypoint in that form: it reduces it to
@@ -175,6 +186,104 @@ async function probe(url: string): Promise<void> {
   ok(`HTTP ${res.status} · ${body.length} bytes · Harness UI served`);
 }
 
+// Keep this invocation byte-for-byte equivalent to the fixed source in
+// `src-tauri/src/profile_fallback.rs`.  It deliberately calls the upstream
+// public repair API instead of copying its link-farm algorithm into Desktop.
+const upstreamProfileFallbackRepair =
+  'import { healProfilesModuleFallback } from "@deepseek-ai/dsh-app-boot";\nhealProfilesModuleFallback(process.argv[1], process.argv[2]);\n';
+
+async function runBundledNode(args: string[]): Promise<void> {
+  await new Promise<void>((resolveRun, rejectRun) => {
+    const repair = spawn(nodeLaunchPath(nodePath), args, {
+      cwd: nodeLaunchPath(harnessDir),
+      env: {
+        ...process.env,
+        DSH_HOME: nodeLaunchPath(dshHome),
+        DSH_TELEMETRY_DISABLED: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stderr = "";
+    repair.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    repair.once("error", (error) => {
+      rejectRun(new Error(`could not launch bundled Node for profile fallback repair: ${error.message}`));
+    });
+    repair.once("close", (code, signal) => {
+      if (code === 0) {
+        resolveRun();
+        return;
+      }
+      rejectRun(
+        new Error(
+          `upstream profile fallback repair exited code ${code ?? "none"}, signal ${signal ?? "none"}: ${stderr.trim() || "no stderr"}`,
+        ),
+      );
+    });
+  });
+}
+
+async function verifyProfileFallbackRecovery(): Promise<void> {
+  const fallbackRoot = join(dshHome, "profiles", "node_modules");
+  const coreScope = join(fallbackRoot, "@deepseek-ai");
+  const preservedHealthyScope = join(fallbackRoot, "@deepseek-ai.healthy-fixture");
+  const staleScopeTarget = join(dshHome, "stale-core-scope-target");
+  const desktopBackup = join(dshHome, ".desktop-tools-fixture", "deepseek-ai-backup");
+  const userPluginMarker = join(dshHome, "profiles", "web", "node_modules", "community-plugin", "marker");
+  const staleScopeMarker = join(staleScopeTarget, "marker");
+  const expectedCorePackage = join(
+    harnessDir,
+    "node_modules",
+    "@deepseek-ai",
+    "dsh-client-ui-input-trigger",
+  );
+  const recoveredCorePackage = join(
+    fallbackRoot,
+    "@deepseek-ai",
+    "dsh-client-ui-input-trigger",
+  );
+
+  if (!existsSync(coreScope)) {
+    runtimeFail("initial Harness boot did not create the profile core-module fallback scope");
+  }
+  mkdirSync(dirname(userPluginMarker), { recursive: true });
+  writeFileSync(userPluginMarker, "user plugin survives fallback repair\n");
+  renameSync(coreScope, preservedHealthyScope);
+  mkdirSync(staleScopeTarget, { recursive: true });
+  writeFileSync(staleScopeMarker, "stale scope target remains intact\n");
+  // Windows `junction` does not require Developer Mode and mirrors the stale
+  // reparse-point state an in-place upgrade can leave behind. Unix uses a
+  // directory symlink with the same no-recursion rename property.
+  symlinkSync(staleScopeTarget, coreScope, process.platform === "win32" ? "junction" : "dir");
+
+  // This is the same narrow, recoverable operation performed by Desktop:
+  // move the bad installation-owned scope entry itself, never recurse into
+  // its target and never touch `profiles/web/node_modules`.
+  mkdirSync(dirname(desktopBackup), { recursive: true });
+  renameSync(coreScope, desktopBackup);
+  if (readFileSync(staleScopeMarker, "utf8") !== "stale scope target remains intact\n") {
+    runtimeFail("profile fallback recovery modified the stale reparse target");
+  }
+
+  await runBundledNode([
+    "--input-type=module",
+    "-e",
+    upstreamProfileFallbackRepair,
+    nodeLaunchPath(dshPackageManifest),
+    nodeLaunchPath(dshHome),
+  ]);
+
+  if (realpathSync(recoveredCorePackage) !== realpathSync(expectedCorePackage)) {
+    runtimeFail("upstream repair did not restore the bundled core-module fallback link");
+  }
+  if (!existsSync(userPluginMarker)) {
+    runtimeFail("profile fallback repair modified a user plugin tree");
+  }
+  ok("stale core fallback scope repaired; user plugin tree preserved");
+}
+
 async function main(): Promise<void> {
   info(`sidecar v${manifest.sidecarVersion} · node v${manifest.nodeVersion} · @deepseek-ai/dsh ${manifest.harnessVersion}`);
 
@@ -271,6 +380,10 @@ async function main(): Promise<void> {
   }
   if (sidecarExitCode !== 0) runtimeFail(`sidecar did not exit 0 after stdin EOF (exit ${sidecarExitCode})`);
   ok("no orphan processes; sidecar exited cleanly on parent EOF");
+
+  // Run only after the sidecar has fully exited: it verifies the update
+  // recovery path without racing a live Harness process over profiles/.
+  await verifyProfileFallbackRecovery();
 
   rmSync(dshHome, { recursive: true, force: true });
   console.log("\n  PASS — runtime smoke complete");
