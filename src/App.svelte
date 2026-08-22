@@ -72,8 +72,20 @@
     type InstallSurfaceSnapshot,
   } from "./lib/install-arbitration";
   import { trapDialog } from "./lib/dialog-trap";
-  import { marketFailureText } from "./lib/market-error";
+  import { classifyMarketFailure } from "./lib/market-error";
   import { reconcilePluginCompletion } from "./lib/plugin-completion";
+  import {
+    browserLanguages,
+    formatControllerDate,
+    isLocalePreference,
+    loadLocalePreference,
+    resolveControllerLocale,
+    saveLocalePreference,
+    translate,
+    type LocalePreference,
+    type TranslationKey,
+    type TranslationValues,
+  } from "./lib/controller-i18n";
 
   let status = $state<Status>("idle");
   let url = $state<string | null>(null);
@@ -147,20 +159,56 @@
     candidate?: PluginRecoveryCandidate;
   } | null>(null);
 
-  const STATUS_TEXT: Record<Status, string> = {
-    idle: "等待启动",
-    starting: "正在启动 Harness…",
-    running: "Harness 运行中",
-    stopping: "正在停止 Harness…",
-    stopped: "Harness 已停止",
-    crashed: "Harness 进程异常退出",
+  let localePreference = $state<LocalePreference>(loadLocalePreference());
+  let systemLanguages = $state<string[]>(browserLanguages());
+  let controllerLocale = $derived(resolveControllerLocale(localePreference, systemLanguages));
+
+  const STATUS_TEXT: Record<Status, TranslationKey> = {
+    idle: "status.idle",
+    starting: "status.starting",
+    running: "status.running",
+    stopping: "status.stopping",
+    stopped: "status.stopped",
+    crashed: "status.crashed",
   };
 
-  const ISSUE_LABEL: Record<PresetIssueKind, string> = {
-    broken: "已损坏",
-    unsafe: "不安全",
-    info: "缺元数据",
+  const ISSUE_LABEL: Record<PresetIssueKind, TranslationKey> = {
+    broken: "issue.broken",
+    unsafe: "issue.unsafe",
+    info: "issue.info",
   };
+
+  const MARKET_FAILURE_KEYS = {
+    timeout: "market.timeout",
+    unavailable: "market.unavailable",
+    invalidResponse: "market.invalidResponse",
+    http: "market.http",
+    api: "market.api",
+    unknown: "market.requestFailed",
+  } as const satisfies Record<ReturnType<typeof classifyMarketFailure>["kind"], TranslationKey>;
+
+  function t(key: TranslationKey, values?: TranslationValues): string {
+    return translate(controllerLocale, key, values);
+  }
+
+  function setLocalePreference(event: Event) {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    const preference = isLocalePreference(value) ? value : "system";
+    localePreference = preference;
+    saveLocalePreference(preference);
+  }
+
+  function marketFailureMessage(context: TranslationKey, error: unknown): string {
+    const failure = classifyMarketFailure(error);
+    const translatedContext = t(context);
+    if (failure.kind === "api" && failure.detail) {
+      return t("market.apiDetail", { context: translatedContext, detail: failure.detail });
+    }
+    return t("market.failure", {
+      context: translatedContext,
+      reason: t(MARKET_FAILURE_KEYS[failure.kind]),
+    });
+  }
 
   function apply(p: StatusPayload) {
     if (restartInFlight && p.status === "stopped") {
@@ -206,14 +254,14 @@
     // the result to Rust-slot cleanup and UI state.
     const decision = arbitratePluginRequest(installSurfaceSnapshot(), request);
     if (decision.action === "keep-current") {
-      if (decision.notify) showToast("已有待确认的安装请求，新请求已忽略");
+      if (decision.notify) showToast(t("toast.pluginRequestIgnored"));
       return;
     }
     if (decision.action === "dismiss-incoming") {
       showToast(
         decision.conflict === "market"
-          ? "已有市场安装确认正在进行，插件安装请求已忽略"
-          : "已有待处理的预设请求，插件安装请求已忽略",
+          ? t("toast.pluginRequestMarketConflict")
+          : t("toast.pluginRequestPresetConflict"),
       );
       // A local file-preview does not own the Rust install arbiter. A plugin
       // deep link can therefore arrive while it is open; rejecting only in
@@ -232,8 +280,8 @@
     if (decision.action === "dismiss-incoming") {
       showToast(
         decision.conflict === "preset"
-          ? "已有待处理的预设请求，新请求已忽略"
-          : "已有待处理的安装请求，预设请求已忽略",
+          ? t("toast.presetRequestConflict")
+          : t("toast.presetRequestPluginConflict"),
       );
       void dismissRemotePreset(request.requestId).catch(() => {});
       return;
@@ -261,19 +309,19 @@
   }
 
   function marketPackageName(item: MarketPluginSummary | MarketPluginDetail): string {
-    return item.source?.packageName?.trim() || "（未提供可安装 npm 来源）";
+    return item.source?.packageName?.trim() || t("market.noInstallSource");
   }
 
   function marketDescriptionText(desc: MarketDescription | null | undefined): string {
     if (!desc) return "";
     if (typeof desc === "string") return desc;
-    return desc.zh ?? desc.en ?? "";
+    return controllerLocale === "zh-CN" ? desc.zh ?? desc.en ?? "" : desc.en ?? desc.zh ?? "";
   }
 
   function pluginStateText(state: PluginEntry["state"]): string {
-    if (state === "pending") return "待激活";
-    if (state === "active") return "已激活";
-    return "已安装";
+    if (state === "pending") return t("plugin.pending");
+    if (state === "active") return t("plugin.active");
+    return t("plugin.installed");
   }
 
   async function doMarketSearch(reset = true) {
@@ -304,7 +352,7 @@
       marketNextCursor = res.page?.cursor ?? null;
       marketHasMore = res.page?.hasMore === true;
     } catch (e) {
-      marketError = marketFailureText("市场搜索失败", e);
+      marketError = marketFailureMessage("market.searchFailed", e);
     }
     marketBusy = false;
   }
@@ -328,7 +376,7 @@
       );
       marketImages = loaded.filter((src): src is string => src !== null);
     } catch (e) {
-      marketError = marketFailureText("插件详情加载失败", e);
+      marketError = marketFailureMessage("market.detailFailed", e);
     }
     marketDetailBusy = false;
   }
@@ -348,7 +396,7 @@
       // presents its current entryRevision for an explicit user confirmation.
       marketConfirm = await marketPrepareInstall(slug);
     } catch (e) {
-      marketError = marketFailureText("无法准备安装", e);
+      marketError = marketFailureMessage("market.prepareFailed", e);
     }
     marketPreparing = false;
   }
@@ -372,11 +420,11 @@
       pluginBusy = false;
       pluginDoneExpected = false;
       pluginExpectedOp = null;
-      pluginError = marketFailureText("市场安装失败", e);
+      pluginError = marketFailureMessage("market.installFailed", e);
       pluginLogsOpen = true;
       void refreshPlugins();
     });
-    showToast("正在校验并安装 " + preview.packageName + "；完成后仍需显式激活");
+    showToast(t("toast.marketInstalling", { name: preview.packageName }));
   }
 
   async function doActivateMarketPlugin(plugin: PluginEntry) {
@@ -398,10 +446,10 @@
     pluginError = null;
     try {
       await activateMarketPlugin(plugin.slug, plugin.entryRevision);
-      pluginRestartNotice = `插件 ${plugin.name} 已激活，需要重启 Harness 后才能生效。`;
-      showToast("已激活 " + plugin.name + "；请重启 Harness 后加载");
+      pluginRestartNotice = t("plugin.activationRestart", { name: plugin.name });
+      showToast(t("toast.pluginActivated", { name: plugin.name }));
     } catch (e) {
-      pluginError = marketFailureText("激活失败", e);
+      pluginError = marketFailureMessage("market.activateFailed", e);
     } finally {
       pluginBusy = false;
       // Refresh after both success and partial-commit errors. The backend can
@@ -409,9 +457,9 @@
       // interrupted, and the UI must not keep rendering its stale pending row.
       await refreshPlugins();
       if (plugins.some((entry) => entry.name === plugin.name && entry.state === "active")) {
-        pluginRestartNotice = `插件 ${plugin.name} 已激活，需要重启 Harness 后才能生效。`;
+        pluginRestartNotice = t("plugin.activationRestart", { name: plugin.name });
         if (pluginError) {
-          pluginError = `插件已进入激活状态，但收尾操作报告错误：${pluginError}`;
+          pluginError = t("plugin.activationPartial", { detail: pluginError });
         }
       }
     }
@@ -422,7 +470,7 @@
       const path = await pickSideloadFile();
       if (path) sideloadPath = path;
     } catch (e) {
-      showToast(`选择文件失败：${e}`);
+      showToast(t("toast.pickFileFailed", { detail: String(e) }));
     }
   }
 
@@ -441,14 +489,14 @@
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
-    showToast(`正在离线安装 ${path}…`);
+    showToast(t("toast.sideloadInstalling", { path }));
     try {
       await sideloadPlugin(path);
     } catch (e) {
       pluginBusy = false;
       pluginDoneExpected = false;
       pluginExpectedOp = null;
-      pluginError = `离线安装失败：${e}`;
+      pluginError = t("plugin.sideloadFailed", { detail: String(e) });
       pluginLogsOpen = true;
       void refreshPlugins();
     }
@@ -461,7 +509,7 @@
     try {
       remotePresetPreview = await confirmRemotePresetDownload(request.requestId);
     } catch (e) {
-      showToast(`预设下载失败：${e}`);
+      showToast(t("toast.presetDownloadFailed", { detail: String(e) }));
       try {
         const pending = await getPendingRemotePreset();
         remotePresetRequest = pending;
@@ -490,12 +538,12 @@
     if (!request || !preview || preview.requestId !== request.requestId) return;
     try {
       const id = await importRemotePreset(request.requestId);
-      showToast(`预设 ${id} 已导入`);
+      showToast(t("toast.presetImported", { id }));
       remotePresetRequest = null;
       remotePresetPreview = null;
       await refreshPresets();
     } catch (e) {
-      showToast(`预设导入失败：${e}`);
+      showToast(t("toast.presetImportFailed", { detail: String(e) }));
     }
   }
 
@@ -505,10 +553,10 @@
     restartInFlight = true;
     try {
       await restart();
-      showToast("已请求重新启动");
+      showToast(t("toast.restartRequested"));
     } catch (e) {
       restartInFlight = false;
-      showToast(`操作失败：${e}`);
+      showToast(t("toast.actionFailed", { detail: String(e) }));
     }
     busy = false;
   }
@@ -517,9 +565,9 @@
     busy = true;
     try {
       await shutdown();
-      showToast("已停止 Harness");
+      showToast(t("toast.harnessStopped"));
     } catch (e) {
-      showToast(`操作失败：${e}`);
+      showToast(t("toast.actionFailed", { detail: String(e) }));
     }
     busy = false;
   }
@@ -528,7 +576,7 @@
     try {
       await openHarness();
     } catch (e) {
-      showToast(`操作失败：${e}`);
+      showToast(t("toast.actionFailed", { detail: String(e) }));
     }
   }
 
@@ -539,12 +587,12 @@
       const info = await checkUpdate();
       updateInfo = info;
       if (info.unsupported) {
-        showToast("当前平台不支持自动更新");
+        showToast(t("toast.updatesUnsupported"));
       } else if (!info.available) {
-        showToast("已是最新版本");
+        showToast(t("toast.upToDate"));
       }
     } catch (e) {
-      updateError = `检查更新失败：${e}`;
+      updateError = t("update.checkFailed", { detail: String(e) });
     }
     updateBusy = false;
   }
@@ -554,10 +602,10 @@
     updateError = null;
     updatePercent = null;
     try {
-      showToast("正在下载更新，完成后自动重启…");
+      showToast(t("toast.updateDownloading"));
       await installUpdateAndRestart();
     } catch (e) {
-      updateError = `更新失败：${e}`;
+      updateError = t("update.installFailed", { detail: String(e) });
       updateBusy = false;
       updatePercent = null;
     }
@@ -567,10 +615,10 @@
     diagnosticsBusy = true;
     try {
       const saved = await exportDiagnostics();
-      if (saved) showToast("诊断信息已导出");
+      if (saved) showToast(t("toast.diagnosticsExported"));
     } catch (e) {
-      if (String(e).includes("cancelled")) showToast("已取消诊断导出");
-      else showToast(`导出失败：${e}`);
+      if (String(e).includes("cancelled")) showToast(t("toast.diagnosticsCancelled"));
+      else showToast(t("toast.exportFailed", { detail: String(e) }));
     } finally {
       diagnosticsBusy = false;
     }
@@ -578,9 +626,9 @@
 
   async function doCancelDiagnosticsExport() {
     try {
-      if (await cancelDiagnosticsExport()) showToast("正在取消诊断导出…");
+      if (await cancelDiagnosticsExport()) showToast(t("toast.cancellingExport"));
     } catch (e) {
-      showToast(`取消失败：${e}`);
+      showToast(t("toast.cancelFailed", { detail: String(e) }));
     }
   }
 
@@ -588,7 +636,7 @@
     try {
       await quitApp();
     } catch (e) {
-      showToast(`退出失败：${e}`);
+      showToast(t("toast.quitFailed", { detail: String(e) }));
     }
   }
 
@@ -596,25 +644,25 @@
     try {
       await openUrl(url);
     } catch (e) {
-      showToast(`打开失败：${e}`);
+      showToast(t("toast.openFailed", { detail: String(e) }));
     }
   }
 
   async function reportContent() {
     try {
       const url = new URL("https://github.com/web-casa/DeepSeek-Harness-Desktop/issues/new");
-      url.searchParams.set("title", "[Content] 报告 AI 生成内容");
+      url.searchParams.set("title", t("report.contentTitle"));
       url.searchParams.set(
         "body",
         [
-          "请说明需要报告的 AI 生成内容、使用的模型服务以及期望的处理方式。",
+          t("report.contentPrompt"),
           "",
-          "请勿粘贴 API key、个人数据、私密文件内容或其他敏感信息。",
+          t("report.contentPrivacy"),
         ].join("\n"),
       );
       await openUrl(url.toString());
     } catch (e) {
-      showToast(`打开失败：${e}`);
+      showToast(t("toast.openFailed", { detail: String(e) }));
     }
   }
 
@@ -623,20 +671,20 @@
       const d = await getDiagnostics();
       const platform = (d.platform as { os?: string; arch?: string }) ?? {};
       const body = [
-        `版本：desktop ${versions.desktop} · harness ${versions.harness}`,
-        `平台：${platform.os ?? "?"}/${platform.arch ?? "?"}`,
+        t("report.version", { desktop: versions.desktop, harness: versions.harness }),
+        t("report.platform", { os: platform.os ?? "?", arch: platform.arch ?? "?" }),
         "",
-        "请在此描述问题与复现步骤；",
-        "诊断信息请用「导出诊断」按钮生成 zip 后拖入此处（可能含敏感信息，请自行核对）。",
+        t("report.issuePrompt"),
+        t("report.diagnosticsPrompt"),
       ].join("\n");
       const url = new URL("https://github.com/web-casa/DeepSeek-Harness-Desktop/issues/new");
       url.searchParams.set("template", "bug_report.md");
       url.searchParams.set("labels", "bug");
-      url.searchParams.set("title", "[Bug] 来自桌面的问题报告");
+      url.searchParams.set("title", t("report.issueTitle"));
       url.searchParams.set("body", body);
       await openUrl(url.toString());
     } catch (e) {
-      showToast(`打开失败：${e}`);
+      showToast(t("toast.openFailed", { detail: String(e) }));
     }
   }
 
@@ -654,7 +702,7 @@
     try {
       presetPreview = await previewPreset();
     } catch (e) {
-      if (String(e) !== "cancelled") presetError = `读取失败：${e}`;
+      if (String(e) !== "cancelled") presetError = t("preset.readFailed", { detail: String(e) });
     }
     presetBusy = false;
   }
@@ -665,10 +713,10 @@
     try {
       const id = await importPreset();
       presetPreview = null;
-      showToast(`预设 ${id} 已导入（在 Harness 设置页可见）`);
+      showToast(t("toast.presetImportedHarness", { id }));
       await refreshPresets();
     } catch (e) {
-      presetError = `导入失败：${e}`;
+      presetError = t("toast.presetImportFailed", { detail: String(e) });
     }
     presetBusy = false;
   }
@@ -687,9 +735,9 @@
     presetBusy = true;
     try {
       await exportPreset(id);
-      showToast(`预设 ${id} 已导出`);
+      showToast(t("toast.presetExported", { id }));
     } catch (e) {
-      if (String(e) !== "cancelled") showToast(`导出失败：${e}`);
+      if (String(e) !== "cancelled") showToast(t("toast.presetExportFailed", { detail: String(e) }));
     }
     presetBusy = false;
   }
@@ -700,10 +748,10 @@
     try {
       await deletePreset(id);
       confirmDelete = null;
-      showToast(`预设 ${id} 已删除`);
+      showToast(t("toast.presetDeleted", { id }));
       await refreshPresets();
     } catch (e) {
-      showToast(`删除失败：${e}`);
+      showToast(t("toast.presetDeleteFailed", { detail: String(e) }));
     }
     presetBusy = false;
   }
@@ -712,9 +760,9 @@
     try {
       const payload = await getDiagnostics();
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
-      showToast("诊断信息已复制到剪贴板");
+      showToast(t("toast.diagnosticsCopied"));
     } catch (e) {
-      showToast(`复制失败：${e}`);
+      showToast(t("toast.copyFailed", { detail: String(e) }));
     }
   }
 
@@ -760,14 +808,12 @@
         // polling backend truth prevents the UI from remaining busy forever.
         pluginError ??=
           expectedOp === "market-install"
-            ? "市场插件操作已经结束，但完成事件未送达；请刷新当前插件列表。仅在显式 Activate 后重启 Harness 才会加载该插件。"
-            : "插件操作已经结束，但完成事件未送达；请检查安装日志和当前插件列表。";
+            ? t("plugin.missedMarketCompletion")
+            : t("plugin.missedCompletion");
         if (expectedOp === "remove") {
-          pluginRestartNotice =
-            "插件移除操作已经结束；请重启 Harness 停止当前进程中的旧插件，并核对列表后按需重试。";
+          pluginRestartNotice = t("plugin.removeFinishedRestart");
         } else if (expectedOp === "add") {
-          pluginRestartNotice =
-            "插件安装操作已经结束；请重启 Harness 后核对当前插件列表并验证是否生效。";
+          pluginRestartNotice = t("plugin.installFinishedRestart");
         }
         pluginLogsOpen = true;
       }
@@ -787,7 +833,7 @@
       recoveryOverview = await getPluginRecovery();
       recoveryError = null;
     } catch (e) {
-      recoveryError = `插件恢复状态不可用：${e}`;
+      recoveryError = t("recovery.unavailable", { detail: String(e) });
     }
   }
 
@@ -801,18 +847,18 @@
     try {
       if (confirmation.action === "disable" && confirmation.candidate) {
         await beginPluginRecovery(confirmation.candidate.packageName);
-        showToast(`已精确禁用 ${confirmation.candidate.packageName}，正在验证重启`);
+        showToast(t("toast.recoveryDisabled", { name: confirmation.candidate.packageName }));
       } else if (confirmation.action === "rollback" && transaction) {
         await rollbackPluginRecovery(transaction.transactionId);
-        showToast(`已回滚 ${transaction.packageName} 的隔离，正在重新启动`);
+        showToast(t("toast.recoveryRolledBack", { name: transaction.packageName }));
       } else if (confirmation.action === "finalize" && transaction) {
         await finalizePluginRecovery(transaction.transactionId);
-        showToast(`已保留 ${transaction.packageName} 的隔离状态`);
+        showToast(t("toast.recoveryFinalized", { name: transaction.packageName }));
       }
       await refreshRecovery();
       await refreshPlugins();
     } catch (e) {
-      recoveryError = `插件恢复操作失败：${e}`;
+      recoveryError = t("recovery.failed", { detail: String(e) });
       await refreshRecovery();
     }
     recoveryBusy = false;
@@ -831,7 +877,10 @@
     pluginError = null;
     pluginLogs = [];
     pluginLogsOpen = true;
-    const label = op === "install" ? `正在安装 ${name.trim()}…` : `正在卸载 ${name.trim()}…`;
+    const label =
+      op === "install"
+        ? t("toast.pluginInstalling", { name: name.trim() })
+        : t("toast.pluginUninstalling", { name: name.trim() });
     const call = op === "install" ? installPlugin(name.trim()) : uninstallPlugin(name.trim());
     void call.catch((e) => {
       pluginBusy = false;
@@ -842,10 +891,12 @@
         // worker exists, so no plugin-done event will arrive to set the usual
         // restart notice. Keep this wording truthful for failures that
         // happened before mutation as well.
-        pluginRestartNotice =
-          "卸载未开始或未完成；如果插件此前正在运行，请重启 Harness 后检查状态并重试。";
+        pluginRestartNotice = t("plugin.uninstallRestart");
       }
-      pluginError = `${op === "install" ? "安装" : "卸载"}失败：${e}`;
+      pluginError = t("plugin.operationFailed", {
+        operation: t(op === "install" ? "action.install" : "action.uninstall"),
+        detail: String(e),
+      });
       pluginLogsOpen = true;
       // Resync busy: "an operation is already running" means another
       // surface (or a pre-reload op) owns the backend flag.
@@ -857,9 +908,9 @@
   async function doCancelPluginOp() {
     try {
       await cancelPluginOp();
-      showToast("已请求取消");
+      showToast(t("toast.cancelRequested"));
     } catch (e) {
-      showToast(`取消失败：${e}`);
+      showToast(t("toast.cancelFailed", { detail: String(e) }));
     }
   }
 
@@ -885,6 +936,21 @@
     }
     await prepareMarketInstall(request.slug);
   }
+
+  // The browser does not expose a portable locale store, but it does emit this
+  // event when its language preferences change. Only the explicit “system”
+  // mode follows it; a manual controller choice remains stable and persisted.
+  onMount(() => {
+    const syncSystemLanguages = () => {
+      systemLanguages = browserLanguages();
+    };
+    window.addEventListener("languagechange", syncSystemLanguages);
+    return () => window.removeEventListener("languagechange", syncSystemLanguages);
+  });
+
+  $effect(() => {
+    if (typeof document !== "undefined") document.documentElement.lang = controllerLocale;
+  });
 
   // Initial data load (async onMount is fine here — no cleanup needed).
   onMount(async () => {
@@ -1013,8 +1079,7 @@
         // Every spawned remove has already completed exact pre-disable. Even
         // when pnpm fails or cancellation wins, the currently running Harness
         // may still hold the old plugin and must be restarted to unload it.
-        pluginRestartNotice =
-          "插件移除未完成，但目标已安全禁用；请重启 Harness 停止当前进程中的插件后再重试卸载。";
+        pluginRestartNotice = t("plugin.removeIncompleteRestart");
       }
       if (p.exit === 0) {
         // A delayed live event can arrive just after polling synthesized a
@@ -1022,20 +1087,23 @@
         pluginError = null;
         pluginName = "";
         if (p.op === "market-install") {
-          showToast("插件已校验完成，正在等待你的显式激活");
+          showToast(t("toast.marketPluginVerified"));
         } else if (p.op === "remove") {
-          pluginRestartNotice = "插件已卸载，需要重启 Harness 才能从当前进程中完全移除。";
-          showToast("插件已卸载；请重启 Harness 完成移除");
+          pluginRestartNotice = t("plugin.uninstalledRestart");
+          showToast(t("toast.pluginUninstalled"));
         } else if (p.op === "add") {
-          pluginRestartNotice = "插件已安装，需要重启 Harness 后才能生效。";
-          showToast("插件已安装；请重启 Harness 后使用");
+          pluginRestartNotice = t("plugin.installedRestart");
+          showToast(t("toast.pluginInstalled"));
         } else {
-          pluginError = "插件操作已完成，但返回了无法识别的操作类型；请刷新状态后重试。";
+          pluginError = t("plugin.unknownOperation");
           pluginLogsOpen = true;
         }
       } else {
         const detail = tailLines.at(-1);
-        pluginError = `插件操作失败（exit ${p.exit ?? "被终止"}）${detail ? `：${detail}` : "，详情见安装日志"}`;
+        pluginError = t("plugin.operationExit", {
+          exit: p.exit ?? t("plugin.exitTerminated"),
+          detail: detail ? t("plugin.exitDetail", { detail }) : t("plugin.exitLogDetail"),
+        });
         pluginLogsOpen = true;
       }
       void refreshPlugins();
@@ -1173,16 +1241,24 @@
     </div>
     <div class="title-wrap">
       <h1>DSH Desktop</h1>
-      <span class="subtitle">桌面发行层 · 原版 Harness Web UI · 内置 Node Runtime</span>
+      <span class="subtitle">{t("header.subtitle")}</span>
     </div>
     <div class="spacer"></div>
+    <label class="locale-control">
+      <span>{t("locale.label")}</span>
+      <select value={localePreference} onchange={setLocalePreference} aria-label={t("locale.label")}>
+        <option value="system">{t("locale.system")}</option>
+        <option value="zh-CN">{t("locale.zhCN")}</option>
+        <option value="en">{t("locale.en")}</option>
+      </select>
+    </label>
     <span class="badge">v{versions.desktop}</span>
   </header>
 
   {#if !inTauri}
     <div class="warn-banner">
-      当前以浏览器模式运行（未嵌入 Tauri，IPC 不可用）。请使用
-      <b>pnpm tauri dev</b> 获得完整桌面体验。
+      {t("browser.warning")}
+      <b>pnpm tauri dev</b> {t("browser.warningSuffix")}
     </div>
   {/if}
 
@@ -1193,7 +1269,7 @@
       {:else}
         <div class="dot {status}"></div>
       {/if}
-      <span class="status-text">{STATUS_TEXT[status]}</span>
+      <span class="status-text">{t(STATUS_TEXT[status])}</span>
       {#if pid !== null && (status === "running" || status === "starting")}
         <span class="badge">pid {pid}</span>
       {/if}
@@ -1221,45 +1297,45 @@
       <div class="steps">
         <div class={stepClass("check")}>
           <span class="ico">{stepClass("check") === "fail" ? "✗" : stepClass("check") === "done" ? "✓" : "●"}</span>
-          Runtime 检查 — Node {versions.node} · Harness {versions.harness}
+          {t("step.runtime", { node: versions.node, harness: versions.harness })}
         </div>
         <div class={stepClass("start")}>
           <span class="ico">{stepClass("start") === "fail" ? "✗" : stepClass("start") === "done" ? "✓" : "●"}</span>
-          启动 dsh web（127.0.0.1 · 自动端口）
+          {t("step.start")}
         </div>
         <div class={stepClass("ready")}>
           <span class="ico">{stepClass("ready") === "fail" ? "✗" : stepClass("ready") === "done" ? "✓" : "●"}</span>
-          等待 readiness 信号
+          {t("step.ready")}
         </div>
       </div>
     {/if}
 
     <div class="actions">
       {#if status === "running"}
-        <button class="primary" onclick={doOpen}>打开 Harness 窗口</button>
-        <button class="ghost" onclick={doRestart} disabled={busy || pluginBusy || recoveryBusy}>重新启动</button>
-        <button class="danger-ghost" onclick={doShutdown} disabled={busy}>停止</button>
+        <button class="primary" onclick={doOpen}>{t("action.openHarness")}</button>
+        <button class="ghost" onclick={doRestart} disabled={busy || pluginBusy || recoveryBusy}>{t("action.restart")}</button>
+        <button class="danger-ghost" onclick={doShutdown} disabled={busy}>{t("action.stop")}</button>
       {:else if status === "crashed" || status === "stopped"}
         <button class="primary" onclick={doRestart} disabled={busy || pluginBusy || recoveryBusy}>
-          {status === "stopped" ? "重新启动" : "重新启动 Harness"}
+          {status === "stopped" ? t("action.restart") : t("action.restartHarness")}
         </button>
         {#if status === "crashed"}
-          <button class="ghost" onclick={copyDiagnostics}>复制诊断信息</button>
+          <button class="ghost" onclick={copyDiagnostics}>{t("action.copyDiagnostics")}</button>
           <button class="ghost" onclick={doExportDiagnostics} disabled={diagnosticsBusy}>
-            {diagnosticsBusy ? "正在导出…" : "导出诊断"}
+            {diagnosticsBusy ? t("action.exporting") : t("action.exportDiagnostics")}
           </button>
           {#if diagnosticsBusy}
-            <button class="ghost" onclick={doCancelDiagnosticsExport}>取消导出</button>
+            <button class="ghost" onclick={doCancelDiagnosticsExport}>{t("action.cancelExport")}</button>
           {/if}
-          <button class="danger-ghost" onclick={doQuitApp}>退出应用</button>
+          <button class="danger-ghost" onclick={doQuitApp}>{t("action.quit")}</button>
         {/if}
       {:else}
-        <button class="ghost" disabled>正在启动…</button>
+        <button class="ghost" disabled>{t("action.starting")}</button>
       {/if}
     </div>
     {#if status === "crashed"}
       <p class="privacy-note">
-        诊断包仅收集受限的 Desktop 生命周期证据和脱敏日志尾部，不包含会话或工作区文件；脱敏并非绝对，请在分享前检查内容。
+        {t("diagnostics.privacy")}
       </p>
     {/if}
   </div>
@@ -1267,8 +1343,8 @@
   {#if recoveryError || recoveryOverview?.transaction || (recoveryOverview?.candidates.length ?? 0) > 0}
     <div class="card recovery-card">
       <div class="update-row">
-        <span class="update-title">安全插件恢复</span>
-        {#if recoveryBusy}<span class="plugin-busy"><span class="spinner"></span> 处理中…</span>{/if}
+        <span class="update-title">{t("recovery.title")}</span>
+        {#if recoveryBusy}<span class="plugin-busy"><span class="spinner"></span> {t("recovery.working")}</span>{/if}
       </div>
       {#if recoveryError}
         <div class="notice-box">{recoveryError}</div>
@@ -1278,28 +1354,28 @@
         <div class="preset-row">
           <span>
             <span class="preset-name">{transaction.packageName}</span>
-            <span class="badge">{transaction.marketManaged ? "市场来源" : "用户来源"}</span>
+            <span class="badge">{transaction.marketManaged ? t("recovery.marketSource") : t("recovery.userSource")}</span>
             <span class="badge">
-              {transaction.phase === "isolated" ? "已验证隔离" : "已禁用，等待健康启动"}
+              {transaction.phase === "isolated" ? t("recovery.isolated") : t("recovery.disabled")}
             </span>
           </span>
           <button
             class="ghost"
             onclick={() => (recoveryConfirm = { action: "rollback" })}
             disabled={recoveryBusy}
-          >回滚并重新启用</button>
+          >{t("action.rollbackReenable")}</button>
           <button
             class="primary"
             onclick={() => (recoveryConfirm = { action: "finalize" })}
             disabled={recoveryBusy || transaction.phase !== "isolated"}
-          >保留隔离</button>
+          >{t("action.keepIsolated")}</button>
         </div>
         <div class="trust-note">
-          回滚仅在 profile 仍与备份事务精确一致时执行；市场插件还必须通过当前线上 blocked、deprecated、兼容性和来源校验。
+          {t("recovery.rollbackNote")}
         </div>
       {:else if recoveryOverview?.terminalStartupFailure}
         <div class="trust-note">
-          Desktop 从启动错误中识别到以下候选；日志只提供线索，Rust 已再次确认包同时存在于 dependencies 与激活 bundles。不会自动修改。
+          {t("recovery.candidatesNote")}
         </div>
         {#each recoveryOverview.candidates as candidate (candidate.packageName)}
           <div class="preset-row">
@@ -1312,7 +1388,7 @@
               class="danger-ghost"
               onclick={() => (recoveryConfirm = { action: "disable", candidate })}
               disabled={recoveryBusy || pluginBusy}
-            >审阅并隔离</button>
+            >{t("action.reviewIsolate")}</button>
           </div>
         {/each}
       {/if}
@@ -1321,13 +1397,13 @@
 
   <button class="logs-toggle" onclick={() => (logsOpen = !logsOpen)}>
     <span>{logsOpen ? "▾" : "▸"}</span>
-    运行日志 {logsOpen ? "" : `(${logs.length})`}
+    {t("logs.runtime")} {logsOpen ? "" : `(${logs.length})`}
   </button>
 
   {#if logsOpen}
     <div class="console">
       {#if logs.length === 0}
-        <span class="l-empty">（暂无日志）</span>
+        <span class="l-empty">{t("logs.empty")}</span>
       {:else}
         {#each logs as [stream, line], i (i)}
           <div class="l-{stream}">{line}</div>
@@ -1338,30 +1414,30 @@
 
   <div class="card update-card">
     <div class="update-row">
-      <span class="update-title">软件更新</span>
+      <span class="update-title">{t("update.title")}</span>
       {#if storeBuild}
-        <span class="update-info">Microsoft Store 管理更新</span>
+        <span class="update-info">{t("update.storeManaged")}</span>
       {:else if updateInfo?.available}
-        <span class="update-info">发现新版本 v{updateInfo.version}</span>
+        <span class="update-info">{t("update.available", { version: updateInfo.version ?? t("value.unknown") })}</span>
         <button class="primary" onclick={doInstallUpdate} disabled={updateBusy}>
           {updateBusy
             ? updatePercent !== null
-              ? `更新中 ${updatePercent}%…`
-              : "更新中…"
-            : "安装更新并重启"}
+              ? t("update.progress", { percent: updatePercent })
+              : t("update.inProgress")
+            : t("action.installUpdateRestart")}
         </button>
       {:else}
         <button class="ghost" onclick={doCheckUpdate} disabled={updateBusy}>
-          {updateBusy ? "检查中…" : "检查更新"}
+          {updateBusy ? t("action.checking") : t("action.checkUpdates")}
         </button>
       {/if}
     </div>
     <div class="update-row">
-      <span class="update-title">资源</span>
-      <button class="ghost" onclick={() => openSite("https://dsharness.app")}>官网</button>
-      <button class="ghost" onclick={() => openSite("https://cordis.run")}>插件市场</button>
-      <button class="ghost" onclick={reportContent}>报告 AI 内容</button>
-      <button class="ghost" onclick={reportIssue}>报告问题</button>
+      <span class="update-title">{t("resources.title")}</span>
+      <button class="ghost" onclick={() => openSite("https://dsharness.app")}>{t("action.website")}</button>
+      <button class="ghost" onclick={() => openSite("https://cordis.run")}>{t("action.pluginMarket")}</button>
+      <button class="ghost" onclick={reportContent}>{t("action.reportContent")}</button>
+      <button class="ghost" onclick={reportIssue}>{t("action.reportIssue")}</button>
     </div>
     {#if updateError}
       <div class="notice-box">{updateError}</div>
@@ -1370,21 +1446,21 @@
 
   <div class="card preset-card">
     <div class="update-row">
-      <span class="update-title">预设（Agent Presets）</span>
-      <button class="ghost" onclick={doPreviewPreset} disabled={presetBusy}>导入 .dshpreset…</button>
+      <span class="update-title">{t("presets.title")}</span>
+      <button class="ghost" onclick={doPreviewPreset} disabled={presetBusy}>{t("action.importPreset")}</button>
     </div>
     {#if presetPreview}
       <div class="notice-box">
-        <b>预设 {presetPreview.id}</b> · {presetPreview.files.length} 个文件
+        <b>{t("preset.files", { id: presetPreview.id, count: presetPreview.files.length })}</b>
         {#if presetPreview.warnings.includes("possible-secrets")}
-          · <span class="warn">⚠ 检测到疑似密钥</span>
+          · <span class="warn">⚠ {t("preset.possibleSecrets")}</span>
         {/if}
         {#if presetPreview.warnings.includes("absolute-paths")}
-          · <span class="warn">⚠ 含绝对路径</span>
+          · <span class="warn">⚠ {t("preset.absolutePaths")}</span>
         {/if}
-        <div>预设与 Agent 同权限运行工具和命令——仅导入可信来源。</div>
-        <button class="primary" onclick={doImportPreset} disabled={presetBusy}>确认导入</button>
-        <button class="ghost" onclick={doCancelPresetPreview}>取消</button>
+        <div>{t("preset.trust")}</div>
+        <button class="primary" onclick={doImportPreset} disabled={presetBusy}>{t("action.confirmImport")}</button>
+        <button class="ghost" onclick={doCancelPresetPreview}>{t("action.cancel")}</button>
       </div>
     {/if}
     {#if presetError}
@@ -1396,21 +1472,20 @@
           <span class="preset-id">
             <span class="preset-name">{row.id}</span>
             {#each row.issues as issue (issue.kind)}
-              <span class="preset-badge {issue.kind}">{ISSUE_LABEL[issue.kind]}</span>
+              <span class="preset-badge {issue.kind}">{t(ISSUE_LABEL[issue.kind])}</span>
             {/each}
           </span>
-          <button class="ghost" onclick={() => doExportPreset(row.id)} disabled={presetBusy}>导出</button>
+          <button class="ghost" onclick={() => doExportPreset(row.id)} disabled={presetBusy}>{t("action.export")}</button>
           {#if confirmDelete === row.id}
-            <button class="danger-ghost" onclick={() => doDeletePreset(row.id)} disabled={presetBusy}>确认删除？</button>
-            <button class="ghost" onclick={() => (confirmDelete = null)}>取消</button>
+            <button class="danger-ghost" onclick={() => doDeletePreset(row.id)} disabled={presetBusy}>{t("action.confirmDelete")}</button>
+            <button class="ghost" onclick={() => (confirmDelete = null)}>{t("action.cancel")}</button>
           {:else}
-            <button class="ghost" onclick={() => (confirmDelete = row.id)} disabled={presetBusy}>删除</button>
+            <button class="ghost" onclick={() => (confirmDelete = row.id)} disabled={presetBusy}>{t("action.delete")}</button>
           {/if}
         </div>
         {#if confirmDelete === row.id}
           <div class="preset-issues">
-            · 桌面层直接移除预设目录，不清理 Harness 的默认预设设置——若该预设是当前默认，
-            请在 Harness 设置页改选默认，否则下次会话可能无法启动 Agent。
+            · {t("preset.deleteNote")}
           </div>
         {/if}
         {#if row.issues.length > 0}
@@ -1422,22 +1497,23 @@
         {/if}
       {/each}
     {:else}
-      <div class="preset-row"><span class="l-empty">（暂无用户预设）</span></div>
+      <div class="preset-row"><span class="l-empty">{t("preset.empty")}</span></div>
     {/if}
   </div>
 
   <div class="card plugin-card">
     <div class="update-row">
-      <span class="update-title">插件市场</span>
+      <span class="update-title">{t("market.title")}</span>
       {#if !storeBuild}
-        <button class="ghost" onclick={doPickSideload} disabled={pluginProfileTransitioning || recoveryOverview?.transaction != null}>离线安装 .tgz</button>
+        <button class="ghost" onclick={doPickSideload} disabled={pluginProfileTransitioning || recoveryOverview?.transaction != null}>{t("action.sideload")}</button>
       {/if}
     </div>
     <div class="plugin-row">
       <input
         class="plugin-input"
         type="text"
-        placeholder="搜索 cordis.run 插件…"
+        placeholder={t("market.searchPlaceholder")}
+        aria-label={t("market.searchPlaceholder")}
         bind:value={marketQuery}
         disabled={marketBusy}
         spellcheck="false"
@@ -1445,13 +1521,13 @@
           if (e.key === "Enter") doMarketSearch();
         }}
       />
-      <select class="plugin-input" bind:value={marketCategory} disabled={marketBusy} aria-label="插件类别">
-        <option value="">全部类别</option>
-        <option value="agent">Agent</option>
-        <option value="market">市场</option>
+      <select class="plugin-input" bind:value={marketCategory} disabled={marketBusy} aria-label={t("market.categoryLabel")}>
+        <option value="">{t("market.allCategories")}</option>
+        <option value="agent">{t("market.categoryAgent")}</option>
+        <option value="market">{t("market.categoryMarket")}</option>
       </select>
       <button class="primary" onclick={() => doMarketSearch(true)} disabled={marketBusy}>
-        {marketBusy ? "搜索中…" : "搜索"}
+        {marketBusy ? t("action.searching") : t("action.search")}
       </button>
     </div>
     {#if marketError}
@@ -1459,12 +1535,16 @@
     {/if}
     {#if marketOffline}
       <div class="notice-box">
-        当前显示离线缓存{marketOfflineFetchedAt ? `（缓存时间 ${new Date(marketOfflineFetchedAt).toLocaleString()}）` : ""}。离线条目仅供浏览；详情、翻页和安装均已禁用，请联网后重新搜索。
+        {t("market.offline", {
+          cachedAt: marketOfflineFetchedAt
+            ? t("market.cachedAt", { time: formatControllerDate(controllerLocale, marketOfflineFetchedAt) })
+            : "",
+        })}
       </div>
     {/if}
     {#if marketItems.length > 0}
       {#if marketCount !== null}
-        <div class="preset-issues">当前筛选共 {marketCount} 个条目；按 cursor 顺序加载。</div>
+        <div class="preset-issues">{t("market.count", { count: marketCount })}</div>
       {/if}
       {#each marketItems as item (item.slug)}
         <div class="preset-row">
@@ -1473,18 +1553,18 @@
             {#if marketVersion(item)}<span class="badge">v{marketVersion(item)}</span>{/if}
             {#if item.stars != null}<span class="badge">★ {item.stars}</span>{/if}
             {#if item.category}<span class="badge">{item.category}</span>{/if}
-            <span class="badge">{item.platforms.includes("desktop") ? "desktop" : "web-only"}</span>
+            <span class="badge">{item.platforms.includes("desktop") ? t("market.desktop") : t("market.webOnly")}</span>
           </span>
-          <button class="ghost" onclick={() => doMarketDetail(item.slug)} disabled={marketDetailBusy || marketOffline}>详情</button>
+          <button class="ghost" onclick={() => doMarketDetail(item.slug)} disabled={marketDetailBusy || marketOffline}>{t("action.details")}</button>
           {#if item.installable === true}
             <button
               class="primary"
               onclick={() => doMarketInstall(item)}
               disabled={pluginBusy || pluginProfileTransitioning || marketPreparing || marketOffline || recoveryOverview?.transaction != null}
-            >{marketPreparing ? "校验中…" : "安装"}</button>
+            >{marketPreparing ? t("action.verifying") : t("action.install")}</button>
           {:else}
-            <button class="ghost" disabled title={item.installReason ?? "该条目不可安装"}>
-              {item.blocked ? "已封禁" : item.deprecated ? "已弃用" : "不可安装"}
+            <button class="ghost" disabled title={item.installReason ?? t("market.notInstallable")}>
+              {item.blocked ? t("market.blocked") : item.deprecated ? t("market.deprecated") : t("market.notInstallable")}
             </button>
           {/if}
         </div>
@@ -1499,38 +1579,39 @@
             onclick={() => doMarketSearch(false)}
             disabled={marketBusy || marketNextCursor === null}
           >
-            {marketBusy ? "加载中…" : "加载更多"}
+            {marketBusy ? t("action.loading") : t("action.loadMore")}
           </button>
         </div>
       {/if}
     {:else}
-      <div class="preset-row"><span class="l-empty">（输入关键词搜索插件市场）</span></div>
+      <div class="preset-row"><span class="l-empty">{t("market.empty")}</span></div>
     {/if}
   </div>
 
   <div class="card plugin-card">
     <div class="update-row">
-      <span class="update-title">插件（用户安装）</span>
+      <span class="update-title">{t("plugins.title")}</span>
     </div>
     {#if storeBuild}
       <div class="plugin-row">
-        <span class="update-info">仅允许安装 cordis.run 已审核插件</span>
+        <span class="update-info">{t("store.auditedOnly")}</span>
         {#if pluginBusy}
-          <span class="plugin-busy"><span class="spinner"></span> 操作中…</span>
-          <button class="danger-ghost" onclick={doCancelPluginOp}>取消</button>
+          <span class="plugin-busy"><span class="spinner"></span> {t("plugin.working")}</span>
+          <button class="danger-ghost" onclick={doCancelPluginOp}>{t("action.cancel")}</button>
         {:else}
-          <button class="ghost" onclick={() => openSite("https://cordis.run")}>打开插件市场</button>
+          <button class="ghost" onclick={() => openSite("https://cordis.run")}>{t("action.openPluginMarket")}</button>
         {/if}
       </div>
       <div class="trust-note">
-        插件与 Agent 同权限运行工具和命令；Store 版仅安装已审核插件。
+        {t("store.trust")}
       </div>
     {:else}
       <div class="plugin-row">
         <input
           class="plugin-input"
           type="text"
-          placeholder="npm 包名，如 @cordisjs/plugin-example"
+          placeholder={t("plugins.placeholder")}
+          aria-label={t("plugins.placeholder")}
           bind:value={pluginName}
           disabled={pluginBusy || pluginProfileTransitioning || recoveryOverview?.transaction != null}
           spellcheck="false"
@@ -1539,18 +1620,18 @@
           }}
         />
         {#if pluginBusy}
-          <span class="plugin-busy"><span class="spinner"></span> 操作中…</span>
-          <button class="danger-ghost" onclick={doCancelPluginOp}>取消</button>
+          <span class="plugin-busy"><span class="spinner"></span> {t("plugin.working")}</span>
+          <button class="danger-ghost" onclick={doCancelPluginOp}>{t("action.cancel")}</button>
         {:else}
           <button class="primary" onclick={() => startPluginOp(pluginName, "install")} disabled={pluginProfileTransitioning || !pluginName.trim() || recoveryOverview?.transaction != null}>
-            安装
+            {t("action.install")}
           </button>
         {/if}
       </div>
       <div class="trust-note">
-        插件与 Agent 同权限运行工具和命令——仅安装可信来源；可在
-        <button class="inline-link" onclick={() => openSite("https://cordis.run")}>cordis.run 插件市场</button>
-        查找包名。
+        {t("plugins.trustBeforeLink")}
+        <button class="inline-link" onclick={() => openSite("https://cordis.run")}>cordis.run {t("action.pluginMarket")}</button>
+        {t("plugins.trustAfterLink")}
       </div>
     {/if}
     {#if pluginError}
@@ -1560,7 +1641,7 @@
       <div class="notice-box">
         {pluginRestartNotice}
         <button class="primary" onclick={doRestart} disabled={busy || pluginBusy || recoveryBusy || status !== "running"}>
-          立即重启 Harness
+          {t("action.restartNow")}
         </button>
       </div>
     {/if}
@@ -1573,23 +1654,23 @@
           </span>
           {#if p.state === "pending" && p.slug && p.entryRevision}
             <button class="primary" onclick={() => doActivateMarketPlugin(p)} disabled={pluginBusy || pluginProfileTransitioning || recoveryOverview?.transaction != null}>
-              Activate
+              {t("action.activate")}
             </button>
           {/if}
-          <button class="ghost" onclick={() => startPluginOp(p.name, "uninstall")} disabled={pluginBusy || pluginProfileTransitioning || recoveryOverview?.transaction != null}>卸载</button>
+          <button class="ghost" onclick={() => startPluginOp(p.name, "uninstall")} disabled={pluginBusy || pluginProfileTransitioning || recoveryOverview?.transaction != null}>{t("action.uninstall")}</button>
         </div>
       {/each}
     {:else}
-      <div class="preset-row"><span class="l-empty">（暂无用户安装的插件）</span></div>
+      <div class="preset-row"><span class="l-empty">{t("plugins.empty")}</span></div>
     {/if}
     <button class="logs-toggle" onclick={() => (pluginLogsOpen = !pluginLogsOpen)}>
       <span>{pluginLogsOpen ? "▾" : "▸"}</span>
-      安装日志 {pluginLogsOpen ? "" : `(${pluginLogs.length})`}
+      {t("logs.install")} {pluginLogsOpen ? "" : `(${pluginLogs.length})`}
     </button>
     {#if pluginLogsOpen}
       <div class="console">
         {#if pluginLogs.length === 0}
-          <span class="l-empty">（暂无日志）</span>
+          <span class="l-empty">{t("logs.empty")}</span>
         {:else}
           {#each pluginLogs as line, i (i)}
             <div class="l-line">{line}</div>
@@ -1607,7 +1688,7 @@
       <span class="version-pill">sidecar {versions.sidecar}</span>
     </div>
     <div class="note">
-      所有 Harness 功能（模型 / 工具 / 技能 / MCP / 沙箱）均由原版 Harness UI 提供；桌面层仅负责生命周期。
+      {t("footer.note")}
     </div>
   </footer>
 </div>
@@ -1618,7 +1699,7 @@
       class="modal"
       role="dialog"
       aria-modal="true"
-      aria-label="安全插件恢复确认"
+      aria-label={t("dialog.recoveryLabel")}
       tabindex="-1"
       use:trapDialog={{
         onEscape: () => (recoveryConfirm = null),
@@ -1627,21 +1708,21 @@
     >
       <div class="modal-title">
         {recoveryConfirm.action === "disable"
-          ? "确认隔离插件？"
+          ? t("dialog.confirmIsolate")
           : recoveryConfirm.action === "rollback"
-            ? "确认回滚隔离？"
-            : "确认保留隔离？"}
+            ? t("dialog.confirmRollback")
+            : t("dialog.confirmKeep")}
       </div>
       <div class="modal-name">
-        {recoveryConfirm.candidate?.packageName ?? recoveryOverview?.transaction?.packageName ?? "未知插件"}
+        {recoveryConfirm.candidate?.packageName ?? recoveryOverview?.transaction?.packageName ?? t("recovery.unknownPlugin")}
       </div>
       <div class="modal-warn">
         {#if recoveryConfirm.action === "disable"}
-          将先私有备份 package.json，再仅从 dsh.profile.bundles 精确移除此包并重启验证；不会卸载依赖或删除插件文件。失败时保留可审计事务与回滚入口。
+          {t("recovery.isolateWarning")}
         {:else if recoveryConfirm.action === "rollback"}
-          将仅在当前 profile 与隔离结果逐字节一致时恢复备份并重启。市场插件必须在线重新通过安装门禁；回滚可能重新引入启动故障。
+          {t("recovery.rollbackWarning")}
         {:else}
-          当前插件将保持禁用，Desktop 会删除本次恢复备份。依赖和插件文件仍保留，可由你后续手动管理。
+          {t("recovery.keepWarning")}
         {/if}
       </div>
       <div class="modal-actions">
@@ -1649,8 +1730,8 @@
           class={recoveryConfirm.action === "finalize" ? "primary" : "danger-ghost"}
           onclick={confirmRecoveryAction}
           disabled={recoveryBusy}
-        >确认执行</button>
-        <button class="ghost" onclick={() => (recoveryConfirm = null)} disabled={recoveryBusy}>取消</button>
+        >{t("action.confirm")}</button>
+        <button class="ghost" onclick={() => (recoveryConfirm = null)} disabled={recoveryBusy}>{t("action.cancel")}</button>
       </div>
     </div>
   </div>
@@ -1662,7 +1743,7 @@
       class="modal"
       role="dialog"
       aria-modal="true"
-      aria-label="预设一键安装确认"
+      aria-label={t("dialog.remotePresetLabel")}
       tabindex="-1"
       use:trapDialog={{
         onEscape: () => void doRemotePresetDismiss(),
@@ -1670,9 +1751,9 @@
           remotePresetDownloading || remotePresetRequest.stage === "installing",
       }}
     >
-      <div class="modal-title">安装 Cordis 预设？</div>
+      <div class="modal-title">{t("dialog.installPreset")}</div>
       <div class="modal-meta">
-        关联页面（未验证与预设内容的对应关系）：<button
+        {t("dialog.claimedPagePreset")} <button
           class="inline-link"
           title={remotePresetRequest!.source}
           onclick={() => openSite(remotePresetRequest!.source)}
@@ -1681,34 +1762,34 @@
         </button>
       </div>
       {#if remotePresetRequest.stage === "installing"}
-        <div class="modal-warn">正在安装预设…</div>
+        <div class="modal-warn">{t("dialog.installingPreset")}</div>
       {:else if remotePresetPreview && remotePresetPreview.requestId === remotePresetRequest.requestId}
         <div class="modal-name">{remotePresetPreview.id}</div>
         <div class="modal-meta">
-          {remotePresetPreview.files.length} 个文件
+          {t("dialog.presetFiles", { count: remotePresetPreview.files.length })}
           {#if remotePresetPreview.warnings.includes("possible-secrets")}
-            · <span class="warn">⚠ 检测到疑似密钥</span>
+            · <span class="warn">⚠ {t("preset.possibleSecrets")}</span>
           {/if}
           {#if remotePresetPreview.warnings.includes("absolute-paths")}
-            · <span class="warn">⚠ 含绝对路径</span>
+            · <span class="warn">⚠ {t("preset.absolutePaths")}</span>
           {/if}
         </div>
         <div class="modal-warn">
-          预设与 Agent 同权限运行工具和命令——仅导入可信来源。确认后将安装到用户预设目录。
+          {t("dialog.presetTrust")}
         </div>
         <div class="modal-actions">
-          <button class="primary" onclick={doRemotePresetImport}>确认安装</button>
-          <button class="ghost" onclick={doRemotePresetDismiss}>取消</button>
+          <button class="primary" onclick={doRemotePresetImport}>{t("action.confirm")}</button>
+          <button class="ghost" onclick={doRemotePresetDismiss}>{t("action.cancel")}</button>
         </div>
       {:else}
         <div class="modal-warn">
-          将先从 cordis.run 下载 .dshpreset 并做安全检查，确认内容后才会安装。
+          {t("dialog.presetDownloadWarning")}
         </div>
         <div class="modal-actions">
           <button class="primary" onclick={doRemotePresetDownload} disabled={remotePresetDownloading}>
-            {remotePresetDownloading ? "下载中…" : "下载并检查"}
+            {remotePresetDownloading ? t("action.downloading") : t("action.downloadAndCheck")}
           </button>
-          <button class="ghost" onclick={doRemotePresetDismiss} disabled={remotePresetDownloading}>取消</button>
+          <button class="ghost" onclick={doRemotePresetDismiss} disabled={remotePresetDownloading}>{t("action.cancel")}</button>
         </div>
       {/if}
     </div>
@@ -1721,7 +1802,7 @@
       class="modal"
       role="dialog"
       aria-modal="true"
-      aria-label="插件详情"
+      aria-label={t("dialog.marketDetailLabel")}
       tabindex="-1"
       use:trapDialog={{ onEscape: () => (marketDetail = null) }}
     >
@@ -1733,7 +1814,7 @@
           {#each marketImages as src, i (i)}
             <img
               src={src}
-              alt="{marketDetail.name} screenshot {i + 1}"
+              alt={t("image.screenshotAlt", { name: marketDetail.name, index: i + 1 })}
               class="market-shot"
               referrerpolicy="no-referrer"
             />
@@ -1741,7 +1822,7 @@
         </div>
       {/if}
       <div class="modal-actions">
-        <button class="ghost" onclick={() => (marketDetail = null)}>关闭</button>
+        <button class="ghost" onclick={() => (marketDetail = null)}>{t("action.close")}</button>
       </div>
     </div>
   </div>
@@ -1753,29 +1834,29 @@
       class="modal"
       role="dialog"
       aria-modal="true"
-      aria-label="安装 Cordis 插件确认"
+      aria-label={t("dialog.marketInstallLabel")}
       tabindex="-1"
       use:trapDialog={{
         onEscape: () => (marketConfirm = null),
         escapeDisabled: pluginBusy,
       }}
     >
-      <div class="modal-title">安装 Cordis 插件？</div>
+      <div class="modal-title">{t("dialog.installPlugin")}</div>
       <div class="modal-name">{marketConfirm.packageName} v{marketConfirm.version}</div>
       <div class="modal-meta">
-        当前条目修订：{marketConfirm.entryRevision}
+        {t("dialog.entryRevision", { revision: marketConfirm.entryRevision })}
       </div>
       <div class="modal-meta">
-        来源：<button class="inline-link" onclick={() => openSite("https://cordis.run/plugins/" + marketConfirm!.slug)}>
+        {t("dialog.source")}<button class="inline-link" onclick={() => openSite("https://cordis.run/plugins/" + marketConfirm!.slug)}>
           https://cordis.run/plugins/{marketConfirm.slug}
         </button>
       </div>
       <div class="modal-warn">
-        将校验此修订的 tarball 与 lockfile integrity，禁用构建脚本，并保持为待激活状态。安装完成后不会自动启用，需你再次点击 Activate。
+        {t("dialog.marketInstallWarning")}
       </div>
       <div class="modal-actions">
-        <button class="primary" onclick={confirmMarketInstall} disabled={pluginBusy || pluginProfileTransitioning}>确认安装</button>
-        <button class="ghost" onclick={() => (marketConfirm = null)}>取消</button>
+        <button class="primary" onclick={confirmMarketInstall} disabled={pluginBusy || pluginProfileTransitioning}>{t("action.confirm")}</button>
+        <button class="ghost" onclick={() => (marketConfirm = null)}>{t("action.cancel")}</button>
       </div>
     </div>
   </div>
@@ -1787,19 +1868,19 @@
       class="modal"
       role="dialog"
       aria-modal="true"
-      aria-label="离线插件安装确认"
+      aria-label={t("dialog.sideloadLabel")}
       tabindex="-1"
       use:trapDialog={{
         onEscape: () => (sideloadPath = null),
         escapeDisabled: pluginBusy,
       }}
     >
-      <div class="modal-title">离线安装插件？</div>
+      <div class="modal-title">{t("dialog.installOfflinePlugin")}</div>
       <div class="modal-name">{sideloadPath}</div>
-      <div class="modal-warn">插件与 Agent 同权限运行工具和命令，仅安装可信插件。确认后将通过 `dsh plugin add` 安装该 .tgz。</div>
+      <div class="modal-warn">{t("dialog.sideloadWarning")}</div>
       <div class="modal-actions">
-        <button class="primary" onclick={confirmSideloadInstall} disabled={pluginBusy || pluginProfileTransitioning}>确认安装</button>
-        <button class="ghost" onclick={() => (sideloadPath = null)}>取消</button>
+        <button class="primary" onclick={confirmSideloadInstall} disabled={pluginBusy || pluginProfileTransitioning}>{t("action.confirm")}</button>
+        <button class="ghost" onclick={() => (sideloadPath = null)}>{t("action.cancel")}</button>
       </div>
     </div>
   </div>
@@ -1811,14 +1892,14 @@
       class="modal"
       role="dialog"
       aria-modal="true"
-      aria-label="安装 Cordis 插件确认"
+      aria-label={t("dialog.deepLinkLabel")}
       tabindex="-1"
       use:trapDialog={{ onEscape: () => void dismissPluginInstallRequest() }}
     >
-      <div class="modal-title">安装 Cordis 插件？</div>
-      <div class="modal-name">链接声明的包：{pluginInstallRequest.name}</div>
+      <div class="modal-title">{t("dialog.installPlugin")}</div>
+      <div class="modal-name">{t("dialog.claimedPackage", { name: pluginInstallRequest.name })}</div>
       <div class="modal-meta">
-        关联页面（未验证与插件包的对应关系）：<button
+        {t("dialog.claimedPagePlugin")}<button
           class="inline-link"
           title={pluginInstallRequest!.source}
           onclick={() => openSite(pluginInstallRequest!.source)}
@@ -1827,16 +1908,16 @@
         </button>
       </div>
       <div class="modal-warn">
-        该链接可由任意网页或程序构造。下一步只会使用 Rust 已校验的 Cordis slug 重新拉取市场详情，并显示当前 entryRevision 供你再次确认；不会按链接中的包名直接安装。插件与 Agent 同权限运行工具和命令，仅安装可信插件。
+        {t("dialog.deepLinkWarning")}
       </div>
       {#if pluginBusy}
-        <div class="notice-box">当前已有插件操作正在进行，请等待完成后再确认安装。</div>
+        <div class="notice-box">{t("dialog.pluginBusy")}</div>
       {/if}
       <div class="modal-actions">
         <button class="primary" onclick={confirmPluginInstallRequest} disabled={pluginBusy}>
-          {pluginBusy ? "已有操作进行中…" : "继续核验"}
+          {pluginBusy ? t("action.busy") : t("action.continueVerify")}
         </button>
-        <button class="ghost" onclick={dismissPluginInstallRequest}>取消</button>
+        <button class="ghost" onclick={dismissPluginInstallRequest}>{t("action.cancel")}</button>
       </div>
     </div>
   </div>

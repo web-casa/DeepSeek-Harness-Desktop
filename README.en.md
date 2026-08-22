@@ -36,7 +36,7 @@ workflow artifacts. They are Store-signing inputs, not public sideload files.
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |
 | 🔒 **Privacy defaults** | Session telemetry OFF; child env sanitized (NODE_OPTIONS, loader injection keys, …) |
 | 🧰 **Diagnostics & feedback** | One-click diagnostics zip (best-effort redaction), copy diagnostics, prefilled issue reports |
-| 🪟 **Desktop UX** | Single instance, window-state memory, crash auto-restart, macOS close-to-tray |
+| 🪟 **Desktop UX** | Single instance, window-state memory, crash auto-restart, macOS close-to-tray; controller language can follow the system or be set to Simplified Chinese / English |
 
 ## ✨ Plugin ecosystem
 
