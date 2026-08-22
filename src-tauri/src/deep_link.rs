@@ -385,7 +385,7 @@ impl PendingRemotePreset {
 
 fn new_request_id() -> Result<String, String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|e| format!("CSPRNG failed: {e}"))?;
+    getrandom::fill(&mut bytes).map_err(|e| format!("CSPRNG failed: {e}"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -1125,6 +1125,17 @@ mod tests {
         assert!(!arbiter.try_acquire(PendingInstallKind::Plugin));
         assert_eq!(id.len(), 32);
         (pending, arbiter)
+    }
+
+    #[test]
+    fn remote_request_id_is_fixed_length_lower_hex() {
+        let id = new_request_id().expect("OS CSPRNG should provide a request id");
+        assert_eq!(id.len(), 32);
+        assert!(
+            id.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "request id must be safe to persist and compare as lower hex: {id}"
+        );
     }
 
     fn fake_preview(id: &str) -> crate::preset::ArchivePreview {

@@ -241,8 +241,7 @@ pub fn read_bounded(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, Stri
 
 pub fn random_suffix() -> Result<String, String> {
     let mut bytes = [0_u8; 12];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|e| format!("cannot generate private file id: {e}"))?;
+    getrandom::fill(&mut bytes).map_err(|e| format!("cannot generate private file id: {e}"))?;
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write as _;
@@ -344,6 +343,18 @@ pub fn sibling_temp(destination: &Path, purpose: &str) -> Result<PathBuf, String
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_suffix_is_fixed_length_lower_hex() {
+        let suffix = random_suffix().expect("OS CSPRNG should provide a temp-file suffix");
+        assert_eq!(suffix.len(), 24);
+        assert!(
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "suffix must be filesystem-safe lower hex: {suffix}"
+        );
+    }
 
     fn test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

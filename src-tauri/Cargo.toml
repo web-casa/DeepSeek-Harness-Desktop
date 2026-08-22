@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness-desktop"
-version = "0.2.12"
+version = "0.2.13"
 description = "DSH Desktop — community desktop packaging of DeepSeek Harness"
 edition = "2021"
 license = "MIT"
@@ -16,13 +16,25 @@ tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-deep-link = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-# Remote .dshpreset download and cordis.run market requests. rustls keeps the
-# supply chain to a single TLS backend (already transitive via
-# tauri-plugin-updater); no native-tls/OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+# Keep the portable flate2/miniz backend used elsewhere in the application.
+# zip's broader `deflate` meta-feature would also pull zopfli and zlib-rs;
+# neither is needed for opening or creating the small preset/diagnostic ZIPs.
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+# zip's deflate-flate2 feature intentionally leaves flate2's backend to the
+# application. Select its portable miniz_oxide backend explicitly: Linux
+# happens to gain it through PNG, but the Windows graph does not.
+flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
+# Remote .dshpreset download and cordis.run market requests. reqwest 0.13's
+# no-provider variant is paired with the explicit, process-wide ring provider
+# below (installed before Tauri starts), so every client uses one audited TLS
+# backend and never native-tls/OpenSSL.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
+# reqwest 0.13 delegates provider choice to the application. Select the
+# current pure-Rust provider explicitly instead of depending on another crate's
+# feature unification or pulling in the AWS-LC/C build chain.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = "0.3"
-getrandom = "0.2"
+getrandom = "0.4"
 # The sidecar's library surface: PlatformChild gives the plugin installer the
 # SAME process-tree guarantees (unix process group / Windows Job Object).
 # The version must stay in lockstep with crates/dsh-sidecar/Cargo.toml —

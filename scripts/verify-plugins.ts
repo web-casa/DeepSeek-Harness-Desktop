@@ -23,7 +23,7 @@
 // Store isolation (plan S5): `pnpm_config_store_dir` pins the pnpm content
 // store inside the temp home, so nothing touches the user's real store.
 // (pnpm reads env config under the `pnpm_config_` prefix — verified against
-// the bundled pnpm 11.21.0; `npm_config_*` is NOT honored for this key.)
+// the bundled pnpm 11.22.0; `npm_config_*` is NOT honored for this key.)
 // NOTE: requires network access to registry.npmjs.org (CI runners have it).
 //
 // The Rust side of the shim text/exec is covered by plugins.rs tests. Both

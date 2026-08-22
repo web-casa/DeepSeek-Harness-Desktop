@@ -68,7 +68,7 @@ DSH CLI 的启动契约随版本演进，社区同类项目已实证踩坑（如
   `scripts/verify-plugins.ts` 断言与 `verify-bundle.ts` 必含文件；
 - 上游若新增 `.dshpreset` 归档导入/导出入口（或变更 `.agent-presets`
   根语义），必须复核壳层预设边界（`src-tauri/src/preset.rs`）——当前
-  rc.8 无归档入口，壳层导入/导出是预设根的唯一写入路径，壳层健康复核
+  0.1.1-rc.1 无归档入口，壳层导入/导出是预设根的唯一写入路径，壳层健康复核
   （validate_user_presets）覆盖该根的全部来源。
   已知语义差异（有意为之，随上游演进复核）：壳层 Broken 只探测
   agent.cordis.yml 缺失/不可读/为空（不重实现 YAML 解析，可读但畸形仍由
