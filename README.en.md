@@ -9,7 +9,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Current version | v0.2.14 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
+| Current version | v0.2.15 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
@@ -18,7 +18,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 
 | Platform | GitHub Release packages |
 |---|---|
-| Windows (from the next release) | Native x64 and ARM64: multilingual NSIS `*-setup.exe`, WiX `.msi` |
+| Windows | Native x64 and ARM64: multilingual NSIS `*-setup.exe`, WiX `.msi` |
 | macOS | arm64 and x64 `.dmg` |
 | Linux | x64 and arm64 `.AppImage`, `.deb`, `.rpm`, `.flatpak` |
 
@@ -38,7 +38,7 @@ actual `ProductLanguage`, so the suffix is never merely cosmetic.
 | | |
 |---|---|
 | 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app marketplace search/install; safe preset import/export |
-| 🔄 **Auto-updater** (next release: Windows NSIS) | x64 and ARM64 payloads are separately verified by an embedded minisign pubkey; MSI, Store, macOS and Linux retain their own safe update paths |
+| 🔄 **Auto-updater** (Windows NSIS) | x64 and ARM64 payloads are separately verified by an embedded minisign pubkey; MSI, Store, macOS and Linux retain their own safe update paths |
 | 💓 **Hung-process self-healing** | Heartbeat detects an unresponsive Harness and restarts it (backoff + cap) |
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |
 | 🔒 **Privacy defaults** | Session telemetry OFF; child env sanitized (NODE_OPTIONS, loader injection keys, …) |
@@ -187,7 +187,7 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Current release: v0.2.14, including six native build targets, Windows
+- Current release: v0.2.15, including six native build targets, Windows
   x64/ARM64 installers and English/Simplified-Chinese MSI packages, macOS
   Developer ID signing/notarization, the Cordis v4 marketplace contract,
   diagnostic resilience, and safe plugin recovery. The historical v0.2.13

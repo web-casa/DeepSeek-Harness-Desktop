@@ -63,6 +63,38 @@ export function msiLocaleInventoryProblems(msiNames: readonly string[]): string[
   return problems;
 }
 
+/**
+ * Require the complete reviewed public installer matrix. This is shared by
+ * the local artifact check and the draft-release API audit so an upload that
+ * silently drops a package cannot be published with an otherwise valid subset.
+ */
+export function publicInstallerInventoryProblems(names: readonly string[]): string[] {
+  const expected = expectedPublicBundleCounts();
+  const counts = Object.fromEntries(
+    (Object.keys(expected) as PublicBundle[]).map((bundle) => [bundle, 0]),
+  ) as Record<PublicBundle, number>;
+  const problems: string[] = [];
+  for (const name of names) {
+    const bundle = classifyPublicInstaller(name);
+    if (!bundle) {
+      problems.push(`unrecognized public installer asset: ${name}`);
+      continue;
+    }
+    counts[bundle] += 1;
+  }
+  for (const [bundle, count] of Object.entries(counts) as [PublicBundle, number][]) {
+    if (count !== expected[bundle]) {
+      problems.push(`release inventory ${bundle} count ${count} != expected ${expected[bundle]}`);
+    }
+  }
+  problems.push(
+    ...msiLocaleInventoryProblems(
+      names.filter((name) => classifyPublicInstaller(name) === "msi"),
+    ),
+  );
+  return problems;
+}
+
 export function expectedUpdaterSignatureCount(): number {
   return NATIVE_RELEASE_TARGETS.reduce(
     (count, target) =>

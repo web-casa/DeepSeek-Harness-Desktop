@@ -1300,6 +1300,15 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: artifacts/**/*
 
+      # The upload action normalizes public asset filenames. Inspect the draft
+      # through GitHub's API before publishing so each sidecar names the asset
+      # users can actually download and matches GitHub's server-side digest.
+      - name: Audit draft Release SHA-256 sidecars
+        run: node scripts/verify-release-checksums.ts --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+
       # The updater manifest needs the ABSOLUTE asset URLs that only exist
       # after the release is created; fail-closed if an exact NSIS
       # architecture has no artifact+sig pair. Generic Windows targets are

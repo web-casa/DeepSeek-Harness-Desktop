@@ -8,10 +8,10 @@ import { basename, join } from "node:path";
 import { fail, ok, info } from "./lib/common.ts";
 import {
   classifyPublicInstaller,
-  expectedPublicBundleCounts,
-  msiLocaleInventoryProblems,
+  publicInstallerInventoryProblems,
   expectedUpdaterSignatureCount,
 } from "./lib/release-inventory.ts";
+import { githubReleaseAssetName, parseSha256Sidecar } from "./lib/release-checksums.ts";
 import type { PublicBundle } from "./lib/release-artifacts.ts";
 
 function argument(name: string): string | undefined {
@@ -57,25 +57,10 @@ if ([...byBasename.keys()].some((name) => name.toLowerCase().endsWith(".msix")))
 const installers = files
   .map((path) => ({ path, bundle: classifyPublicInstaller(basename(path)) }))
   .filter((entry): entry is { path: string; bundle: PublicBundle } => entry.bundle !== null);
-const counts = Object.fromEntries(
-  Object.keys(expectedPublicBundleCounts()).map((bundle) => [bundle, 0]),
-) as Record<PublicBundle, number>;
-for (const installer of installers) counts[installer.bundle] += 1;
-for (const [bundle, expected] of Object.entries(expectedPublicBundleCounts()) as [
-  PublicBundle,
-  number,
-][]) {
-  if (counts[bundle] !== expected) {
-    fail(`release inventory ${bundle} count ${counts[bundle]} != expected ${expected}`);
-  }
-}
-
-const msiProblems = msiLocaleInventoryProblems(
-  installers
-    .filter((installer) => installer.bundle === "msi")
-    .map((installer) => basename(installer.path)),
+const inventoryProblems = publicInstallerInventoryProblems(
+  installers.map((installer) => basename(installer.path)),
 );
-if (msiProblems.length > 0) fail(msiProblems.join("\n"));
+if (inventoryProblems.length > 0) fail(inventoryProblems.join("\n"));
 
 for (const installer of installers) {
   const name = basename(installer.path);
@@ -83,10 +68,13 @@ for (const installer of installers) {
   const sidecar = byBasename.get(sidecarName);
   if (!sidecar) fail(`missing SHA-256 sidecar for ${name}`);
   const content = readFileSync(sidecar, "utf8");
-  const match = /^([a-f0-9]{64})  ([^\r\n]+)\r?\n$/.exec(content);
-  if (!match || match[2] !== name) fail(`malformed SHA-256 sidecar: ${sidecarName}`);
+  const parsed = parseSha256Sidecar(content);
+  const publishedName = githubReleaseAssetName(name);
+  if (!parsed || parsed.filename !== publishedName) {
+    fail(`malformed SHA-256 sidecar: ${sidecarName}`);
+  }
   const actual = await sha256(installer.path);
-  if (actual !== match[1]) fail(`SHA-256 mismatch for ${name}: ${match[1]} != ${actual}`);
+  if (actual !== parsed.digest) fail(`SHA-256 mismatch for ${name}: ${parsed.digest} != ${actual}`);
   ok(`release checksum verified: ${name}`);
 }
 
