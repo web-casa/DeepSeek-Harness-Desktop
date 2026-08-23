@@ -551,3 +551,9 @@ test("macOS release signs runtime, uploads once, then waits in a separate job", 
   assert.equal(workflow.slice(cleanupIndex).includes("always()"), true);
   assert.equal(workflow.slice(cleanupIndex).includes("::warning::"), true);
 });
+
+test("bundle verifier checks node-pty's actual machine type, not only its directory", () => {
+  const bundleVerifier = readFileSync(new URL("../verify-bundle.ts", import.meta.url), "utf8");
+  assert.match(bundleVerifier, /checkBinaryType\(pty, kind, arch, "selected node-pty native addon"\)/);
+  assert.match(bundleVerifier, /\[ptyEntry, "selected node-pty native addon"\]/);
+});

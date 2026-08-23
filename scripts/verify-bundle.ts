@@ -2,7 +2,7 @@
 //
 // Each package is expanded with its platform-native tool, then checked against
 // one runtime contract: correct host architecture, executable main/Node/
-// sidecar binaries, exact runtime manifest, selected node-pty prebuild,
+// sidecar binaries, selected node-pty native binary, exact runtime manifest,
 // dsharness deep-link registration, and a fully materialized Harness tree.
 
 import {
@@ -256,6 +256,15 @@ function verifyRuntimeTree(
     platform === "win32" ? "PE" : platform === "darwin" ? "Mach-O" : "ELF";
   const node = join(runtimeRoot, `node${extension}`);
   const sidecar = join(runtimeRoot, `sidecar${extension}`);
+  const pty = join(
+    runtimeRoot,
+    "harness",
+    "node_modules",
+    "node-pty",
+    "prebuilds",
+    `${platform}-${arch}`,
+    ptyBinary,
+  );
   for (const [path, label] of [
     [mainBinary, "main binary"],
     [node, "bundled node"],
@@ -264,6 +273,9 @@ function verifyRuntimeTree(
     if (platform !== "win32") assertExecutable(path, label);
     checkBinaryType(path, kind, arch, label);
   }
+  // Directory names are only metadata. The prebuilt native addon must have
+  // the same actual machine type as the package that will load it.
+  checkBinaryType(pty, kind, arch, "selected node-pty native addon");
   checkBundledManifest(join(runtimeRoot, "harness", "runtime-manifest.json"));
 }
 
@@ -319,11 +331,12 @@ function extractNsisFile(artifact: string, innerPath: string, output: string): s
 function verifyNsis(artifact: string, arch: ReleaseArch): void {
   const entries = listNsisEntries(artifact);
   const entrySet = new Set(entries.map((entry) => entry.toLowerCase()));
+  const ptyEntry = `runtime/harness/node_modules/node-pty/prebuilds/win32-${arch}/conpty.node`;
   const required = [
     "runtime/node.exe",
     "runtime/sidecar.exe",
     ...HARNESS_CORE.map((entry) => `runtime/${entry}`),
-    `runtime/harness/node_modules/node-pty/prebuilds/win32-${arch}/conpty.node`,
+    ptyEntry,
   ];
   for (const path of required) {
     if (!entrySet.has(path.toLowerCase())) throw new Error(`NSIS missing required entry: ${path}`);
@@ -346,6 +359,7 @@ function verifyNsis(artifact: string, arch: ReleaseArch): void {
       [mainEntries[0], "main binary"],
       ["runtime/node.exe", "bundled node"],
       ["runtime/sidecar.exe", "sidecar binary"],
+      [ptyEntry, "selected node-pty native addon"],
     ] as const) {
       checkBinaryType(extractNsisFile(artifact, path, extraction), "PE", arch, label);
     }
