@@ -37,6 +37,7 @@ test("Tauri config emits the reviewed WiX locales and one multilingual NSIS inst
   ) as {
     bundle?: {
       windows?: {
+        webviewInstallMode?: { type?: string };
         wix?: { language?: string[] };
         nsis?: { languages?: string[]; displayLanguageSelector?: boolean };
       };
@@ -45,4 +46,9 @@ test("Tauri config emits the reviewed WiX locales and one multilingual NSIS inst
   assert.deepEqual(config.bundle?.windows?.wix?.language, WINDOWS_WIX_INSTALLER_LOCALES);
   assert.deepEqual(config.bundle?.windows?.nsis?.languages, WINDOWS_NSIS_INSTALLER_LANGUAGES);
   assert.equal(config.bundle?.windows?.nsis?.displayLanguageSelector, true);
+  // Keep the Tauri default explicit: a clean supported Windows installation
+  // may need the Evergreen WebView2 bootstrapper before the first launch.
+  assert.deepEqual(config.bundle?.windows?.webviewInstallMode, {
+    type: "downloadBootstrapper",
+  });
 });

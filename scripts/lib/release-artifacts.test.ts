@@ -228,11 +228,21 @@ test("release host and installer smokes cover each declared native architecture"
     new URL("../../.github/workflows/release.yml", import.meta.url),
     "utf8",
   );
-  assert.equal(
-    workflow.split('node scripts/verify-native-host.ts --target "$RELEASE_TARGET"').length - 1,
-    2,
+  // GitHub expands these reviewed matrix values before selecting the runner
+  // shell. Do not route them through `$RELEASE_TARGET`: Windows defaults to
+  // PowerShell, where environment variables use `$env:RELEASE_TARGET`.
+  assert.match(
+    workflow,
+    /node scripts\/verify-native-host\.ts --target "\$\{\{ matrix\.target \}\}"/,
   );
-  assert.match(workflow, /RELEASE_TARGET: \$\{\{ matrix\.nativeTarget \}\}/);
+  assert.match(
+    workflow,
+    /node scripts\/verify-native-host\.ts --target "\$\{\{ matrix\.nativeTarget \}\}"/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /verify-native-host\.ts --target "\$RELEASE_TARGET"/,
+  );
   assert.match(workflow, /os: windows-11-arm/);
   assert.match(workflow, /artifact: deepseek-harness-desktop-windows-arm64/);
   assert.match(workflow, /x64 compatibility on ARM64/);
