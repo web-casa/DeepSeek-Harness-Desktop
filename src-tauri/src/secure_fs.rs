@@ -339,6 +339,38 @@ pub fn sibling_temp(destination: &Path, purpose: &str) -> Result<PathBuf, String
     Ok(parent.join(format!(".{name}.{purpose}.{}.tmp", random_suffix()?)))
 }
 
+// `cmd /C` is surprisingly sensitive to how its command tail is reconstructed
+// from Windows argv.  Keep the two junction tests on the same PowerShell
+// invocation that the hosted Windows workflow itself uses, and pass both
+// paths as quoted literals so an unusual temp-directory user name cannot
+// alter the test command.  This helper is test-only: production code never
+// shells out to create or inspect reparse points.
+#[cfg(all(test, windows))]
+#[allow(clippy::expect_used, clippy::panic)]
+pub(crate) fn create_test_junction(link: &Path, target: &Path) {
+    fn powershell_literal(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+    }
+
+    let script = format!(
+        "New-Item -ItemType Junction -LiteralPath {} -Target {} -ErrorAction Stop | Out-Null",
+        powershell_literal(link),
+        powershell_literal(target),
+    );
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+        .arg(script)
+        .output()
+        .expect("PowerShell is available on the supported Windows test host");
+    assert!(
+        output.status.success(),
+        "New-Item -ItemType Junction failed ({}): stdout: {}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim(),
+    );
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -428,17 +460,7 @@ mod tests {
         let target = root.join("target");
         let junction = root.join("junction");
         fs::create_dir_all(&target).unwrap();
-        let output = std::process::Command::new("cmd.exe")
-            .args(["/D", "/C", "mklink", "/J"])
-            .arg(&junction)
-            .arg(&target)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "mklink /J failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        create_test_junction(&junction, &target);
         assert!(ensure_private_dir(&junction).is_err());
         fs::remove_dir_all(root).unwrap();
     }

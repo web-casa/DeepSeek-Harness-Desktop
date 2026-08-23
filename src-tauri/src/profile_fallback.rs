@@ -594,13 +594,7 @@ mod tests {
         fs::create_dir_all(&external).unwrap();
         fs::write(external.join("marker"), b"outside").unwrap();
         let scope = fallback_root.join(CORE_SCOPE);
-        let output = std::process::Command::new("cmd.exe")
-            .args(["/D", "/C", "mklink", "/J"])
-            .arg(&scope)
-            .arg(&external)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
+        crate::secure_fs::create_test_junction(&scope, &external);
 
         let backup = quarantine_core_scope(&paths)
             .unwrap()

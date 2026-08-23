@@ -9,7 +9,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Current version | v0.2.13 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
+| Current version | v0.2.14 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
@@ -187,12 +187,11 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Current release: v0.2.13, including multi-format installers, macOS
+- Current release: v0.2.14, including six native build targets, Windows
+  x64/ARM64 installers and English/Simplified-Chinese MSI packages, macOS
   Developer ID signing/notarization, the Cordis v4 marketplace contract,
-  diagnostic resilience, and safe plugin recovery. The next GitHub Release
-  adds native Windows ARM64 packages and English/Simplified-Chinese MSI
-  installers; the historical v0.2.13 `_en-US` suffix means only that its
-  installer UI was English.
+  diagnostic resilience, and safe plugin recovery. The historical v0.2.13
+  `_en-US` suffix means only that its installer UI was English.
 - Known limits: Windows GitHub installers do not yet have Authenticode and may
   trigger SmartScreen; in-app updating accepts only a payload exactly matching
   the current CPU architecture and NSIS installer family (MSI never switches
