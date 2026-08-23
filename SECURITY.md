@@ -35,7 +35,7 @@ DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
 - **进程树保证**：unix 进程组 + sigaction；Windows Job Object
   （KILL_ON_JOB_CLOSE）+ 私有隐藏控制台。sidecar 消失（任何原因）即整树
   消失；存活性心跳在进程挂死（活着但无响应）时杀树并交由壳按退避上限重启。
-- **DSH_HOME 0700** 且拒绝符号链接；安装包内 harness 子树零符号链接
+- **DSH_HOME 0700**，拒绝符号链接与文件系统根目录；安装包内 harness 子树零符号链接
   （构建期断言 + 安装包验证）。
 - **供应链**：Node 下载 SHA-256 钉死（官方 SHASUMS256 核对）；npm 安装脚本
   白名单（strict-allow-scripts）；cargo-vet（社区审计集 + 本仓库审计）与
@@ -47,15 +47,17 @@ DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
   `entryRevision` 后才能进入受控安装；预设链接只接受直出
   `https://cordis.run/api/presets/<slug>/download` 的 200 zip 响应且不跟随重定向。
   未确认前不会 spawn 任何进程或下载预设，非法链接直接丢弃且不会弹窗。
-- **CSP 与桌面 IPC**：`withGlobalTauri: false`；35 个桌面命令经 AppManifest
+- **CSP 与桌面 IPC**：`withGlobalTauri: false`；47 个桌面命令经 AppManifest
   ACL 仅授权 bootstrap 窗口。
 
 ## 已知边界（请如实预期）
 
-- **未签名分发**：当前发布未做代码签名/公证。Windows SmartScreen 与 macOS
-  Gatekeeper 会提示并需要用户手动放行；macOS 首次启动可能需
-  `xattr -cr` 或系统设置放行（见 README）。签名/公证接入后，
-  `verify-signing.ts` 会在 CI 强制验签（fail-closed）。
+- **签名与分发边界**：自 v0.2.9 起，公开 macOS DMG 使用 Developer ID
+  签名并经 Apple 公证；CI 对已配置的证书路径执行 `codesign`、Gatekeeper 与
+  staple 验证，任一失败均阻断发布。Windows Authenticode 仍取决于发布时是否
+  配置 Windows 证书：未配置时安装包会有意保持未签名，可能触发 SmartScreen；
+  配置后 CI 强制验证其为 `Valid`。请只从本仓库 Releases 下载，不要把 SHA-256
+  或 Tauri updater 签名误认为 Authenticode。
 - **存活心跳的语义边界**：默认连续 4 次探针无响应（约 40 秒）判定挂死并
   自动重启；极端长同步任务阻塞事件循环可能触发。旋钮：
   `DSH_HEARTBEAT_INTERVAL_MS`（0=禁用）/`DSH_HEARTBEAT_FAIL_LIMIT`/
@@ -106,5 +108,5 @@ DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
 
 ## 支持版本
 
-仅支持最新发布版（当前 v0.2.11）。旧版本不提供安全修复；发现漏洞请先
-升级到最新版再验证是否仍可复现。
+仅支持 GitHub Releases 中标记为 **Latest** 的发布版。旧版本不提供安全修复；
+发现漏洞请先升级到最新版再验证是否仍可复现。

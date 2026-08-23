@@ -6,6 +6,24 @@ const workflow = readFileSync(
   new URL("../../.github/workflows/test.yml", import.meta.url),
   "utf8",
 );
+const codeqlWorkflow = readFileSync(
+  new URL("../../.github/workflows/codeql.yml", import.meta.url),
+  "utf8",
+);
+
+test("Rust CodeQL compiles both the sidecar and the Tauri security boundary", () => {
+  assert.match(codeqlWorkflow, /^  contents: read$/m);
+  assert.match(codeqlWorkflow, /libwebkit2gtk-4\.1-dev/);
+  assert.match(
+    codeqlWorkflow,
+    /cargo build --locked --manifest-path crates\/dsh-sidecar\/Cargo\.toml/,
+  );
+  assert.match(
+    codeqlWorkflow,
+    /cargo build --locked --manifest-path src-tauri\/Cargo\.toml/,
+  );
+  assert.match(codeqlWorkflow, /mkdir -p src-tauri\/resources\/runtime/);
+});
 
 test("macOS shell path gate validates event SHAs and fails closed", () => {
   const start = workflow.indexOf("      - name: Detect macOS shell changes");

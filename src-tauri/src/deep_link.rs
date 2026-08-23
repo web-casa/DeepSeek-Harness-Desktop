@@ -158,11 +158,22 @@ impl InstallArbiter {
         true
     }
 
-    pub fn release(&self) {
-        *self
+    /// Release the modal slot only when `expected` is still its owner.
+    ///
+    /// Commands are independently callable from the bootstrap capability, so
+    /// a stale cancel request must not clear another install flow's lock.
+    /// Returning false lets callers deliberately treat that situation as a
+    /// no-op rather than turning a UI race into cross-flow authorization.
+    pub fn release(&self, expected: PendingInstallKind) -> bool {
+        let mut slot = self
             .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *slot != Some(expected) {
+            return false;
+        }
+        *slot = None;
+        true
     }
 }
 
@@ -183,7 +194,7 @@ impl PendingRemotePreset {
             Ok(id) => id,
             Err(error) => {
                 eprintln!("[deep-link] cannot generate request_id: {error}");
-                arbiter.release();
+                let _ = arbiter.release(PendingInstallKind::RemotePreset);
                 return None;
             }
         };
@@ -192,7 +203,7 @@ impl PendingRemotePreset {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if slot.is_some() {
-            arbiter.release();
+            let _ = arbiter.release(PendingInstallKind::RemotePreset);
             return None;
         }
         *slot = Some(RemotePresetSession {
@@ -1159,6 +1170,15 @@ mod tests {
     }
 
     #[test]
+    fn remote_dismiss_releases_its_own_modal_slot() {
+        let (pending, arbiter) = remote_pending();
+        let id = pending.snapshot().unwrap().request_id;
+        assert!(pending.dismiss(&id).is_ok());
+        assert!(arbiter.release(PendingInstallKind::RemotePreset));
+        assert!(arbiter.try_acquire(PendingInstallKind::Plugin));
+    }
+
+    #[test]
     fn remote_fail_download_clears_only_matching_request() {
         let (pending, arbiter) = remote_pending();
         let id = pending.snapshot().unwrap().request_id;
@@ -1167,7 +1187,7 @@ mod tests {
         assert!(pending.snapshot().is_some());
         assert!(pending.fail_download(&id));
         assert!(pending.snapshot().is_none());
-        arbiter.release();
+        assert!(arbiter.release(PendingInstallKind::RemotePreset));
     }
 
     #[test]
@@ -1216,11 +1236,13 @@ mod tests {
     }
 
     #[test]
-    fn install_arbiter_release_allows_next_flow() {
+    fn install_arbiter_release_allows_only_the_current_owner_to_continue() {
         let arbiter = InstallArbiter::default();
         assert!(arbiter.try_acquire(PendingInstallKind::Plugin));
         assert!(!arbiter.try_acquire(PendingInstallKind::RemotePreset));
-        arbiter.release();
+        assert!(!arbiter.release(PendingInstallKind::RemotePreset));
+        assert!(!arbiter.try_acquire(PendingInstallKind::LocalPresetPicker));
+        assert!(arbiter.release(PendingInstallKind::Plugin));
         assert!(arbiter.try_acquire(PendingInstallKind::RemotePreset));
     }
 

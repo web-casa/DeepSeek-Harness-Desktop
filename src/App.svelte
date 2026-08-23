@@ -478,6 +478,17 @@
     marketDetailBusy = false;
   }
 
+  async function fetchMarketInstallPreview(slug: string) {
+    marketError = null;
+    try {
+      // This refetches the detail with ETag revalidation. The modal then
+      // presents its current entryRevision for an explicit user confirmation.
+      marketConfirm = await marketPrepareInstall(slug);
+    } catch (e) {
+      marketError = marketFailureMessage("market.prepareFailed", e);
+    }
+  }
+
   async function prepareMarketInstall(slug: string) {
     if (
       pluginBusy ||
@@ -487,15 +498,11 @@
       recoveryOverview?.transaction
     ) return;
     marketPreparing = true;
-    marketError = null;
     try {
-      // This refetches the detail with ETag revalidation. The modal then
-      // presents its current entryRevision for an explicit user confirmation.
-      marketConfirm = await marketPrepareInstall(slug);
-    } catch (e) {
-      marketError = marketFailureMessage("market.prepareFailed", e);
+      await fetchMarketInstallPreview(slug);
+    } finally {
+      marketPreparing = false;
     }
-    marketPreparing = false;
   }
 
   async function doMarketInstall(item: MarketPluginSummary) {
@@ -1127,15 +1134,24 @@
   async function confirmPluginInstallRequest() {
     const request = pluginInstallRequest;
     if (!request || pluginBusy || marketPreparing) return;
+    // Take the UI-side market guard before releasing the Rust-owned plugin
+    // slot. A second deep link arriving during the IPC round trip is then
+    // rejected by the already-tested frontend arbiter instead of opening a
+    // second confirmation surface.
+    marketPreparing = true;
     pluginInstallRequest = null;
     try {
-      await dismissPendingPluginInstall();
-    } catch {
-      // The request was already removed from the UI. The market command still
-      // validates the Rust-derived slug and freshly revalidates the entry
-      // before any profile mutation.
+      try {
+        await dismissPendingPluginInstall();
+      } catch {
+        // The request was already removed from the UI. The market command
+        // still validates the Rust-derived slug and freshly revalidates the
+        // entry before any profile mutation.
+      }
+      await fetchMarketInstallPreview(request.slug);
+    } finally {
+      marketPreparing = false;
     }
-    await prepareMarketInstall(request.slug);
   }
 
   // Browsers notify language-preference changes, but do not expose a portable

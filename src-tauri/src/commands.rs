@@ -1290,18 +1290,18 @@ pub async fn preview_preset(
     let path = match rx.recv().map_err(|e| e.to_string()) {
         Ok(Some(path)) => path,
         Ok(None) => {
-            arbiter.release();
+            let _ = arbiter.release(crate::deep_link::PendingInstallKind::LocalPresetPicker);
             return Err("cancelled".to_string());
         }
         Err(error) => {
-            arbiter.release();
+            let _ = arbiter.release(crate::deep_link::PendingInstallKind::LocalPresetPicker);
             return Err(error);
         }
     };
     let preview = match crate::preset::inspect_archive(&path) {
         Ok(preview) => preview,
         Err(error) => {
-            arbiter.release();
+            let _ = arbiter.release(crate::deep_link::PendingInstallKind::LocalPresetPicker);
             return Err(error);
         }
     };
@@ -1328,7 +1328,7 @@ pub fn cancel_preset_preview(
         .0
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-    arbiter.release();
+    let _ = arbiter.release(crate::deep_link::PendingInstallKind::LocalPresetPicker);
 }
 
 /// Install the previously previewed archive (two-phase: the confirmation
@@ -1363,7 +1363,7 @@ pub fn import_preset(
                 .0
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-            arbiter.release();
+            let _ = arbiter.release(crate::deep_link::PendingInstallKind::LocalPresetPicker);
             Ok(id)
         }
         Err(e) => Err(e),
@@ -2520,7 +2520,7 @@ pub fn dismiss_pending_plugin_install(
     arbiter: State<'_, crate::deep_link::InstallArbiter>,
 ) {
     pending.clear();
-    arbiter.release();
+    let _ = arbiter.release(crate::deep_link::PendingInstallKind::Plugin);
 }
 
 // ---------------------------------------------------------------------------
@@ -2746,21 +2746,28 @@ pub fn dismiss_remote_preset(
     arbiter: State<'_, crate::deep_link::InstallArbiter>,
     runtime: State<'_, Runtime>,
 ) -> Result<(), String> {
-    let removed = pending.dismiss(&request_id)?;
+    // A failed or partially initialized Runtime must not make a user-visible
+    // cancel permanently occupy the global modal slot. The archive path, when
+    // present, is enough to remove its private request directory; the
+    // DSH_HOME-based cleanup below is therefore best effort.
     let dsh_home = runtime
         .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .dsh_home
-        .clone()
-        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+        .clone();
+    let removed = pending.dismiss(&request_id)?;
     if let Some(archive) = removed {
         if let Some(dir) = archive.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
-    remove_remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
-    arbiter.release();
+    if let Some(dsh_home) = dsh_home {
+        remove_remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
+    } else {
+        eprintln!("[preset] DSH_HOME unavailable while dismissing remote preset; request data cleanup deferred");
+    }
+    let _ = arbiter.release(crate::deep_link::PendingInstallKind::RemotePreset);
     Ok(())
 }
 
@@ -2789,7 +2796,7 @@ pub async fn confirm_remote_preset_download(
                 request_id: &str,
                 dir: Option<&std::path::Path>| {
         if pending.fail_download(request_id) {
-            arbiter.release();
+            let _ = arbiter.release(crate::deep_link::PendingInstallKind::RemotePreset);
         }
         if let Some(dir) = dir {
             let _ = std::fs::remove_dir_all(dir);
@@ -2803,7 +2810,7 @@ pub async fn confirm_remote_preset_download(
             // matching request is pending, release the arbiter so a stale
             // frontend retry cannot leave the modal permanently occupied.
             if pending.snapshot().is_none() {
-                arbiter.release();
+                let _ = arbiter.release(crate::deep_link::PendingInstallKind::RemotePreset);
             }
             return Err(error);
         }
@@ -2923,7 +2930,7 @@ pub fn import_remote_preset(
         Ok(id) => {
             pending.finish_install_success(&request_id);
             remove_remote_preset_dir(std::path::Path::new(&dsh_home), &request_id);
-            arbiter.release();
+            let _ = arbiter.release(crate::deep_link::PendingInstallKind::RemotePreset);
             Ok(id)
         }
         Err(error) => {
