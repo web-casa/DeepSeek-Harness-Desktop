@@ -340,10 +340,10 @@ pub fn sibling_temp(destination: &Path, purpose: &str) -> Result<PathBuf, String
 }
 
 // `cmd /C` is surprisingly sensitive to how its command tail is reconstructed
-// from Windows argv.  Keep the two junction tests on the same PowerShell
+// from Windows argv. Keep the two junction tests on the same PowerShell
 // invocation that the hosted Windows workflow itself uses, and pass both
-// paths as quoted literals so an unusual temp-directory user name cannot
-// alter the test command.  This helper is test-only: production code never
+// paths as quoted literals so they remain data rather than script syntax.
+// This helper is test-only: production code never
 // shells out to create or inspect reparse points.
 #[cfg(all(test, windows))]
 #[allow(clippy::expect_used, clippy::panic)]
@@ -353,7 +353,7 @@ pub(crate) fn create_test_junction(link: &Path, target: &Path) {
     }
 
     let script = format!(
-        "New-Item -ItemType Junction -LiteralPath {} -Target {} -ErrorAction Stop | Out-Null",
+        "New-Item -ItemType Junction -Path {} -Target {} -ErrorAction Stop | Out-Null",
         powershell_literal(link),
         powershell_literal(target),
     );
