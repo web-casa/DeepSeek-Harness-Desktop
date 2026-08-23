@@ -4,6 +4,10 @@ Packages the official DeepSeek Harness as a native Windows / macOS / Linux app, 
 the Harness **plugin ecosystem** ready to go. Not a fork: the Harness ships
 intact; the desktop layer only handles lifecycle and the security boundary.
 
+<p align="center">
+  <img src="docs/screenshots/controller-en-US.png" alt="DSH Desktop English controller and Harness window" width="960">
+</p>
+
 | Repo | [web-casa/DeepSeek-Harness-Desktop](https://github.com/web-casa/DeepSeek-Harness-Desktop) |
 | Downloads | [Releases](https://github.com/web-casa/DeepSeek-Harness-Desktop/releases) |
 | Website | [dsharness.app](https://dsharness.app) |
@@ -15,6 +19,12 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
 > Download only from this repository's Releases; if an official installer is
 > still blocked, preserve the diagnostics and report it in a repository issue.
+
+> **Windows users**: before first launch, install the latest supported
+> [Microsoft Visual C++ Redistributable (v14)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version)
+> that matches the installer architecture. A missing or outdated runtime can
+> cause launch errors such as missing `VCRUNTIME140*.dll` or `MSVCP140*.dll`;
+> download it only from Microsoft's official page.
 
 | Platform | GitHub Release packages |
 |---|---|
