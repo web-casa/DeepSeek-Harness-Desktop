@@ -44,6 +44,9 @@
     },
     "createUpdaterArtifacts": true,
     "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
       "wix": {
         "language": [
           "en-US",

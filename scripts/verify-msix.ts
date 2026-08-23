@@ -14,7 +14,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoRoot, fail, ok } from "./lib/common.ts";
-import { normalizeMsixEntryName } from "./lib/msix.ts";
+import { normalizeMsixEntryName, windowsPeArchitecture } from "./lib/msix.ts";
 
 const PACKAGE_NAME = "53660AlanM.DSHDesktopCommunity";
 const PUBLISHER = "CN=84AC3716-04E0-4D67-8951-0D3E51674CA0";
@@ -49,7 +49,7 @@ for (const target of targets) {
   }
 }
 
-function readZipEntries(msix: string): { name: string; content?: string }[] {
+function readZipEntries(msix: string): { name: string; content?: string; peHeader?: string }[] {
   const ps = `
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -62,7 +62,24 @@ foreach ($entry in $zip.Entries) {
       $content = $reader.ReadToEnd()
       $reader.Close()
     }
-    [pscustomobject]@{ name = $name; content = $content } | ConvertTo-Json -Compress
+    $peHeader = $null
+    if ($name.EndsWith(".exe", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $name.EndsWith(".node", [System.StringComparison]::OrdinalIgnoreCase)) {
+      $stream = $entry.Open()
+      try {
+        # The PE header pointer lives at byte 0x3c. A 1 KiB prefix safely
+        # covers normal Windows executable and native-addon headers without
+        # extracting arbitrary package contents to disk.
+        $bytes = New-Object byte[] 1024
+        $count = $stream.Read($bytes, 0, $bytes.Length)
+        if ($count -gt 0) {
+          $peHeader = [Convert]::ToBase64String($bytes, 0, $count)
+        }
+      } finally {
+        $stream.Dispose()
+      }
+    }
+    [pscustomobject]@{ name = $name; content = $content; peHeader = $peHeader } | ConvertTo-Json -Compress
   }
   $zip.Dispose()
 `;
@@ -74,12 +91,22 @@ foreach ($entry in $zip.Entries) {
   if (res.status !== 0) {
     fail(`failed to list ${msix}: ${(res.stderr ?? res.stdout ?? "").trim()}`);
   }
-  const parsed: { name: string; content?: string }[] = [];
+  const parsed: { name: string; content?: string; peHeader?: string }[] = [];
   for (const line of (res.stdout ?? "").split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
-      const obj = JSON.parse(line) as { name?: string; content?: string | null };
-      if (obj.name) parsed.push({ name: obj.name, content: obj.content ?? undefined });
+      const obj = JSON.parse(line) as {
+        name?: string;
+        content?: string | null;
+        peHeader?: string | null;
+      };
+      if (obj.name) {
+        parsed.push({
+          name: obj.name,
+          content: obj.content ?? undefined,
+          peHeader: obj.peHeader ?? undefined,
+        });
+      }
     } catch {
       // Ignore non-JSON progress/format lines emitted by PowerShell hosts.
     }
@@ -127,6 +154,29 @@ for (const target of targets) {
   }
   if (lowerNames.has("appxsignature.p7x")) {
     fail(`${msix} unexpectedly contains a signature; pfx:null Store inputs must remain unsigned`);
+  }
+
+  const requiredPeEntries = [
+    "deepseek-harness-desktop.exe",
+    "runtime/node.exe",
+    "runtime/sidecar.exe",
+    `runtime/harness/node_modules/node-pty/prebuilds/win32-${target.arch}/conpty.node`,
+  ];
+  for (const path of requiredPeEntries) {
+    const entry = entries.find((candidate) => candidate.name.toLowerCase() === path.toLowerCase());
+    if (!entry?.peHeader) fail(`${msix} is missing a readable PE header for ${path}`);
+    let actualArchitecture: "x64" | "arm64";
+    try {
+      actualArchitecture = windowsPeArchitecture(Buffer.from(entry.peHeader, "base64"));
+    } catch (error) {
+      fail(
+        `${msix} has an invalid PE header for ${path}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (actualArchitecture !== target.arch) {
+      fail(`${msix} ${path} is ${actualArchitecture}, expected ${target.arch}`);
+    }
   }
   ok(`${msix} verified (${names.size} entries, identity/arch/protocol OK, unsigned Store input)`);
 }
