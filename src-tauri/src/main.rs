@@ -8,6 +8,7 @@ mod build_info;
 mod commands;
 mod curated_plugins;
 mod deep_link;
+mod diagnostic_mode;
 mod diagnostics;
 mod harness;
 mod market;
@@ -16,7 +17,10 @@ mod paths;
 mod plugins;
 mod presentation;
 mod preset;
+mod profile_consistency;
+mod profile_fallback;
 mod recovery;
+mod redaction;
 mod secure_fs;
 mod tls;
 mod tray;
@@ -110,6 +114,10 @@ fn main() {
             // Native presentation state must be ready before the tray/menu so
             // a saved language preference is visible even before Svelte loads.
             presentation::init(app.handle());
+            // This stays controller-owned and defaults off. Initialize it
+            // before Harness so an explicitly enabled mode can capture the
+            // very first startup failure, without granting the webview IPC.
+            diagnostic_mode::init(app.handle());
             #[cfg(target_os = "macos")]
             app_menu::init(app.handle(), presentation::current_locale(app.handle()));
             // Observability is independent from DSH_HOME and must exist before
@@ -123,6 +131,9 @@ fn main() {
             // auto-restart events can arrive as soon as the sidecar launches,
             // and every restart path must serialize against plugin changes.
             app.manage(std::sync::Arc::new(plugins::PluginRunner::new()));
+            // A profile-patch cleanup preview is intentionally volatile and
+            // must be explicitly reconfirmed after an app restart.
+            app.manage(profile_consistency::PendingProfileCleanup::default());
             // Tray first: harness init failure paths publish snapshots that
             // must reach the tray status line.
             tray::init(&app.handle().clone());
@@ -162,6 +173,9 @@ fn main() {
             commands::get_logs,
             commands::get_versions,
             commands::get_diagnostics,
+            diagnostic_mode::get_diagnostic_mode,
+            diagnostic_mode::set_diagnostic_mode,
+            diagnostic_mode::clear_diagnostic_logs,
             presentation::get_presentation_locale,
             presentation::set_presentation_locale,
             commands::restart,
@@ -179,6 +193,8 @@ fn main() {
             commands::export_preset,
             commands::delete_preset,
             commands::list_plugins,
+            commands::preview_profile_patch_cleanup,
+            commands::apply_profile_patch_cleanup,
             commands::install_plugin,
             commands::uninstall_plugin,
             commands::cancel_plugin_op,

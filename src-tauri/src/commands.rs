@@ -4,10 +4,10 @@
 //! only the local "bootstrap" window has the `allow-*` grants; the remote
 //! Harness WebView has an empty capability set and cannot invoke anything.
 
-use crate::diagnostics::redact;
 use crate::harness::{
     open_harness_window, request_restart, request_shutdown, snapshot_payload, Runtime, Status,
 };
+use crate::redaction::redact;
 use dsh_sidecar::platform::{PlatformChild, SpawnSpec};
 use serde_json::Value;
 use std::sync::atomic::Ordering;
@@ -18,6 +18,85 @@ const MAX_PLUGIN_LOG_LINE_BYTES: usize = 8 * 1024;
 const PLUGIN_LOG_CHANNEL_CAPACITY: usize = 256;
 const PLUGIN_EXIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const PLUGIN_CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+// The manifest must use exact installer-specific keys (not a generic Windows
+// key) so Tauri never falls back from an MSI installation to an NSIS payload.
+// Keep these literals aligned with scripts/lib/release-artifacts.ts.
+const WINDOWS_X64_NSIS_UPDATE_TARGET: &str = "windows-x86_64-nsis";
+const WINDOWS_ARM64_NSIS_UPDATE_TARGET: &str = "windows-aarch64-nsis";
+// The updater dependency has no default request deadline. Keep an offline
+// network or a stalled GitHub connection from leaving the controller's update
+// controls busy indefinitely. A download is deliberately more generous than
+// a metadata check, but still bounded.
+#[cfg(target_os = "windows")]
+const UPDATE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+#[cfg(target_os = "windows")]
+const UPDATE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateSupport {
+    InApp { target: &'static str },
+    Unsupported { reason: &'static str },
+}
+
+fn update_support(
+    store_build: bool,
+    os: &str,
+    arch: &str,
+    bundle: Option<tauri::utils::config::BundleType>,
+) -> UpdateSupport {
+    if store_build {
+        return UpdateSupport::Unsupported { reason: "store" };
+    }
+    if os != "windows" {
+        // macOS requires a notarized updater archive and Linux must defer to
+        // its package manager / Flatpak remote. Neither is safe to fake as
+        // an in-app installer today.
+        return UpdateSupport::Unsupported { reason: "manual" };
+    }
+    if bundle != Some(tauri::utils::config::BundleType::Nsis) {
+        return UpdateSupport::Unsupported {
+            reason: match bundle {
+                Some(tauri::utils::config::BundleType::Msi) => "msi",
+                _ => "installer",
+            },
+        };
+    }
+    match arch {
+        "x86_64" => UpdateSupport::InApp {
+            target: WINDOWS_X64_NSIS_UPDATE_TARGET,
+        },
+        "aarch64" => UpdateSupport::InApp {
+            target: WINDOWS_ARM64_NSIS_UPDATE_TARGET,
+        },
+        _ => UpdateSupport::Unsupported {
+            reason: "architecture",
+        },
+    }
+}
+
+fn current_update_support() -> UpdateSupport {
+    update_support(
+        crate::build_info::STORE_BUILD,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        tauri::utils::platform::bundle_type(),
+    )
+}
+
+fn unsupported_update_response(reason: &str) -> Value {
+    serde_json::json!({ "available": false, "unsupported": true, "unsupportedReason": reason })
+}
+
+fn update_not_supported_error(reason: &str) -> String {
+    match reason {
+        "store" => "updates are managed by the Microsoft Store".to_string(),
+        "msi" => "this MSI installation uses matching MSI or Store updates; install the next MSI manually".to_string(),
+        "manual" => "this platform uses its native package manager or a manually downloaded installer".to_string(),
+        "architecture" => "in-app updates are unavailable for this CPU architecture".to_string(),
+        _ => "this installation type does not support in-app updates".to_string(),
+    }
+}
 
 #[tauri::command]
 pub fn get_status(runtime: State<'_, Runtime>) -> Value {
@@ -100,30 +179,39 @@ pub fn open_harness(runtime: State<'_, Runtime>, app: AppHandle) -> Result<(), S
 }
 
 // ---------------------------------------------------------------------------
-// Updater (Windows for now; macOS activates once signed + notarized).
+// Updater (Windows NSIS only for now).
 // The update package's authenticity is enforced by the minisign pubkey
-// embedded at build time (independent of app code signing).
+// embedded at build time (independent of app code signing). MSI, Store,
+// macOS, and Linux deliberately use their own safe/manual update paths.
 // ---------------------------------------------------------------------------
 
 /// Result of a silent update check, surfaced to the bootstrap UI.
 #[tauri::command]
 pub async fn check_update(app: AppHandle) -> Result<Value, String> {
-    if crate::build_info::STORE_BUILD {
-        let _ = app;
-        return Ok(serde_json::json!({ "available": false, "unsupported": true }));
-    }
-    // macOS updater is deliberately OFF until signing + notarization land
-    // (Gatekeeper rejects un-notarized updates) — report it as unsupported,
-    // NOT as "already up to date".
+    let target = match current_update_support() {
+        UpdateSupport::InApp { target } => target,
+        UpdateSupport::Unsupported { reason } => return Ok(unsupported_update_response(reason)),
+    };
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = app;
-        Ok(serde_json::json!({ "available": false, "unsupported": true }))
+        let _ = (app, target);
+        // This is unreachable for reviewed non-Windows builds, but protects
+        // against a future policy change accidentally initializing the
+        // updater on an unsupported platform.
+        Ok(unsupported_update_response("manual"))
     }
     #[cfg(target_os = "windows")]
     {
         use tauri_plugin_updater::UpdaterExt;
-        let updater = app.updater().map_err(|e| e.to_string())?;
+        // An explicit target removes the plugin's generic fallback search:
+        // `windows-x86_64-nsis` must never fall through to a generic key or
+        // cross installer families.
+        let updater = app
+            .updater_builder()
+            .target(target)
+            .timeout(UPDATE_CHECK_TIMEOUT)
+            .build()
+            .map_err(|e| e.to_string())?;
         match updater.check().await {
             Ok(Some(update)) => Ok(serde_json::json!({
                 "available": true,
@@ -139,41 +227,97 @@ pub async fn check_update(app: AppHandle) -> Result<Value, String> {
 /// Download and install the latest update, then restart the app.
 #[tauri::command]
 pub async fn install_update_and_restart(app: AppHandle) -> Result<(), String> {
-    if crate::build_info::STORE_BUILD {
-        let _ = app;
-        return Err("updates are managed by the Microsoft Store".to_string());
-    }
+    let target = match current_update_support() {
+        UpdateSupport::InApp { target } => target,
+        UpdateSupport::Unsupported { reason } => return Err(update_not_supported_error(reason)),
+    };
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = app;
-        Err("updates are not supported on this platform".to_string())
+        let _ = (app, target);
+        Err(update_not_supported_error("manual"))
     }
     #[cfg(target_os = "windows")]
     {
         use tauri_plugin_updater::UpdaterExt;
-        let updater = app.updater().map_err(|e| e.to_string())?;
-        let update = updater
-            .check()
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "no update available".to_string())?;
-        update
-            .download_and_install(
-                |chunk, total| {
-                    use tauri::Emitter;
-                    let _ = app.emit(
-                        "update-progress",
-                        serde_json::json!({ "downloaded": chunk, "total": total }),
-                    );
-                },
-                || {},
-            )
-            .await
-            .map_err(|e| format!("update install failed: {e}"))?;
-        // AppHandle::restart is `-> !` on EVERY platform (spawn + exit(0));
-        // there is no success tail — the process restarts in place.
-        app.restart();
+        let plugins = app
+            .state::<Arc<crate::plugins::PluginRunner>>()
+            .inner()
+            .clone();
+        if !plugins.try_begin_update() {
+            return Err("a plugin operation or another update is already running".to_string());
+        }
+
+        let result = async {
+            let app_before_exit = app.clone();
+            let updater = app
+                .updater_builder()
+                .target(target)
+                .timeout(UPDATE_DOWNLOAD_TIMEOUT)
+                // Tauri's default updater hook only clears its own window
+                // resources, then Windows calls `std::process::exit(0)`.
+                // Replace it so our sidecar, plugin trees, and lifecycle
+                // evidence get the same orderly handoff as a normal quit.
+                .on_before_exit(move || prepare_for_updater_exit(&app_before_exit))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let update = updater
+                .check()
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "no update available".to_string())?;
+            update
+                .download_and_install(
+                    |chunk, total| {
+                        use tauri::Emitter;
+                        let _ = app.emit(
+                            "update-progress",
+                            serde_json::json!({ "downloaded": chunk, "total": total }),
+                        );
+                    },
+                    || {},
+                )
+                .await
+                .map_err(|e| format!("update install failed: {e}"))
+        }
+        .await;
+        // Successful Windows handoff never returns: the updater launches the
+        // verified installer and exits this process. Ordinary failures must
+        // release the lease so plugin operations remain usable.
+        plugins.finish_update();
+        result
     }
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_for_updater_exit(app: &AppHandle) {
+    // `download_and_install` invokes this immediately before ShellExecuteW
+    // and `std::process::exit(0)`. It does not emit RunEvent::Exit, so all
+    // shell-owned child trees must be handled here rather than relying on the
+    // usual event-loop cleanup path.
+    let observability = app
+        .try_state::<Arc<crate::observability::Observability>>()
+        .map(|state| state.inner().clone());
+    if let Some(observability) = &observability {
+        observability.record("desktop_update_handoff_started", serde_json::json!({}));
+    }
+    if let Some(plugins) = app.try_state::<Arc<crate::plugins::PluginRunner>>() {
+        plugins.shutdown();
+    }
+    if let Some(runtime) = app.try_state::<Runtime>() {
+        sweep_remote_preset_temp(&runtime);
+        sweep_stale_sideloads(&runtime);
+        crate::harness::shutdown_blocking(app);
+    }
+    if let Some(observability) = observability {
+        observability.record("desktop_update_handoff_completed", serde_json::json!({}));
+        if let Err(error) = observability.mark_clean() {
+            eprintln!("failed to finalize Desktop update handoff evidence: {error}");
+        }
+    }
+    // Preserve Tauri's default hook after our lifecycle handoff. The updater
+    // exits immediately after this callback returns, so no Tauri API is used
+    // beyond this point.
+    app.cleanup_before_exit();
 }
 
 // Diagnostic export lives in `diagnostics.rs`; this module only exposes the
@@ -619,7 +763,15 @@ fn ensure_no_plugin_recovery(runtime: &Runtime) -> Result<(), String> {
     let Some(paths) = runtime.paths() else {
         return Err("runtime paths are not resolved yet".to_string());
     };
-    if crate::recovery::has_active_transaction(&paths.dsh_home)? {
+    ensure_no_plugin_recovery_at(&paths.dsh_home)
+}
+
+/// Every mutation of the Web profile must preserve an in-flight recovery
+/// journal's exact before/disabled bytes. Keep this backend-owned instead of
+/// relying on the controller to hide a button: a stale or compromised
+/// bootstrap webview can still invoke any command in its capability set.
+fn ensure_no_plugin_recovery_at(dsh_home: &std::path::Path) -> Result<(), String> {
+    if crate::recovery::has_active_transaction(dsh_home)? {
         return Err(
             "finish or roll back the active plugin recovery before another plugin mutation"
                 .to_string(),
@@ -658,9 +810,10 @@ fn begin_plugin_mutation(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        is_zip_content_type, manual_plugin_install_allowed, market_pnpm_args, parse_pnpm_major,
-        plugin_mutation_status_allowed, plugin_path_env, redact, remove_pnpm_args,
-        sweep_sideload_dir, sweep_sideloads_root, sweep_stale_sideloads_paths,
+        ensure_no_plugin_recovery_at, is_zip_content_type, manual_plugin_install_allowed,
+        market_pnpm_args, parse_pnpm_major, plugin_mutation_status_allowed, plugin_path_env,
+        redact, remove_pnpm_args, sweep_sideload_dir, sweep_sideloads_root,
+        sweep_stale_sideloads_paths, update_support, UpdateSupport,
     };
 
     #[test]
@@ -796,6 +949,79 @@ mod tests {
     fn store_builds_reject_the_generic_install_path() {
         assert!(manual_plugin_install_allowed(false));
         assert!(!manual_plugin_install_allowed(true));
+    }
+
+    #[test]
+    fn updater_policy_is_exact_to_windows_nsis_and_cpu_architecture() {
+        use tauri::utils::config::BundleType;
+
+        assert_eq!(
+            update_support(false, "windows", "x86_64", Some(BundleType::Nsis)),
+            UpdateSupport::InApp {
+                target: "windows-x86_64-nsis"
+            }
+        );
+        assert_eq!(
+            update_support(false, "windows", "aarch64", Some(BundleType::Nsis)),
+            UpdateSupport::InApp {
+                target: "windows-aarch64-nsis"
+            }
+        );
+        assert_eq!(
+            update_support(false, "windows", "x86_64", Some(BundleType::Msi)),
+            UpdateSupport::Unsupported { reason: "msi" }
+        );
+        assert_eq!(
+            update_support(false, "windows", "i686", Some(BundleType::Nsis)),
+            UpdateSupport::Unsupported {
+                reason: "architecture"
+            }
+        );
+        assert_eq!(
+            update_support(false, "linux", "x86_64", Some(BundleType::AppImage)),
+            UpdateSupport::Unsupported { reason: "manual" }
+        );
+        assert_eq!(
+            update_support(true, "windows", "x86_64", Some(BundleType::Nsis)),
+            UpdateSupport::Unsupported { reason: "store" }
+        );
+    }
+
+    #[test]
+    fn profile_patch_cleanup_gate_preserves_an_active_plugin_recovery() {
+        let home = std::env::temp_dir().join(format!(
+            "dsh-profile-cleanup-recovery-gate-{}",
+            crate::secure_fs::random_suffix().unwrap()
+        ));
+        let profile = home.join("profiles/web");
+        std::fs::create_dir_all(profile.join("node_modules/broken-plugin")).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            br#"{"dependencies":{"broken-plugin":"1.0.0"},"dsh":{"profile":{"bundles":["broken-plugin"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join("node_modules/broken-plugin/package.json"),
+            br#"{"name":"broken-plugin","version":"1.0.0","dependencies":{}}"#,
+        )
+        .unwrap();
+        let transaction = crate::recovery::begin(
+            &home,
+            &[(
+                "stderr".to_string(),
+                "Error: failed at /tmp/node_modules/broken-plugin/index.js".to_string(),
+            )],
+            true,
+            "broken-plugin",
+        )
+        .unwrap();
+
+        assert!(ensure_no_plugin_recovery_at(&home)
+            .unwrap_err()
+            .contains("active plugin recovery"));
+
+        crate::recovery::rollback(&home, &transaction.transaction_id).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -1189,12 +1415,57 @@ pub fn list_plugins(
         .paths()
         .map(|paths| crate::plugins::installed_plugins(&paths.dsh_home))
         .unwrap_or_default();
+    // This report is intentionally read-only.  It contains only bounded
+    // package names and stable issue codes, never profile YAML or local paths.
+    let consistency = runtime
+        .paths()
+        .map(|paths| crate::profile_consistency::report(&paths.dsh_home))
+        .unwrap_or_default();
     serde_json::json!({
         "plugins": entries,
+        "consistency": consistency,
         // The backend busy flag survives webview reloads; the UI must be
         // able to resync instead of showing a stale idle state while an op
         // is still running (single-flight is app-wide).
         "busy": plugins.is_busy(),
+    })
+}
+
+/// Preview a profile-patch cleanup without mutating the user profile.  The
+/// PluginRunner boundary serializes this snapshot against all Desktop-owned
+/// plugin/profile mutations; apply performs an additional byte-for-byte
+/// recheck in case Harness or the user changed the file in the meantime.
+#[tauri::command]
+pub fn preview_profile_patch_cleanup(
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    cleanup: State<'_, crate::profile_consistency::PendingProfileCleanup>,
+) -> Result<crate::profile_consistency::ProfileCleanupPreview, String> {
+    let paths = runtime
+        .paths()
+        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+    plugins.with_idle_profile(|| {
+        ensure_no_plugin_recovery_at(&paths.dsh_home)?;
+        crate::profile_consistency::preview_cleanup(&paths.dsh_home, &cleanup)
+    })
+}
+
+/// Commit one volatile, user-confirmed profile-patch cleanup preview.  The
+/// opaque transaction id is not an authority by itself: the backend also
+/// requires the same DSH_HOME and unchanged original patch bytes.
+#[tauri::command]
+pub fn apply_profile_patch_cleanup(
+    transaction_id: String,
+    runtime: State<'_, Runtime>,
+    plugins: State<'_, Arc<crate::plugins::PluginRunner>>,
+    cleanup: State<'_, crate::profile_consistency::PendingProfileCleanup>,
+) -> Result<crate::profile_consistency::ProfileCleanupPreview, String> {
+    let paths = runtime
+        .paths()
+        .ok_or_else(|| "DSH_HOME is unknown".to_string())?;
+    plugins.with_idle_profile(|| {
+        ensure_no_plugin_recovery_at(&paths.dsh_home)?;
+        crate::profile_consistency::apply_cleanup(&paths.dsh_home, &transaction_id, &cleanup)
     })
 }
 
@@ -1324,6 +1595,27 @@ fn attach_plugin_log_readers(
             .map_err(|error| format!("cannot start plugin {stream} reader: {error}"))?;
     }
     Ok(())
+}
+
+/// Plugin stdout can contain arbitrary package-manager output and must stay
+/// session-only. An explicit detailed-diagnostics choice permits bounded,
+/// redacted stderr evidence for a failed installation or removal instead.
+fn record_plugin_stderr(
+    app: &AppHandle,
+    paths: &crate::paths::RuntimePaths,
+    stream: &str,
+    line: &str,
+) {
+    if stream != "stderr" {
+        return;
+    }
+    if let Some(mode) = app.try_state::<crate::diagnostic_mode::DiagnosticMode>() {
+        mode.record_line(
+            crate::diagnostic_mode::DetailedLogSource::PluginStderr,
+            line,
+            &paths.dsh_home.to_string_lossy(),
+        );
+    }
 }
 
 /// Drive one registered plugin process without using pipe closure as a proxy
@@ -1758,7 +2050,10 @@ fn run_plugin_spec(
         }
     }
     let mut exit = supervise_plugin_output(&plugins, rx, |event| match event {
-        Some((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
+        Some((stream, line)) => {
+            record_plugin_stderr(&app, &paths, &stream, &line);
+            handle_line(&mut tail, &mut pending, &mut flush, stream, line);
+        }
         None => flush(&mut pending),
     });
     if let Err(error) = crate::plugins::reconcile_market_receipts(&paths.dsh_home) {
@@ -1969,7 +2264,10 @@ fn run_market_pnpm(
         }
     }
     let mut exit = supervise_plugin_output(&plugins, rx, |event| match event {
-        Some((stream, line)) => handle_line(&mut tail, &mut pending, &mut flush, stream, line),
+        Some((stream, line)) => {
+            record_plugin_stderr(&app, &paths, &stream, &line);
+            handle_line(&mut tail, &mut pending, &mut flush, stream, line);
+        }
         None => flush(&mut pending),
     });
     if exit == Some(0) && !plugins.cancellation_requested() {

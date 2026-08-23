@@ -202,12 +202,12 @@ fn try_auto_restart(app: &AppHandle, expected_gen: u64) -> Result<AutoRestartOut
     let Some(plugin_runner) = app.try_state::<Arc<crate::plugins::PluginRunner>>() else {
         return action();
     };
-    if plugin_runner.is_busy() {
+    if plugin_runner.is_profile_mutation_busy() {
         return Ok(AutoRestartOutcome::Deferred);
     }
-    match plugin_runner.with_idle_profile(action) {
+    match plugin_runner.with_idle_profile_for_auto_restart(action) {
         Ok(outcome) => Ok(outcome),
-        Err(_error) if plugin_runner.is_busy() => Ok(AutoRestartOutcome::Deferred),
+        Err(_error) if plugin_runner.is_profile_mutation_busy() => Ok(AutoRestartOutcome::Deferred),
         Err(_) if auto_restart_is_superseded(&runtime, expected_gen) => {
             Ok(AutoRestartOutcome::Superseded)
         }
@@ -277,6 +277,26 @@ fn log_line(state: &Mutex<SharedState>, stream: &str, line: &str) {
     if s.logs.len() > MAX_LOGS {
         let excess = s.logs.len() - MAX_LOGS;
         s.logs.drain(..excess);
+    }
+}
+
+/// Persist only explicitly opted-in detail lines. Keeping this separate from
+/// `log_line` preserves the normal privacy invariant: ordinary in-memory
+/// runtime logs are never written to disk just because they reached the UI.
+fn record_detailed_line(
+    app: &AppHandle,
+    state: &Arc<Mutex<SharedState>>,
+    source: crate::diagnostic_mode::DetailedLogSource,
+    line: &str,
+) {
+    let dsh_home = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dsh_home
+        .clone()
+        .unwrap_or_default();
+    if let Some(mode) = app.try_state::<crate::diagnostic_mode::DiagnosticMode>() {
+        mode.record_line(source, line, &dsh_home);
     }
 }
 
@@ -622,6 +642,16 @@ fn handle_event(
             .unwrap_or("stdout");
         let line = ev.get("line").and_then(|v| v.as_str()).unwrap_or("");
         log_line(state, stream, line);
+        // Harness stdout can contain prompts/tool output and must remain
+        // memory-only. Explicit detailed diagnostics preserves stderr alone.
+        if stream == "stderr" {
+            record_detailed_line(
+                app,
+                state,
+                crate::diagnostic_mode::DetailedLogSource::HarnessStderr,
+                line,
+            );
+        }
         return;
     }
 
@@ -630,6 +660,16 @@ fn handle_event(
             SideEffect::OpenWindow(url) => open_harness_window(app, &url),
             SideEffect::RefreshPid => refresh_pid(stdin),
             SideEffect::ScheduleAutoRestart(attempts) => schedule_auto_restart(app, attempts),
+        }
+    }
+    if ev.get("type").and_then(Value::as_str) == Some("error") {
+        if let Some(message) = ev.get("message").and_then(Value::as_str) {
+            record_detailed_line(
+                app,
+                state,
+                crate::diagnostic_mode::DetailedLogSource::SidecarStderr,
+                message,
+            );
         }
     }
     record_lifecycle_event(app, ev);
@@ -642,10 +682,13 @@ fn handle_event(
         if let Some(runtime) = app.try_state::<Runtime>() {
             if let Some(paths) = runtime.paths() {
                 if let Err(error) = crate::recovery::commit_after_ready(&paths.dsh_home) {
-                    log_line(
+                    let detail = format!("plugin recovery commit failed: {error}");
+                    log_line(state, "desktop", &detail);
+                    record_detailed_line(
+                        app,
                         state,
-                        "desktop",
-                        &format!("plugin recovery commit failed: {error}"),
+                        crate::diagnostic_mode::DetailedLogSource::DesktopError,
+                        &detail,
                     );
                 }
             }
@@ -764,6 +807,12 @@ struct RuntimeArcs {
 /// to render instead of a dead window.
 fn fail_init(app: &AppHandle, arcs: RuntimeArcs, paths: Option<RuntimePaths>, message: String) {
     let state = Arc::new(Mutex::new(SharedState::default()));
+    record_detailed_line(
+        app,
+        &state,
+        crate::diagnostic_mode::DetailedLogSource::DesktopError,
+        &message,
+    );
     set_error(&state, message);
     state
         .lock()
@@ -869,6 +918,7 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
                         .code()
                         .map(|code| code.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
+                    let detail = format!("sidecar process exited unexpectedly (code {code})");
                     {
                         let mut s = state_c
                             .lock()
@@ -880,6 +930,12 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
                         s.url = None;
                         s.terminal_startup_failure = failed_while_starting;
                     }
+                    record_detailed_line(
+                        &app_c,
+                        &state_c,
+                        crate::diagnostic_mode::DetailedLogSource::DesktopError,
+                        &detail,
+                    );
                     publish_snapshot(&app_c, &state_c);
                     if let Some(observability) =
                         app_c.try_state::<Arc<crate::observability::Observability>>()
@@ -918,7 +974,15 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
                             &attempts_c,
                             &ev,
                         ),
-                        Err(_) => log_line(&state_c, "sidecar", &line),
+                        Err(_) => {
+                            log_line(&state_c, "sidecar", &line);
+                            record_detailed_line(
+                                &app_c,
+                                &state_c,
+                                crate::diagnostic_mode::DetailedLogSource::SidecarStderr,
+                                &line,
+                            );
+                        }
                     }
                     true
                 },
@@ -927,12 +991,19 @@ fn launch_sidecar(app: &AppHandle, runtime: &Runtime, paths: &RuntimePaths) -> R
     }
     if let Some(stderr) = stderr {
         let state_c = runtime.state.clone();
+        let app_c = app.clone();
         std::thread::spawn(move || {
             let _ = dsh_sidecar::for_each_bounded_line(
                 BufReader::new(stderr),
                 MAX_SUPERVISOR_LINE_BYTES,
                 |line| {
                     log_line(&state_c, "sidecar", &line);
+                    record_detailed_line(
+                        &app_c,
+                        &state_c,
+                        crate::diagnostic_mode::DetailedLogSource::SidecarStderr,
+                        &line,
+                    );
                     true
                 },
             );
@@ -1070,8 +1141,74 @@ pub fn init(app: &AppHandle) {
     });
     let runtime = app.state::<Runtime>();
 
-    if let Err(e) = launch_sidecar(app, &runtime, &paths) {
-        set_error(&state, e);
+    // An interrupted Windows in-place update can leave an obsolete junction
+    // below `profiles/node_modules/@deepseek-ai`.  Repair only the
+    // installation-owned fallback layer before the first sidecar starts;
+    // profile-local user plugins are not in scope.  A detected repair failure
+    // is terminal for this launch: continuing would just enter the generic
+    // three-crash loop and hide the actionable recovery error.
+    match crate::profile_fallback::repair_if_needed(
+        &paths,
+        app.try_state::<crate::diagnostic_mode::DiagnosticMode>()
+            .map(|mode| mode.inner()),
+    ) {
+        Ok(crate::profile_fallback::RepairOutcome::NotNeeded) => {}
+        Ok(crate::profile_fallback::RepairOutcome::Repaired { backup_created }) => {
+            log_line(
+                &state,
+                "desktop",
+                if backup_created {
+                    "repaired bundled profile module fallback; preserved prior core scope backup"
+                } else {
+                    "repaired bundled profile module fallback"
+                },
+            );
+            if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>()
+            {
+                observability.record(
+                    "profile_fallback_repaired",
+                    serde_json::json!({ "backupCreated": backup_created }),
+                );
+            }
+        }
+        Err(error) => {
+            let detail = format!("profile fallback repair failed: {error}");
+            log_line(&state, "desktop", &detail);
+            record_detailed_line(
+                app,
+                &state,
+                crate::diagnostic_mode::DetailedLogSource::DesktopError,
+                &detail,
+            );
+            set_error(
+                &state,
+                "内置模块链接修复失败；请从“诊断”导出报告后重试。".to_string(),
+            );
+            // This is terminal for the current launch, but it is a
+            // Desktop-owned core-link repair failure, not evidence that a
+            // plugin caused startup to fail. Do not unlock plugin recovery
+            // mutations from an unrelated failure class.
+            state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .terminal_startup_failure = false;
+            if let Some(observability) = app.try_state::<Arc<crate::observability::Observability>>()
+            {
+                observability.record("profile_fallback_repair_failed", serde_json::json!({}));
+            }
+            publish_snapshot(app, &state);
+            return;
+        }
+    }
+
+    if let Err(error) = launch_sidecar(app, &runtime, &paths) {
+        record_detailed_line(
+            app,
+            &state,
+            crate::diagnostic_mode::DetailedLogSource::DesktopError,
+            &error,
+        );
+        set_error(&state, error);
         state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1079,8 +1216,14 @@ pub fn init(app: &AppHandle) {
         publish_snapshot(app, &state);
         return;
     }
-    if let Err(e) = start_harness(&runtime, &paths) {
-        set_error(&state, e);
+    if let Err(error) = start_harness(&runtime, &paths) {
+        record_detailed_line(
+            app,
+            &state,
+            crate::diagnostic_mode::DetailedLogSource::DesktopError,
+            &error,
+        );
+        set_error(&state, error);
         state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

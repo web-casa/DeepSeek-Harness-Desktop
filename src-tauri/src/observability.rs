@@ -288,14 +288,17 @@ fn sanitize_event_name(name: &str) -> String {
         .collect()
 }
 
-fn append_rotating(
+/// Append a bounded private evidence file. Other Desktop-owned diagnostic
+/// components reuse this instead of open-coding rotation and accidentally
+/// weakening the regular-file/reparse-point checks.
+pub(crate) fn append_rotating(
     path: &Path,
     bytes: &[u8],
     max_bytes: u64,
     rotations: usize,
 ) -> Result<(), String> {
     let current_len = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+        Ok(meta) if secure_fs::is_symlink_or_reparse(&meta) || !meta.is_file() => {
             return Err(format!(
                 "evidence path is not a regular file: {}",
                 path.display()
@@ -322,6 +325,7 @@ fn append_rotating(
 
 fn rotate(path: &Path, rotations: usize) -> Result<(), String> {
     if rotations == 0 {
+        secure_fs::check_regular_or_missing(path)?;
         if path.exists() {
             fs::remove_file(path)
                 .map_err(|e| format!("cannot reset evidence file {}: {e}", path.display()))?;
@@ -334,6 +338,11 @@ fn rotate(path: &Path, rotations: usize) -> Result<(), String> {
         } else {
             rotation_path(path, index - 1)
         };
+        // Never carry a symlink/reparse point forward as a historical
+        // evidence file. The leaf check is especially important on Windows,
+        // where `Path::exists` follows a junction before the subsequent
+        // rename would otherwise preserve it.
+        secure_fs::check_regular_or_missing(&source)?;
         if !source.exists() {
             continue;
         }
@@ -438,6 +447,24 @@ mod tests {
         append_rotating(&path, b"56", 5, 2).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"56");
         assert_eq!(fs::read(root.join("desktop.log.1")).unwrap(), b"1234");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotation_refuses_a_symlinked_historical_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("rotation-symlink");
+        secure_fs::ensure_private_dir(&root).unwrap();
+        let path = root.join("desktop.log");
+        let outside = root.join("outside");
+        fs::write(&outside, b"preserve").unwrap();
+        symlink(&outside, root.join("desktop.log.1")).unwrap();
+
+        append_rotating(&path, b"1234", 5, 2).unwrap();
+        assert!(append_rotating(&path, b"56", 5, 2).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"preserve");
         fs::remove_dir_all(root).unwrap();
     }
 }

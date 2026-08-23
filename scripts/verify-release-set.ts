@@ -2,10 +2,13 @@
 
 import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { repoRoot, fail, ok } from "./lib/common.ts";
 import {
   BUNDLE_SPECS,
+  bundleArtifactCandidates,
+  publicArtifactCandidates,
+  publicArtifactsFor,
   targetById,
   updaterSignatureCandidates,
 } from "./lib/release-artifacts.ts";
@@ -39,12 +42,43 @@ if (process.arch !== target.arch) {
   fail(`target ${target.id} requires ${target.arch}, current process is ${process.arch}`);
 }
 
+const artifacts = publicArtifactsFor(target);
 for (const bundle of target.bundles) {
-  runScript("verify-bundle.ts", ["--bundle", bundle, "--arch", target.arch]);
-  if (BUNDLE_SPECS[bundle].signing !== "checksum") {
-    runScript("verify-signing.ts", ["--bundle", bundle]);
+  const expected = artifacts.filter((artifact) => artifact.bundle === bundle);
+  const resolved = expected.flatMap((artifact) => {
+    const candidates = publicArtifactCandidates(repoRoot, artifact);
+    if (candidates.length !== 1) {
+      fail(
+        `${target.id} expected one ${bundle}${artifact.installerLocale ? ` (${artifact.installerLocale})` : ""} artifact, found: ${candidates.map((path) => basename(path)).join(", ") || "none"}`,
+      );
+    }
+    return candidates;
+  });
+  const actual = bundleArtifactCandidates(repoRoot, bundle);
+  const expectedPaths = new Set(resolved);
+  if (actual.length !== resolved.length || actual.some((path) => !expectedPaths.has(path))) {
+    fail(
+      `${target.id} ${bundle} artifact set is not exact: expected ${resolved.map((path) => basename(path)).join(", ") || "none"}, found ${actual.map((path) => basename(path)).join(", ") || "none"}`,
+    );
   }
-  runScript("checksums.ts", ["--bundle", bundle]);
+}
+
+for (const artifact of artifacts) {
+  const args = ["--bundle", artifact.bundle, "--arch", target.arch];
+  if (artifact.installerLocale) args.push("--installer-locale", artifact.installerLocale);
+  runScript("verify-bundle.ts", args);
+  if (BUNDLE_SPECS[artifact.bundle].signing !== "checksum") {
+    runScript("verify-signing.ts", [
+      "--bundle",
+      artifact.bundle,
+      ...(artifact.installerLocale ? ["--installer-locale", artifact.installerLocale] : []),
+    ]);
+  }
+  runScript("checksums.ts", [
+    "--bundle",
+    artifact.bundle,
+    ...(artifact.installerLocale ? ["--installer-locale", artifact.installerLocale] : []),
+  ]);
 }
 if (target.updaterSignature) {
   const signatures = updaterSignatureCandidates(repoRoot, target);

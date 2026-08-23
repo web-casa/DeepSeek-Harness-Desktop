@@ -9,6 +9,7 @@ import { fail, ok, info } from "./lib/common.ts";
 import {
   classifyPublicInstaller,
   expectedPublicBundleCounts,
+  msiLocaleInventoryProblems,
   expectedUpdaterSignatureCount,
 } from "./lib/release-inventory.ts";
 import type { PublicBundle } from "./lib/release-artifacts.ts";
@@ -68,6 +69,13 @@ for (const [bundle, expected] of Object.entries(expectedPublicBundleCounts()) as
     fail(`release inventory ${bundle} count ${counts[bundle]} != expected ${expected}`);
   }
 }
+
+const msiProblems = msiLocaleInventoryProblems(
+  installers
+    .filter((installer) => installer.bundle === "msi")
+    .map((installer) => basename(installer.path)),
+);
+if (msiProblems.length > 0) fail(msiProblems.join("\n"));
 
 for (const installer of installers) {
   const name = basename(installer.path);

@@ -6,6 +6,9 @@
     getLogs,
     getVersions,
     getDiagnostics,
+    getDiagnosticMode,
+    setDiagnosticMode,
+    clearDiagnosticLogs,
     getPresentationLocale,
     restart,
     setPresentationLocale,
@@ -26,6 +29,8 @@
     installPlugin,
     uninstallPlugin,
     cancelPluginOp,
+    previewProfilePatchCleanup,
+    applyProfilePatchCleanup,
     getPluginRecovery,
     beginPluginRecovery,
     rollbackPluginRecovery,
@@ -64,10 +69,13 @@
     type UpdateInfo,
     type Versions,
     type PluginEntry,
+    type ProfileConsistencyReport,
+    type ProfileCleanupPreview,
     type PluginInstallRequest,
     type PluginRecoveryCandidate,
     type PluginRecoveryOverview,
     type PresentationLocaleState,
+    type DiagnosticModeState,
   } from "./lib/api";
   import {
     arbitratePluginRequest,
@@ -108,6 +116,13 @@
   let inTauri = $state(true);
   let busy = $state(false);
   let diagnosticsBusy = $state(false);
+  let diagnosticMode = $state<DiagnosticModeState>({
+    enabled: false,
+    // The default-off policy is safe even before the native snapshot arrives.
+    persisted: true,
+    hasCapturedLogs: false,
+  });
+  let diagnosticModeBusy = $state(false);
   let logsOpen = $state(false);
   let toast = $state<string | null>(null);
   // Suppresses the brief "已停止" flash while a user-initiated restart
@@ -129,6 +144,13 @@
   let pluginLogsOpen = $state(false);
   let pluginError = $state<string | null>(null);
   let pluginRestartNotice = $state<string | null>(null);
+  let profileConsistency = $state<ProfileConsistencyReport>({
+    issues: [],
+    cleanupEligibleCount: 0,
+  });
+  let profileCleanupPreview = $state<ProfileCleanupPreview | null>(null);
+  let profileCleanupBusy = $state(false);
+  let profileCleanupError = $state<string | null>(null);
   let pluginRefreshInFlight = false;
   let pluginRefreshQueued = false;
   let pluginDoneExpected = false;
@@ -199,6 +221,23 @@
 
   function t(key: TranslationKey, values?: TranslationValues): string {
     return translate(controllerLocale, key, values);
+  }
+
+  function updateUnsupportedMessage(reason: UpdateInfo["unsupportedReason"]): string {
+    switch (reason) {
+      case "store":
+        return t("update.unsupportedStore");
+      case "msi":
+        return t("update.unsupportedMsi");
+      case "manual":
+        return t("update.unsupportedManual");
+      case "architecture":
+        return t("update.unsupportedArchitecture");
+      case "installer":
+        return t("update.unsupportedInstaller");
+      default:
+        return t("toast.updatesUnsupported");
+    }
   }
 
   function applyNativeLocale(snapshot: PresentationLocaleState, notifyPersistenceFailure = false) {
@@ -645,7 +684,7 @@
       const info = await checkUpdate();
       updateInfo = info;
       if (info.unsupported) {
-        showToast(t("toast.updatesUnsupported"));
+        showToast(updateUnsupportedMessage(info.unsupportedReason));
       } else if (!info.available) {
         showToast(t("toast.upToDate"));
       }
@@ -687,6 +726,53 @@
       if (await cancelDiagnosticsExport()) showToast(t("toast.cancellingExport"));
     } catch (e) {
       showToast(t("toast.cancelFailed", { detail: String(e) }));
+    }
+  }
+
+  async function setDetailedDiagnostics(enabled: boolean) {
+    if (!inTauri || diagnosticModeBusy) return;
+    diagnosticModeBusy = true;
+    try {
+      diagnosticMode = await setDiagnosticMode(enabled);
+      showToast(t(enabled ? "toast.diagnosticModeEnabled" : "toast.diagnosticModeDisabled"));
+      if (!diagnosticMode.persisted) {
+        showToast(
+          t(
+            diagnosticMode.enabled
+              ? "diagnostics.modeSessionOnly"
+              : "diagnostics.modeDisabledSessionOnly",
+          ),
+        );
+      }
+    } catch {
+      showToast(t("toast.diagnosticModeFailed"));
+    } finally {
+      diagnosticModeBusy = false;
+    }
+  }
+
+  async function doClearDetailedDiagnostics() {
+    if (!inTauri || diagnosticModeBusy) return;
+    diagnosticModeBusy = true;
+    try {
+      await clearDiagnosticLogs();
+      diagnosticMode = await getDiagnosticMode();
+      showToast(t("toast.diagnosticLogsCleared"));
+    } catch {
+      showToast(t("toast.diagnosticModeFailed"));
+    } finally {
+      diagnosticModeBusy = false;
+    }
+  }
+
+  async function refreshDetailedDiagnostics() {
+    if (!inTauri) return;
+    try {
+      diagnosticMode = await getDiagnosticMode();
+    } catch {
+      // Diagnostic-mode state is optional for an interrupted downgrade or a
+      // partially updated local shell.  Do not let a status refresh make the
+      // controller unusable in that recovery scenario.
     }
   }
 
@@ -848,6 +934,14 @@
         return;
       }
       plugins = res.plugins;
+      // A controller webview can survive an interrupted binary downgrade.
+      // Treat an older backend's missing read-only report as "no report",
+      // rather than letting this purely advisory feature break the plugin
+      // section before the user can repair or update Desktop.
+      profileConsistency = res.consistency ?? {
+        issues: [],
+        cleanupEligibleCount: 0,
+      };
       // Backend busy is the truth across webview reloads: an op may still be
       // running after the UI restarted, and the single-flight flag is
       // app-wide. The helper deliberately does not guess whether an unknown
@@ -972,6 +1066,55 @@
     }
   }
 
+  async function doPreviewProfileCleanup() {
+    if (
+      pluginBusy ||
+      pluginProfileTransitioning ||
+      recoveryOverview?.transaction ||
+      profileCleanupBusy ||
+      marketPreparing ||
+      marketConfirm ||
+      sideloadPath ||
+      pluginInstallRequest ||
+      remotePresetRequest ||
+      recoveryConfirm
+    ) {
+      return;
+    }
+    profileCleanupBusy = true;
+    profileCleanupError = null;
+    try {
+      profileCleanupPreview = await previewProfilePatchCleanup();
+    } catch (e) {
+      profileCleanupError = t("profileConsistency.previewFailed", { detail: String(e) });
+    } finally {
+      profileCleanupBusy = false;
+    }
+  }
+
+  async function doApplyProfileCleanup() {
+    const preview = profileCleanupPreview;
+    if (!preview || profileCleanupBusy || pluginBusy || pluginProfileTransitioning) return;
+    profileCleanupBusy = true;
+    profileCleanupError = null;
+    try {
+      const applied = await applyProfilePatchCleanup(preview.transactionId);
+      profileCleanupPreview = null;
+      showToast(
+        t("toast.profileConsistencyCleaned", {
+          count: applied.removalCount,
+        }),
+      );
+      await refreshPlugins();
+    } catch (e) {
+      profileCleanupPreview = null;
+      profileCleanupError = t("profileConsistency.applyFailed", { detail: String(e) });
+      await refreshPlugins();
+    } finally {
+      profileCleanupBusy = false;
+    }
+  }
+
   async function dismissPluginInstallRequest() {
     pluginInstallRequest = null;
     try {
@@ -1037,7 +1180,10 @@
     } catch {
       inTauri = false;
     }
-    if (inTauri) await synchronizeNativeLocale();
+    if (inTauri) {
+      await synchronizeNativeLocale();
+      await refreshDetailedDiagnostics();
+    }
     refreshPresets();
     refreshPlugins();
     refreshRecovery();
@@ -1063,6 +1209,18 @@
     void onEvent((p) => {
       apply(p);
       if (p.status === "crashed" || p.status === "running") void refreshRecovery();
+      // `hasCapturedLogs` is durable state rather than an event per stderr
+      // line. The writer intentionally runs behind a bounded background
+      // queue, so do one short follow-up probe after a terminal crash: the
+      // first snapshot can legitimately precede the final stderr flush. This
+      // keeps the Clear button accurate without adding IPC to the high-volume
+      // log stream.
+      if (p.status === "crashed") {
+        void refreshDetailedDiagnostics();
+        setTimeout(() => {
+          if (status === "crashed") void refreshDetailedDiagnostics();
+        }, 250);
+      }
     })
       .then((fn) => {
         if (cancelled) fn();
@@ -1492,6 +1650,50 @@
     </div>
   {/if}
 
+  <div class="card diagnostics-card">
+    <div class="update-row">
+      <span class="update-title">{t("diagnostics.modeTitle")}</span>
+      <span class="update-info">
+        {diagnosticMode.enabled ? t("diagnostics.modeEnabled") : t("diagnostics.modeDisabled")}
+      </span>
+      <button
+        class={diagnosticMode.enabled ? "danger-ghost" : "ghost"}
+        onclick={() => void setDetailedDiagnostics(!diagnosticMode.enabled)}
+        disabled={!inTauri || diagnosticModeBusy}
+      >
+        {diagnosticModeBusy
+          ? t("diagnostics.switching")
+          : diagnosticMode.enabled
+            ? t("action.disableDetailedDiagnostics")
+            : t("action.enableDetailedDiagnostics")}
+      </button>
+      {#if diagnosticMode.hasCapturedLogs}
+        <button
+          class="ghost"
+          onclick={() => void doClearDetailedDiagnostics()}
+          disabled={!inTauri || diagnosticModeBusy}
+        >{t("action.clearDetailedDiagnostics")}</button>
+      {/if}
+    </div>
+    <div class="trust-note">
+      {t("diagnostics.modeDescription")}
+    </div>
+    {#if diagnosticMode.enabled}
+      <div class="notice-box">{t("diagnostics.modeWarning")}</div>
+    {:else if diagnosticMode.hasCapturedLogs}
+      <div class="notice-box">{t("diagnostics.modeRetained")}</div>
+    {/if}
+    {#if !diagnosticMode.persisted}
+      <div class="notice-box">
+        {t(
+          diagnosticMode.enabled
+            ? "diagnostics.modeSessionOnly"
+            : "diagnostics.modeDisabledSessionOnly",
+        )}
+      </div>
+    {/if}
+  </div>
+
   <div class="card update-card">
     <div class="update-row">
       <span class="update-title">{t("update.title")}</span>
@@ -1506,6 +1708,8 @@
               : t("update.inProgress")
             : t("action.installUpdateRestart")}
         </button>
+      {:else if updateInfo?.unsupported}
+        <span class="update-info">{updateUnsupportedMessage(updateInfo.unsupportedReason)}</span>
       {:else}
         <button class="ghost" onclick={doCheckUpdate} disabled={updateBusy}>
           {updateBusy ? t("action.checking") : t("action.checkUpdates")}
@@ -1708,10 +1912,43 @@
           </button>
         {/if}
       </div>
-      <div class="trust-note">
-        {t("plugins.trustBeforeLink")}
-        <button class="inline-link" onclick={() => openSite("https://cordis.run")}>cordis.run {t("action.pluginMarket")}</button>
-        {t("plugins.trustAfterLink")}
+    <div class="trust-note">
+      {t("plugins.trustBeforeLink")}
+      <button class="inline-link" onclick={() => openSite("https://cordis.run")}>cordis.run {t("action.pluginMarket")}</button>
+      {t("plugins.trustAfterLink")}
+    </div>
+  {/if}
+    {#if profileConsistency.issues.length > 0 || profileCleanupError}
+      <div class="notice-box">
+        <b>{t("profileConsistency.title")}</b>
+        {#each profileConsistency.issues as issue (issue.packageName)}
+          <div>
+            · {t(
+              issue.active
+                ? "profileConsistency.missingActiveDependency"
+                : "profileConsistency.missingDependency",
+              { name: issue.packageName },
+            )}
+          </div>
+        {/each}
+        {#if profileConsistency.cleanupEligibleCount > 0}
+          <div class="trust-note">{t("profileConsistency.exactOnly")}</div>
+          <button
+            class="ghost"
+            onclick={doPreviewProfileCleanup}
+            disabled={
+              profileCleanupBusy ||
+              pluginBusy ||
+              pluginProfileTransitioning ||
+              recoveryOverview?.transaction != null
+            }
+          >{profileCleanupBusy ? t("action.reviewing") : t("action.reviewCleanup")}</button>
+        {:else if profileConsistency.issues.length > 0}
+          <div class="trust-note">{t("profileConsistency.manualReview")}</div>
+        {/if}
+        {#if profileCleanupError}
+          <div>{profileCleanupError}</div>
+        {/if}
       </div>
     {/if}
     {#if pluginError}
@@ -1812,6 +2049,43 @@
           disabled={recoveryBusy}
         >{t("action.confirm")}</button>
         <button class="ghost" onclick={() => (recoveryConfirm = null)} disabled={recoveryBusy}>{t("action.cancel")}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if profileCleanupPreview}
+  <div class="modal-backdrop">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("dialog.profileCleanupLabel")}
+      tabindex="-1"
+      use:trapDialog={{
+        onEscape: () => (profileCleanupPreview = null),
+        escapeDisabled: profileCleanupBusy,
+      }}
+    >
+      <div class="modal-title">{t("dialog.reviewProfileCleanup")}</div>
+      <div class="modal-meta">
+        {t("dialog.profileCleanupCount", { count: profileCleanupPreview.removalCount })}
+      </div>
+      <div class="modal-name">
+        {#each profileCleanupPreview.packages as packageName (packageName)}
+          <div>{packageName}</div>
+        {/each}
+      </div>
+      <div class="modal-warn">{t("dialog.profileCleanupWarning")}</div>
+      <div class="modal-actions">
+        <button class="danger-ghost" onclick={doApplyProfileCleanup} disabled={profileCleanupBusy}>
+          {profileCleanupBusy ? t("action.cleaning") : t("action.confirmCleanup")}
+        </button>
+        <button
+          class="ghost"
+          onclick={() => (profileCleanupPreview = null)}
+          disabled={profileCleanupBusy}
+        >{t("action.cancel")}</button>
       </div>
     </div>
   </div>

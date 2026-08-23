@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness-desktop"
-version = "0.2.13"
+version = "0.2.14"
 description = "DSH Desktop — community desktop packaging of DeepSeek Harness"
 edition = "2021"
 license = "MIT"

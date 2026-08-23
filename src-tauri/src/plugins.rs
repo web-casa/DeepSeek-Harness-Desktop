@@ -202,6 +202,7 @@ const MARKET_ACTIVE_FILE: &str = "market-active.json";
 const MARKET_PENDING_MAX_BYTES: u64 = 256 * 1024;
 const PROFILE_LOCK_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const PROFILE_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const PROFILE_PATCH_MAX_BYTES: u64 = 512 * 1024;
 const INSTALLED_MANIFEST_MAX_BYTES: u64 = 256 * 1024;
 const BUNDLE_PATCH_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const BUNDLE_PATCH_PATH_MAX_BYTES: usize = 1024;
@@ -820,6 +821,49 @@ pub(crate) fn write_profile_bytes(profile: &Path, bytes: &[u8]) -> Result<(), St
     result
 }
 
+/// Atomically replace the user-owned profile patch while preserving its
+/// existing permissions.  This is intentionally separate from
+/// `secure_fs::atomic_write`: the profile directory is owned by Harness, so
+/// Desktop must not chmod the directory merely to repair one reviewed file.
+/// Callers must first prove that every removed YAML block is unambiguously
+/// theirs; this helper only supplies the no-follow, same-directory publish
+/// boundary.
+pub(crate) fn write_profile_patch_bytes(profile: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() as u64 > PROFILE_PATCH_MAX_BYTES {
+        return Err("web profile cordis.patch.yml exceeds 512 KiB".to_string());
+    }
+    let path = profile.join("cordis.patch.yml");
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("cannot inspect web profile cordis.patch.yml: {e}"))?;
+    if crate::secure_fs::is_symlink_or_reparse(&metadata) || !metadata.is_file() {
+        return Err("web profile cordis.patch.yml must be a regular file".to_string());
+    }
+    let temp = path.with_file_name(format!(
+        ".profile-patch-{}.tmp",
+        crate::secure_fs::random_suffix()?
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("cannot create web profile patch temp file: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("cannot write web profile cordis.patch.yml: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync web profile cordis.patch.yml: {e}"))?;
+        #[cfg(unix)]
+        file.set_permissions(metadata.permissions())
+            .map_err(|e| format!("cannot preserve web profile patch permissions: {e}"))?;
+        drop(file);
+        replace_existing_file(&temp, &path, "web profile cordis.patch.yml")
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
 pub(crate) fn profile_bundles_mut(value: &mut Value) -> Result<&mut Vec<Value>, String> {
     value
         .get_mut("dsh")
@@ -1310,13 +1354,14 @@ fn read_installed_plugin_version(
     Ok(Some(version.to_string()))
 }
 
-/// The runner state managed by the shell: single-flight flag, cancellation
-/// latch, app-exit latch, and the live child handle. `operation_gate` makes
+/// The runner state managed by the shell: single-flight flag, update lease,
+/// cancellation latch, app-exit latch, and the live child handle. `operation_gate` makes
 /// begin/cancel/finish one atomic state transition so a cancel arriving
 /// before the child handle is registered cannot be lost or applied to the
 /// next operation.
 pub struct PluginRunner {
     pub busy: AtomicBool,
+    updating: AtomicBool,
     pub exiting: AtomicBool,
     cancel_requested: AtomicBool,
     terminating_child: AtomicBool,
@@ -1328,6 +1373,7 @@ impl PluginRunner {
     pub fn new() -> Self {
         PluginRunner {
             busy: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
             exiting: AtomicBool::new(false),
             cancel_requested: AtomicBool::new(false),
             terminating_child: AtomicBool::new(false),
@@ -1343,6 +1389,7 @@ impl PluginRunner {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.exiting.load(Ordering::SeqCst)
             || self.busy.load(Ordering::SeqCst)
+            || self.updating.load(Ordering::SeqCst)
             || self.terminating_child.load(Ordering::SeqCst)
         {
             return false;
@@ -1354,6 +1401,39 @@ impl PluginRunner {
 
     pub fn finish(&self) {
         self.finish_with(|| ());
+    }
+
+    /// Claim the update handoff lease. An in-app update ultimately exits the
+    /// Desktop process, so a plugin's multi-step profile mutation must never
+    /// begin while the updater is checking, downloading, or about to launch
+    /// the verified installer. This is intentionally a separate state from
+    /// `busy`: update progress is not a cancellable pnpm child operation.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn try_begin_update(&self) -> bool {
+        let _gate = self
+            .operation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.exiting.load(Ordering::SeqCst)
+            || self.busy.load(Ordering::SeqCst)
+            || self.updating.load(Ordering::SeqCst)
+            || self.terminating_child.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        self.updating.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// Release a failed/cancelled update handoff so normal plugin operations
+    /// can resume. A successful Windows updater exits the process instead.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn finish_update(&self) {
+        let _gate = self
+            .operation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.updating.store(false, Ordering::SeqCst);
     }
 
     /// Publish a completion side effect before another operation can claim
@@ -1397,6 +1477,16 @@ impl PluginRunner {
     }
 
     pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+            || self.updating.load(Ordering::SeqCst)
+            || self.terminating_child.load(Ordering::SeqCst)
+    }
+
+    /// A profile mutation or its cancellation drain is in flight. An updater
+    /// download deliberately does not count here: it owns no pnpm child or
+    /// profile write, so a crash auto-restart may keep Harness available while
+    /// the verified installer downloads in the background.
+    pub fn is_profile_mutation_busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst) || self.terminating_child.load(Ordering::SeqCst)
     }
 
@@ -1412,15 +1502,35 @@ impl PluginRunner {
         &self,
         action: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_idle_profile_inner(false, action)
+    }
+
+    /// The crash supervisor may safely recover Harness while an updater is
+    /// only checking/downloading: the updater owns no profile mutation. This
+    /// still serializes against all pnpm work and respects the exiting latch,
+    /// which `prepare_for_updater_exit` raises before the installer handoff.
+    pub fn with_idle_profile_for_auto_restart<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_idle_profile_inner(true, action)
+    }
+
+    fn with_idle_profile_inner<T>(
+        &self,
+        allow_update: bool,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
         let _gate = self
             .operation_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.exiting.load(Ordering::SeqCst)
             || self.busy.load(Ordering::SeqCst)
+            || (!allow_update && self.updating.load(Ordering::SeqCst))
             || self.terminating_child.load(Ordering::SeqCst)
         {
-            return Err("插件操作仍在进行，完成或取消后才能重启 Harness".to_string());
+            return Err("插件操作或应用更新仍在进行，完成后才能重启 Harness".to_string());
         }
         action()
     }
@@ -1442,6 +1552,7 @@ impl PluginRunner {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.exiting.store(true, Ordering::SeqCst);
+        self.updating.store(false, Ordering::SeqCst);
         self.cancel_requested.store(true, Ordering::SeqCst);
         if let Some(child) = self
             .child
@@ -1660,9 +1771,63 @@ mod tests {
                 Ok(())
             })
             .unwrap_err();
-        assert!(error.contains("插件操作仍在进行"), "{error}");
+        assert!(error.contains("插件操作或应用更新仍在进行"), "{error}");
         assert!(!called, "busy profile boundary must not run its action");
         runner.finish();
+    }
+
+    #[test]
+    fn update_lease_excludes_plugin_mutations_and_releases_after_failure() {
+        let runner = PluginRunner::new();
+        assert!(runner.try_begin_update());
+        assert!(runner.is_busy());
+        assert!(
+            !runner.try_begin(),
+            "plugin mutation must not overlap update download"
+        );
+
+        let mut called = false;
+        let error = runner
+            .with_idle_profile(|| {
+                called = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.contains("应用更新"), "{error}");
+        assert!(
+            !called,
+            "restart boundary must not run during update handoff"
+        );
+
+        runner.finish_update();
+        assert!(!runner.is_busy());
+        assert!(
+            runner.try_begin(),
+            "failed update must not leave plugin gate stuck"
+        );
+        runner.finish();
+    }
+
+    #[test]
+    fn update_download_does_not_block_a_crash_restart_profile_boundary() {
+        let runner = PluginRunner::new();
+        assert!(runner.try_begin_update());
+        assert!(runner.is_busy());
+        assert!(!runner.is_profile_mutation_busy());
+        assert_eq!(
+            runner.with_idle_profile_for_auto_restart(|| Ok(7)).unwrap(),
+            7,
+            "a download has no partial profile mutation to protect"
+        );
+        assert!(
+            !runner.try_begin(),
+            "plugin mutations remain blocked until the update fails or exits"
+        );
+        assert!(
+            runner.with_idle_profile(|| Ok(())).is_err(),
+            "manual restarts remain blocked while update controls are busy"
+        );
+        runner.finish_update();
     }
 
     #[test]

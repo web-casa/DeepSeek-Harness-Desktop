@@ -22,7 +22,7 @@ on:
       windows_smoke_source_run_id:
         type: string
         required: false
-        description: "Completed Release run ID whose Windows x64 artifact should be smoke-tested without rebuilding."
+        description: "Completed Release run ID whose Windows x64 and ARM64 artifacts should be smoke-tested without rebuilding."
       windows_smoke_installer:
         type: choice
         required: false
@@ -61,6 +61,19 @@ jobs:
       msix: ${{ steps.matrix.outputs.msix }}
       macos_notarization: ${{ steps.matrix.outputs.macos_notarization }}
     steps:
+      # Standard hosted runners are free only for public repositories. This
+      # release deliberately builds six native lanes, so fail before the
+      # expensive matrix if repository visibility changes without a reviewed
+      # billing decision.
+      - name: Require public-repository free runner policy
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [[ "$REPOSITORY_PRIVATE" != "false" ]]; then
+            echo "::error::The native release matrix uses standard hosted runners under the public-repository free-runner policy. Re-review billing before releasing from a private repository."
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
@@ -218,6 +231,11 @@ jobs:
         run: bash scripts/ci/install-linux-release-deps.sh
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable branch (toolchain version pinned via rust-toolchain.toml)
+
+      - name: Assert native build host
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: node scripts/verify-native-host.ts --target "$RELEASE_TARGET"
 
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # v2 (SHA-pinned)
         with:
@@ -417,6 +435,7 @@ jobs:
             target/release/bundle/macos/*.app.tar.gz.sig
             target/notarization/${{ matrix.target }}.json
           if-no-files-found: error
+          retention-days: 14
 
       - name: Bundle application (Windows)
         if: runner.os == 'Windows'
@@ -476,6 +495,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.paths }}
           if-no-files-found: error
+          retention-days: 7
 
       - name: Remove remaining job-scoped macOS signing keychain
         if: runner.os == 'macOS' && always() && env.APPLE_KEYCHAIN_PATH != ''
@@ -560,6 +580,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.paths }}
           if-no-files-found: error
+          retention-days: 7
 
       - name: Upload notarization diagnostics
         if: failure() && env.APPLE_SIGNING_CONFIGURED == '1'
@@ -568,6 +589,7 @@ jobs:
           name: dsh-macos-notarization-diagnostics-${{ matrix.arch }}-${{ github.run_attempt }}
           path: target/notarization
           if-no-files-found: ignore
+          retention-days: 7
 
   build-msix:
     name: Build MSIX ${{ matrix.arch }}
@@ -594,6 +616,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable (version via rust-toolchain.toml)
         with:
           targets: ${{ matrix.target }}
+
+      - name: Assert native Store build host
+        env:
+          RELEASE_TARGET: ${{ matrix.nativeTarget }}
+        run: node scripts/verify-native-host.ts --target "$RELEASE_TARGET"
 
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # v2 (SHA-pinned)
         with:
@@ -642,6 +669,7 @@ jobs:
             target/msix/*_${{ matrix.arch }}.msix
             target/msix/*_${{ matrix.arch }}.msix.sha256
           if-no-files-found: error
+          retention-days: 14
 
   windows-smoke-source:
     name: Validate Windows smoke source run
@@ -678,17 +706,23 @@ jobs:
             exit 1
           fi
 
-          artifact_count="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
-            --jq '[.artifacts[] | select(.name == "deepseek-harness-desktop-windows-x64" and .expired == false)] | length')"
-          if [[ "$artifact_count" != "1" ]]; then
-            echo "::error::expected one unexpired deepseek-harness-desktop-windows-x64 artifact, got $artifact_count"
-            exit 1
-          fi
+          artifacts="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100")"
+          for artifact_name in \
+            deepseek-harness-desktop-windows-x64 \
+            deepseek-harness-desktop-windows-arm64; do
+            artifact_count="$(jq --arg name "$artifact_name" \
+              '[.artifacts[] | select(.name == $name and .expired == false)] | length' \
+              <<< "$artifacts")"
+            if [[ "$artifact_count" != "1" ]]; then
+              echo "::error::expected one unexpired $artifact_name artifact, got $artifact_count"
+              exit 1
+            fi
+          done
 
-          echo "Reusing Windows x64 artifact from Release run $SOURCE_RUN_ID ($source_sha)"
+          echo "Reusing Windows x64 and ARM64 artifacts from Release run $SOURCE_RUN_ID ($source_sha)"
 
   windows-deep-link-smoke:
-    name: Windows deep-link installer smoke
+    name: Windows ${{ matrix.label }} deep-link installer smoke
     if: >-
       ${{
         always() &&
@@ -710,12 +744,27 @@ jobs:
         )
       }}
     needs: [build, windows-smoke-source]
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x64 native
+            os: windows-latest
+            artifact: deepseek-harness-desktop-windows-x64
+          - label: ARM64 native
+            os: windows-11-arm
+            artifact: deepseek-harness-desktop-windows-arm64
+          # Windows on ARM supports x64 application emulation. Keep this as a
+          # compatibility smoke, distinct from the ARM64 native build above.
+          - label: x64 compatibility on ARM64
+            os: windows-11-arm
+            artifact: deepseek-harness-desktop-windows-x64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
         with:
-          name: deepseek-harness-desktop-windows-x64
+          name: ${{ matrix.artifact }}
           path: artifacts
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -814,8 +863,135 @@ jobs:
           if ($after[0].Id -ne $before[0].Id) { throw "preset warm link spawned a second instance" }
           Write-Host "preset single instance retained pid=$($after[0].Id)"
 
+      # This is deliberately more than a protocol-registration test.  An
+      # in-place NSIS reinstall exercises the updater's installer family
+      # boundary, then the sidecar is launched from the *installed* runtime
+      # with a disposable DSH_HOME.  That catches an installer which appears
+      # healthy but omitted/mismatched node, Harness, or sidecar resources.
+      # It is an in-place-reinstall smoke, not a claim that a previous-version
+      # migration was tested; previous-version release assets are not assumed
+      # to exist for every native architecture.
+      - name: In-place NSIS reinstall and installed Harness smoke
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          Get-Process deepseek-harness-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 3
+
+          $installers = @(Get-ChildItem -Path artifacts -Recurse -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one NSIS installer, got $($installers.Count)"
+          }
+          $reinstall = Start-Process -FilePath $installers[0].FullName -ArgumentList "/S" -Wait -PassThru
+          if ($reinstall.ExitCode -ne 0) { throw "in-place NSIS reinstall exit $($reinstall.ExitCode)" }
+
+          $keys = @(
+            "Registry::HKEY_CURRENT_USER\Software\Classes\dsharness\shell\open\command",
+            "Registry::HKEY_LOCAL_MACHINE\Software\Classes\dsharness\shell\open\command"
+          )
+          $desktopPaths = @($keys | Where-Object { Test-Path $_ } | ForEach-Object {
+            $command = (Get-ItemProperty $_).'(default)'
+            $match = [regex]::Match(
+              $command,
+              '^"([^"]+\\.exe)"\s+"%1"$',
+              [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            if (-not $match.Success) { throw "invalid NSIS protocol command: $command" }
+            $match.Groups[1].Value
+          } | Sort-Object -Unique)
+          if ($desktopPaths.Count -ne 1) {
+            throw "expected one installed desktop executable after NSIS reinstall, got $($desktopPaths.Count)"
+          }
+          $desktopExe = $desktopPaths[0]
+          if (-not (Test-Path -LiteralPath $desktopExe -PathType Leaf)) {
+            throw "registered desktop executable disappeared after NSIS reinstall: $desktopExe"
+          }
+
+          $installRoot = Split-Path -LiteralPath $desktopExe -Parent
+          $runtime = Join-Path $installRoot 'runtime'
+          $sidecar = Join-Path $runtime 'sidecar.exe'
+          $node = Join-Path $runtime 'node.exe'
+          $harness = Join-Path $runtime 'harness'
+          $dsh = Join-Path $harness 'node_modules\@deepseek-ai\dsh\lib\bin.js'
+          foreach ($path in @($sidecar, $node, $harness, $dsh)) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "installed runtime resource missing: $path" }
+          }
+
+          $dshHome = Join-Path $env:RUNNER_TEMP 'dsh-installed-nsis-smoke-home'
+          New-Item -ItemType Directory -Force -Path $dshHome | Out-Null
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = $sidecar
+          $startInfo.WorkingDirectory = $runtime
+          $startInfo.UseShellExecute = $false
+          $startInfo.CreateNoWindow = $true
+          $startInfo.RedirectStandardInput = $true
+          $startInfo.RedirectStandardOutput = $true
+          $startInfo.RedirectStandardError = $true
+          $startInfo.Environment['DSH_HOME'] = $dshHome
+          $startInfo.Environment['DSH_TELEMETRY_DISABLED'] = '1'
+          $sidecarProcess = [System.Diagnostics.Process]::new()
+          $sidecarProcess.StartInfo = $startInfo
+          if (-not $sidecarProcess.Start()) { throw 'could not launch installed sidecar' }
+          $stderrTask = $sidecarProcess.StandardError.ReadToEndAsync()
+          $lines = [System.Collections.Generic.List[string]]::new()
+          $ready = $null
+          try {
+            $startPayload = @{
+              id = 1
+              command = 'start'
+              node = $node
+              script = $dsh
+              args = @('web', '--no-open', '--host', '127.0.0.1', '--port', '0')
+              cwd = $harness
+              env = @{ DSH_HOME = $dshHome; DSH_TELEMETRY_DISABLED = '1' }
+            } | ConvertTo-Json -Compress -Depth 4
+            $sidecarProcess.StandardInput.WriteLine($startPayload)
+            $sidecarProcess.StandardInput.Flush()
+            $lineTask = $sidecarProcess.StandardOutput.ReadLineAsync()
+            $deadline = [DateTime]::UtcNow.AddMinutes(3)
+            while ([DateTime]::UtcNow -lt $deadline -and -not $sidecarProcess.HasExited) {
+              if (-not $lineTask.Wait(250)) { continue }
+              $line = $lineTask.GetAwaiter().GetResult()
+              if ($null -eq $line) { break }
+              if ($lines.Count -ge 120) { $lines.RemoveAt(0) }
+              $lines.Add($line)
+              try { $event = $line | ConvertFrom-Json -ErrorAction Stop } catch {
+                throw "installed sidecar emitted non-JSON stdout: $line"
+              }
+              if ($event.type -eq 'ready' -and $event.url) {
+                $ready = $event
+                break
+              }
+              $lineTask = $sidecarProcess.StandardOutput.ReadLineAsync()
+            }
+            if ($null -eq $ready) {
+              $stderr = if ($stderrTask.Wait(2000)) { $stderrTask.GetAwaiter().GetResult() } else { '' }
+              throw "installed Harness never became ready; sidecar output: $($lines -join "`n"); stderr: $stderr"
+            }
+            $response = Invoke-WebRequest -Uri $ready.url -UseBasicParsing -TimeoutSec 20
+            if ($response.StatusCode -ne 200) {
+              throw "installed Harness GET $($ready.url) returned HTTP $($response.StatusCode)"
+            }
+            if ($response.Content -notmatch '<!doctype|<html|<div') {
+              throw "installed Harness returned a non-HTML body ($($response.Content.Length) bytes)"
+            }
+            Write-Host "installed Harness ready at $($ready.url) after in-place NSIS reinstall"
+          } finally {
+            if (-not $sidecarProcess.HasExited) {
+              try {
+                $sidecarProcess.StandardInput.WriteLine('{"id":2,"command":"shutdown"}')
+                $sidecarProcess.StandardInput.Flush()
+              } catch { }
+              if (-not $sidecarProcess.WaitForExit(30000)) {
+                $sidecarProcess.Kill($true)
+                $sidecarProcess.WaitForExit(5000) | Out-Null
+              }
+            }
+            $sidecarProcess.Dispose()
+          }
+
   windows-msi-smoke:
-    name: Windows MSI installer smoke
+    name: Windows ${{ matrix.label }} MSI installer smoke
     if: >-
       ${{
         always() &&
@@ -837,12 +1013,32 @@ jobs:
         )
       }}
     needs: [build, windows-smoke-source]
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x64 native en-US
+            os: windows-latest
+            artifact: deepseek-harness-desktop-windows-x64
+            msiLocale: en-US
+          - label: x64 native zh-CN
+            os: windows-latest
+            artifact: deepseek-harness-desktop-windows-x64
+            msiLocale: zh-CN
+          - label: ARM64 native en-US
+            os: windows-11-arm
+            artifact: deepseek-harness-desktop-windows-arm64
+            msiLocale: en-US
+          - label: ARM64 native zh-CN
+            os: windows-11-arm
+            artifact: deepseek-harness-desktop-windows-arm64
+            msiLocale: zh-CN
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
         with:
-          name: deepseek-harness-desktop-windows-x64
+          name: ${{ matrix.artifact }}
           path: artifacts
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -851,12 +1047,33 @@ jobs:
       - name: Silent install MSI
         shell: pwsh
         timeout-minutes: 12
+        env:
+          MSI_LOCALE: ${{ matrix.msiLocale }}
         run: |
-          $installers = @(Get-ChildItem -Path artifacts -Recurse -File -Filter '*.msi')
+          $locale = $env:MSI_LOCALE
+          $expectedLanguages = @{ "en-US" = "1033"; "zh-CN" = "2052" }
+          $expectedLanguage = $expectedLanguages[$locale]
+          if ([string]::IsNullOrWhiteSpace($expectedLanguage)) {
+            throw "unreviewed MSI locale: $locale"
+          }
+          $installers = @(Get-ChildItem -Path artifacts -Recurse -File -Filter '*.msi' | Where-Object {
+            $_.Name.EndsWith("_$locale.msi", [System.StringComparison]::Ordinal)
+          })
           if ($installers.Count -ne 1) {
-            throw "expected exactly one MSI installer, got $($installers.Count)"
+            throw "expected exactly one $locale MSI installer, got $($installers.Count)"
           }
           $installer = $installers[0]
+          $windowsInstaller = New-Object -ComObject WindowsInstaller.Installer
+          $database = $windowsInstaller.OpenDatabase($installer.FullName, 0)
+          $view = $database.OpenView('SELECT `Value` FROM `Property` WHERE `Property` = ''ProductLanguage''')
+          $view.Execute()
+          $record = $view.Fetch()
+          if ($null -eq $record) { throw "MSI ProductLanguage is missing" }
+          $productLanguage = $record.StringData(1)
+          if ($productLanguage -ne $expectedLanguage) {
+            throw "MSI ProductLanguage $productLanguage does not match $locale ($expectedLanguage)"
+          }
+          Write-Host "MSI installer locale verified: $locale ($productLanguage)"
           $logPath = Join-Path $env:RUNNER_TEMP 'dsh-msi-install.log'
           $quotedInstaller = '"' + $installer.FullName + '"'
           $quotedLogPath = '"' + $logPath + '"'
@@ -916,24 +1133,29 @@ jobs:
           }
 
   macos-deep-link-smoke:
-    name: macOS deep-link installer smoke
+    name: macOS ${{ matrix.arch }} deep-link installer smoke
     if: >-
       ${{
         always() &&
+        needs.release-plan.result == 'success' &&
         (
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.native_target != 'macos-x64') ||
+          (github.event_name == 'workflow_dispatch' &&
+            (github.event.inputs.native_target == 'all' || startsWith(github.event.inputs.native_target, 'macos-'))) ||
           (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
         ) &&
         needs.build.result == 'success' &&
         needs.notarize-macos.result == 'success'
       }}
-    needs: [build, notarize-macos]
-    runs-on: macos-15
+    needs: [build, notarize-macos, release-plan]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-plan.outputs.macos_notarization) }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
         with:
-          name: deepseek-harness-desktop-macos-arm64
+          name: ${{ matrix.artifact }}
           path: artifacts
 
       - name: Mount and copy app
@@ -1073,12 +1295,25 @@ jobs:
           files: artifacts/**/*
 
       # The updater manifest needs the ABSOLUTE asset URLs that only exist
-      # after the release is created; fail-closed if a platform has no
-      # artifact+sig pair. macOS is intentionally absent while unsigned.
+      # after the release is created; fail-closed if an exact NSIS
+      # architecture has no artifact+sig pair. Generic Windows targets are
+      # forbidden: they would let an MSI install consume an NSIS update.
+      # macOS is intentionally absent until updater artifacts are notarized.
       - name: Publish updater manifest (latest.json)
-        run: node scripts/updater-manifest.ts --tag "$RELEASE_TAG" --platforms windows-x86_64
+        run: node scripts/updater-manifest.ts --tag "$RELEASE_TAG" --platforms windows-x86_64-nsis,windows-aarch64-nsis
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           # gh CLI does NOT auto-authenticate from the ambient GITHUB_TOKEN;
           # it needs GH_TOKEN explicitly (the job's contents: write applies).
+          GH_TOKEN: ${{ github.token }}
+
+      # Keep the release private until every public artifact, including the
+      # updater manifest, has passed its exact pairing and signature checks.
+      # A draft is invisible to /releases/latest/download/latest.json, so
+      # leaving this step out would make successfully built NSIS clients see
+      # a stale manifest forever.
+      - name: Publish reviewed GitHub Release
+        run: gh release edit "$RELEASE_TAG" --draft=false
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}

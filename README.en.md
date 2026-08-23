@@ -9,7 +9,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Version | v0.2.13 · Windows x64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
+| Current version | v0.2.14 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
@@ -18,7 +18,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 
 | Platform | GitHub Release packages |
 |---|---|
-| Windows x64 | NSIS `*-setup.exe`, WiX `.msi` |
+| Windows (from the next release) | Native x64 and ARM64: multilingual NSIS `*-setup.exe`, WiX `.msi` |
 | macOS | arm64 and x64 `.dmg` |
 | Linux | x64 and arm64 `.AppImage`, `.deb`, `.rpm`, `.flatpak` |
 
@@ -26,16 +26,23 @@ Every public installer has a same-name `.sha256` sidecar. The x64/arm64
 Microsoft Store MSIX packages remain separate, unsigned Partner Center
 workflow artifacts. They are Store-signing inputs, not public sideload files.
 
+An MSI filename ending in `_en-US` or `_zh-CN` describes the **installer UI
+language only**, not the Desktop controller's available languages: both
+packages include Simplified Chinese and English in the controller. NSIS ships
+one installer containing both language resources and can follow the system or
+offer an explicit choice. The release workflow verifies each native MSI's
+actual `ProductLanguage`, so the suffix is never merely cosmetic.
+
 ## Features
 
 | | |
 |---|---|
 | 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app marketplace search/install; safe preset import/export |
-| 🔄 **Auto-updater** (Windows) | Update packages verified by an embedded minisign pubkey; macOS updater-manifest integration remains pending |
+| 🔄 **Auto-updater** (next release: Windows NSIS) | x64 and ARM64 payloads are separately verified by an embedded minisign pubkey; MSI, Store, macOS and Linux retain their own safe update paths |
 | 💓 **Hung-process self-healing** | Heartbeat detects an unresponsive Harness and restarts it (backoff + cap) |
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |
 | 🔒 **Privacy defaults** | Session telemetry OFF; child env sanitized (NODE_OPTIONS, loader injection keys, …) |
-| 🧰 **Diagnostics & feedback** | One-click diagnostics zip (best-effort redaction), copy diagnostics, prefilled issue reports |
+| 🧰 **Diagnostics & feedback** | One-click diagnostics zip (best-effort redaction), copy diagnostics, prefilled issue reports; an explicit detailed mode keeps bounded local stderr/Desktop-error evidence for a reproduction only |
 | 🪟 **Desktop UX** | Single instance, window-state memory, crash auto-restart, macOS close-to-tray; the tray exposes Controller/Harness, start/restart, and stop only when the live Harness state permits it; controller, tray, and macOS menu language can follow the system or be set to Simplified Chinese / English, with synchronized window titles while the product name remains DSH Desktop |
 
 ## ✨ Plugin ecosystem
@@ -69,6 +76,27 @@ $env:DSH_HOME="<dshHome from the diagnostics page>"; node "<install-dir>\runtime
 
 Plugins land in `<dshHome>/profiles/web/` (user data, never the install
 directory); hit "Restart Harness" in the app to activate.
+
+After an interrupted upgrade or a manual package deletion, the controller
+also performs a read-only Web-profile drift check: a `package.json`
+declaration whose direct package entry is absent. It never rewrites user
+configuration automatically. Only a demonstrably simple, configuration-free
+`cordis.patch.yml` entry for an **inactive** package is offered in an itemized
+preview and requires a second confirmation before removal; enabled bundles,
+links, complex YAML, and uncertain states are reported for manual/Harness
+repair only.
+
+### Detailed diagnostics (opt-in)
+
+The controller normally persists only bounded lifecycle facts. If a problem
+needs a fuller error trace, enable **Detailed diagnostics**, restart Harness,
+and reproduce it. While enabled, Desktop records only bounded, best-effort
+redacted **stderr** from Harness/plugin operations plus Desktop-owned errors;
+it does not record Harness stdout, sessions, prompts, workspace files, or
+upload anything. The record is included only when you explicitly export a
+diagnostics zip. Disable it when finished and use **Clear detailed logs** once
+the exported archive is no longer needed; stderr can still contain private
+information, so inspect every file before sharing.
 
 **Presets** (`.dshpreset`): a set of plugin rows packaged as a shareable agent
 configuration. The settings page offers safe import/export/delete —
@@ -132,7 +160,7 @@ pnpm tauri dev                                    # desktop dev mode
 | Rust | `cargo nextest` (sidecar and Tauri, also run on a Windows host) · llvm-cov ≥50%/55% · `clippy -D warnings` |
 | Supply chain | `cargo deny` · `cargo vet --locked` (70 full + 2 delta + exemptions) · `npm audit`/`pnpm audit` block high |
 | Security scan | CodeQL (rust/js-ts/actions) · Dependency Review (lockfile fallback when Graph is unavailable) |
-| Bundles | one `verify-bundle` contract across 7 public formats + fail-closed Windows/macOS signing checks + per-package SHA-256 |
+| Bundles | one `verify-bundle` contract across 7 public formats / 16 public installers + fail-closed Windows/macOS signing checks + per-package SHA-256 |
 | Release | 5-minute load soak · updater artifacts + `latest.json` |
 
 ### Layout
@@ -147,20 +175,28 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
 ## Release & versioning
 
 - CI: pushes/PRs run quality gates + three-platform smoke; a `v*` tag builds
-  five native targets (Windows x64, macOS x64/arm64, Linux x64/arm64) plus
-  Store MSIX x64/arm64, then gates the complete inventory before creating the
-  draft release and `latest.json`.
+  six **native** targets (Windows x64/ARM64, macOS x64/arm64, Linux x64/arm64)
+  plus Store MSIX x64/arm64, then gates the complete inventory before creating
+  a draft release, generating and validating `latest.json`, and only then
+  publishing the release. Every lane checks the Node/Rust host
+  triple and payload architecture; Windows on ARM also runs an x64
+  compatibility-install smoke without calling that build native.
 - Microsoft Store: `v*` tags also build x64/arm64 MSIX packages
   (`build-msix` job; Store mode disables in-app updates and restricts plugins
   to the cordis.run reviewed list). MSIX artifacts are workflow artifacts for
   Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Current release: v0.2.13, including multi-format installers, macOS
+- Current release: v0.2.14, including six native build targets, Windows
+  x64/ARM64 installers and English/Simplified-Chinese MSI packages, macOS
   Developer ID signing/notarization, the Cordis v4 marketplace contract,
-  diagnostic resilience, and safe plugin recovery.
+  diagnostic resilience, and safe plugin recovery. The historical v0.2.13
+  `_en-US` suffix means only that its installer UI was English.
 - Known limits: Windows GitHub installers do not yet have Authenticode and may
-  trigger SmartScreen; the macOS updater manifest is not yet published; Linux
-  packages have SHA-256 sidecars but no separate package-repository signature.
+  trigger SmartScreen; in-app updating accepts only a payload exactly matching
+  the current CPU architecture and NSIS installer family (MSI never switches
+  itself to NSIS); macOS still needs a post-notarization updater archive plus
+  a native upgrade smoke; Linux packages have SHA-256 sidecars but no separate
+  package-repository signature.
 - License: MIT; the bundled Harness and every dependency license ship in
   `runtime/harness/licenses/`.
