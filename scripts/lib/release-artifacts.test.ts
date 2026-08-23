@@ -187,6 +187,15 @@ test("Windows installer smoke searches the preserved artifact tree exactly", () 
     new RegExp(accidentalDoubleEscape.slice(1, -1), "i").test(registeredCommand),
     false,
   );
+  // `Split-Path -LiteralPath ... -Parent` is not a valid PowerShell parameter
+  // set. The native path API preserves literal handling while accepting a
+  // fully-qualified executable path from the validated protocol registration.
+  assert.equal(workflow.includes("[System.IO.Path]::GetDirectoryName($desktopExe)"), true);
+  assert.equal(workflow.includes("Split-Path -LiteralPath $desktopExe -Parent"), false);
+  assert.match(
+    workflow,
+    /registered desktop executable has no parent directory: \$desktopExe/,
+  );
   assert.match(workflow, /\$_.Name\.EndsWith\("_\$locale\.msi", \[System\.StringComparison\]::Ordinal\)/);
   assert.match(workflow, /MSI ProductLanguage \$productLanguage does not match \$locale/);
   assert.match(workflow, /\$quotedInstaller = '\"' \+ \$installer\.FullName \+ '\"'/);

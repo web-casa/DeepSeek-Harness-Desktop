@@ -907,7 +907,13 @@ jobs:
             throw "registered desktop executable disappeared after NSIS reinstall: $desktopExe"
           }
 
-          $installRoot = Split-Path -LiteralPath $desktopExe -Parent
+          # Split-Path cannot combine -LiteralPath with -Parent in PowerShell's
+          # parameter sets. Use the .NET path API so a registered executable
+          # containing wildcard characters is still treated literally.
+          $installRoot = [System.IO.Path]::GetDirectoryName($desktopExe)
+          if ([string]::IsNullOrWhiteSpace($installRoot)) {
+            throw "registered desktop executable has no parent directory: $desktopExe"
+          }
           $runtime = Join-Path $installRoot 'runtime'
           $sidecar = Join-Path $runtime 'sidecar.exe'
           $node = Join-Path $runtime 'node.exe'
