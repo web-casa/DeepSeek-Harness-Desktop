@@ -3,6 +3,10 @@
 把官方 DeepSeek Harness 打包成 Windows / macOS / Linux 原生应用，让 Harness 及其**插件生态**开箱即用。
 不是 fork：Harness 原样随包携带，桌面层只负责生命周期与安全边界。
 
+<p align="center">
+  <img src="docs/screenshots/controller-zh-CN.png" alt="DSH Desktop 简体中文控制器与 Harness 窗口" width="960">
+</p>
+
 | 仓库 | [web-casa/DeepSeek-Harness-Desktop](https://github.com/web-casa/DeepSeek-Harness-Desktop) |
 | 下载 | [Releases](https://github.com/web-casa/DeepSeek-Harness-Desktop/releases) |
 | 官网 | [dsharness.app](https://dsharness.app) |
@@ -13,6 +17,11 @@
 > **macOS 用户**：v0.2.9 起，DMG 使用 Developer ID Application 签名并经
 > Apple 公证、staple 与 Gatekeeper 复验。请只从本仓库 Releases 下载；若官方
 > 安装包仍被 Gatekeeper 拦截，请保留诊断信息并通过仓库 issue 报告。
+
+> **Windows 用户**：首次运行前请安装与安装包架构匹配的最新受支持
+> [Microsoft Visual C++ Redistributable (v14)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version)。
+> 未安装或版本过旧可能导致启动报错，例如缺少 `VCRUNTIME140*.dll` 或
+> `MSVCP140*.dll`；请只从 Microsoft 官方页面下载。
 
 | 平台 | GitHub Release 安装包 |
 |---|---|
