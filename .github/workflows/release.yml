@@ -893,7 +893,7 @@ jobs:
             $command = (Get-ItemProperty $_).'(default)'
             $match = [regex]::Match(
               $command,
-              '^"([^"]+\\.exe)"\s+"%1"$',
+              '^"([^"]+\.exe)"\s+"%1"$',
               [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
             )
             if (-not $match.Success) { throw "invalid NSIS protocol command: $command" }

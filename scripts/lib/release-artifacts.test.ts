@@ -168,6 +168,25 @@ test("Windows installer smoke searches the preserved artifact tree exactly", () 
   );
   assert.match(workflow, /In-place NSIS reinstall and installed Harness smoke/);
   assert.match(workflow, /installed Harness never became ready/);
+  // PowerShell single-quoted strings do not consume backslashes. The pattern
+  // must escape the dot once, not twice (which looks for a literal backslash
+  // before an arbitrary character). Exercise the
+  // exact registration format emitted by the NSIS installer so every native
+  // deep-link smoke cannot regress into a false failure.
+  const nsisProtocolPattern = String.raw`'^"([^"]+\.exe)"\s+"%1"$'`;
+  const accidentalDoubleEscape = String.raw`'^"([^"]+\\.exe)"\s+"%1"$'`;
+  assert.equal(workflow.includes(nsisProtocolPattern), true);
+  assert.equal(workflow.includes(accidentalDoubleEscape), false);
+  const registeredCommand =
+    '"C:\\Users\\runneradmin\\AppData\\Local\\DSH Desktop\\deepseek-harness-desktop.exe" "%1"';
+  assert.equal(
+    new RegExp(nsisProtocolPattern.slice(1, -1), "i").test(registeredCommand),
+    true,
+  );
+  assert.equal(
+    new RegExp(accidentalDoubleEscape.slice(1, -1), "i").test(registeredCommand),
+    false,
+  );
   assert.match(workflow, /\$_.Name\.EndsWith\("_\$locale\.msi", \[System\.StringComparison\]::Ordinal\)/);
   assert.match(workflow, /MSI ProductLanguage \$productLanguage does not match \$locale/);
   assert.match(workflow, /\$quotedInstaller = '\"' \+ \$installer\.FullName \+ '\"'/);
