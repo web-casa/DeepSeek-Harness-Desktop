@@ -14,7 +14,12 @@
     ProcessorArchitecture="{{ARCH}}" />
 
   <Properties>
-    <DisplayName>{{DISPLAY_NAME}}</DisplayName>
+    <!--
+      Partner Center reserved this exact Store-facing title. Keep it separate
+      from Tauri's cross-platform productName ("DSH Desktop"), so direct
+      installers retain their established product identity and upgrade path.
+    -->
+    <DisplayName>DSH Desktop (Community)</DisplayName>
     <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -34,7 +39,7 @@
       Executable="{{EXECUTABLE}}"
       EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="{{DISPLAY_NAME}}"
+        DisplayName="DSH Desktop (Community)"
         Description="{{DESCRIPTION}}"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"

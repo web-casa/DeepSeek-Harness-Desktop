@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { normalizeMsixEntryName, windowsPeArchitecture } from "./msix.ts";
+import { repoRoot } from "./common.ts";
 
 function peHeader(machine: number): Buffer {
   const header = Buffer.alloc(0x90);
@@ -36,4 +39,15 @@ test("reads only reviewed x64 and arm64 PE machine headers", () => {
   const malformedOffset = peHeader(0x8664);
   malformedOffset.writeUInt32LE(0x200, 0x3c);
   assert.throws(() => windowsPeArchitecture(malformedOffset), /outside the captured/);
+});
+
+test("Store manifest uses the reserved title without renaming direct distributions", () => {
+  const tauriConfig = JSON.parse(readFileSync(join(repoRoot, "src-tauri/tauri.conf.json"), "utf8")) as {
+    productName?: unknown;
+  };
+  const manifest = readFileSync(join(repoRoot, "src-tauri/gen/windows/AppxManifest.xml.template"), "utf8");
+
+  assert.equal(tauriConfig.productName, "DSH Desktop");
+  assert.match(manifest, /<DisplayName>DSH Desktop \(Community\)<\/DisplayName>/);
+  assert.match(manifest, /<uap:VisualElements\s+DisplayName="DSH Desktop \(Community\)"/);
 });

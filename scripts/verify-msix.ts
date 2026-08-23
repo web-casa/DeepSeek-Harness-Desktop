@@ -3,7 +3,7 @@
 //
 // Checks:
 //   * x64 and arm64 .msix packages exist
-//   * package identity matches the reserved Partner Center identity
+//   * package identity and Store-facing display name match Partner Center
 //   * the main executable and complete staged runtime are inside the package
 //   * the dsharness:// protocol and runFullTrust capability are declared
 //   * the Store input is intentionally unsigned and architecture-bound
@@ -18,6 +18,10 @@ import { normalizeMsixEntryName, windowsPeArchitecture } from "./lib/msix.ts";
 
 const PACKAGE_NAME = "53660AlanM.DSHDesktopCommunity";
 const PUBLISHER = "CN=84AC3716-04E0-4D67-8951-0D3E51674CA0";
+// This is the Partner Center-reserved Store title. It intentionally differs
+// from the cross-platform Tauri product name, which must stay "DSH Desktop"
+// to preserve direct-installer identity and upgrade paths.
+const STORE_DISPLAY_NAME = "DSH Desktop (Community)";
 const PROTOCOL = "dsharness";
 
 const archIdx = process.argv.indexOf("--arch");
@@ -146,6 +150,12 @@ for (const target of targets) {
   if (!manifest.includes(`ProcessorArchitecture="${target.arch}"`)) {
     fail(`${msix} manifest architecture is not ${target.arch}`);
   }
+  if (!manifest.includes(`<DisplayName>${STORE_DISPLAY_NAME}</DisplayName>`)) {
+    fail(`${msix} manifest Properties/DisplayName is not the reserved Store title`);
+  }
+  if (!manifest.includes(`DisplayName="${STORE_DISPLAY_NAME}"`)) {
+    fail(`${msix} manifest VisualElements DisplayName is not the reserved Store title`);
+  }
   if (!manifest.includes(`Name="${PROTOCOL}"`) || !manifest.includes("windows.protocol")) {
     fail(`${msix} manifest is missing the ${PROTOCOL}:// protocol extension`);
   }
@@ -178,11 +188,12 @@ for (const target of targets) {
       fail(`${msix} ${path} is ${actualArchitecture}, expected ${target.arch}`);
     }
   }
-  ok(`${msix} verified (${names.size} entries, identity/arch/protocol OK, unsigned Store input)`);
+  ok(`${msix} verified (${names.size} entries, identity/display-name/arch/protocol OK, unsigned Store input)`);
 }
 
 if (process.argv.includes("--self-test")) {
   if (PACKAGE_NAME !== "53660AlanM.DSHDesktopCommunity") fail("self-test: package name changed");
+  if (STORE_DISPLAY_NAME !== "DSH Desktop (Community)") fail("self-test: Store display name changed");
   ok("self-test: verify-msix constants");
   process.exit(0);
 }

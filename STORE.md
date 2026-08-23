@@ -9,6 +9,7 @@ committed in `src-tauri/gen/windows/`; do not edit them in Partner Center.
 |---|---|
 | Product type | MSIX or PWA App |
 | Product name | `DSH Desktop (Community)` |
+| MSIX `Properties/DisplayName` | `DSH Desktop (Community)` (exact reserved Store title) |
 | Package Identity Name | `53660AlanM.DSHDesktopCommunity` |
 | Package Identity Publisher | `CN=84AC3716-04E0-4D67-8951-0D3E51674CA0` |
 | PublisherDisplayName | `AlanM.` |
@@ -104,7 +105,10 @@ Microsoft Store 版通过 Microsoft Store 更新；插件安装仅允许 cordis.
 3. Download artifacts:
    - `dsh-desktop-store-msix-x64`
    - `dsh-desktop-store-msix-arm64`
-4. Extract and upload the two `.msix` packages on the Packages page.
+4. Extract and upload the two `.msix` packages on the Packages page. The
+   validated manifest must show `DSH Desktop (Community)` as
+   `Properties/DisplayName`; this is intentionally separate from the direct
+   distribution product name `DSH Desktop`.
 5. Do **not** upload the MSIX files to GitHub Releases; they are Store-only.
 
 ## Post-publish updates
