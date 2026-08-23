@@ -1,8 +1,9 @@
 # RELEASING.md — 发布手册
 
 发布流程全自动：在 `main` 上打 `v*` tag 即触发完整流水线（质量门 → 六个原生目标
-构建 → 内容/签名验证 → draft release → `latest.json` 验证 → Publish）。草稿在
-全部公开资产与更新清单通过精确校验后才会自动公开；中途失败会保留为未公开草稿。
+构建 → 内容/签名验证 → draft release → 远端 SHA-256 sidecar 审计 → `latest.json`
+验证 → Publish）。草稿在全部公开资产、GitHub 实际资产名/摘要与更新清单通过精确
+校验后才会自动公开；中途失败会保留为未公开草稿。
 人工职责是版本对齐、打 tag，并在发布后抽查公开资产。
 
 ## 1. 版本对齐（发布前本地完成）
@@ -62,8 +63,9 @@ git push origin v0.2.1
 6. `release`：tag 绑定 preflight（`--expect-tag`）→ 只下载
    `deepseek-harness-desktop-*` 公开制品 → 校验 16 个安装包、16 个 checksum、
    2 个 Windows NSIS updater signature 且没有 MSIX/未知文件 → 创建 **draft** GitHub
-   Release → 上传并校验 `latest.json` → 自动 Publish。若最后两步失败，草稿保持
-   不公开，绝不会让客户端读取半成品更新清单。
+Release → 通过 GitHub API 逐一核对上传后资产名、服务端 SHA-256 与 sidecar 内容
+→ 上传并校验 `latest.json` → 自动 Publish。若最后三步失败，草稿保持不公开，绝不会
+让客户端读取半成品更新清单。
 
 发布矩阵只使用 GitHub 标准 hosted runner：`windows-latest` / `windows-11-arm`、
 `macos-15-intel` / `macos-15`、`ubuntu-22.04` / `ubuntu-22.04-arm`。公开仓库的
@@ -143,7 +145,9 @@ Desktop 工作区直接改为公开发布。
    只表示安装向导语言，不是控制器语言限制；NSIS 是一个内含中英文资源的安装器。
    macOS 两个 job 会在本地强制检查各自 `.app.tar.gz.sig` 已生成，但在 updater
    尚未启用期间不上传这些同名、无对应公开更新包的 build-only tripwire。
-2. 抽查 checksum：`shasum -a 256 <下载文件>` 对照 `.sha256` 内容。
+2. 抽查 checksum：从同一 Release 下载安装包和其 `.sha256` 后执行
+   `sha256sum -c <文件>.sha256`（macOS 可用 `shasum -a 256 <下载文件>` 对照
+   sidecar 内容）。
 3. 手动下载安装验证（未签名构建：确认 SmartScreen/Gatekeeper 放行路径可走通）。
 4. 点 **Publish release**。
 5. 记录下载基线：`node scripts/release-stats.ts`（公开下载计数是本项目

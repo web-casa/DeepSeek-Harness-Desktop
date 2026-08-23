@@ -137,6 +137,19 @@ test("in-app updates publish only exact NSIS architecture targets", () => {
   assert.doesNotMatch(workflow, /--platforms windows-x86_64(?:\s|$)/);
 });
 
+test("the draft release is checksum-audited against GitHub's uploaded asset identities", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const publish = workflow.indexOf("      - name: Publish release");
+  const audit = workflow.indexOf("      - name: Audit draft Release SHA-256 sidecars");
+  const updater = workflow.indexOf("      - name: Publish updater manifest (latest.json)");
+  assert.ok(publish >= 0 && audit > publish && updater > audit);
+  assert.match(workflow, /node scripts\/verify-release-checksums\.ts --tag "\$RELEASE_TAG"/);
+  assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/);
+});
+
 test("both reusable quality jobs checkout the requested release revision", () => {
   const workflow = readFileSync(
     new URL("../../.github/workflows/quality.yml", import.meta.url),

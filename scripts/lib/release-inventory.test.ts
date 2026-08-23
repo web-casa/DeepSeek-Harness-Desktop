@@ -5,6 +5,7 @@ import {
   expectedPublicBundleCounts,
   expectedMsiInstallerLocaleCounts,
   msiLocaleInventoryProblems,
+  publicInstallerInventoryProblems,
   expectedUpdaterSignatureCount,
 } from "./release-inventory.ts";
 
@@ -58,4 +59,29 @@ test("release inventory rejects a cosmetic or imbalanced MSI language suffix", (
       "release inventory MSI zh-CN count 1 != expected 2",
     ],
   );
+});
+
+test("public installer inventory rejects an incomplete remote release matrix", () => {
+  const complete = [
+    "DSH.Desktop_0.2.15_x64-setup.exe",
+    "DSH.Desktop_0.2.15_arm64-setup.exe",
+    "DSH.Desktop_0.2.15_x64_en-US.msi",
+    "DSH.Desktop_0.2.15_x64_zh-CN.msi",
+    "DSH.Desktop_0.2.15_arm64_en-US.msi",
+    "DSH.Desktop_0.2.15_arm64_zh-CN.msi",
+    "DSH.Desktop_0.2.15_x64.dmg",
+    "DSH.Desktop_0.2.15_aarch64.dmg",
+    "DSH.Desktop_0.2.15_amd64.AppImage",
+    "DSH.Desktop_0.2.15_aarch64.AppImage",
+    "DSH.Desktop_0.2.15_amd64.deb",
+    "DSH.Desktop_0.2.15_arm64.deb",
+    "DSH.Desktop-0.2.15-1.x86_64.rpm",
+    "DSH.Desktop-0.2.15-1.aarch64.rpm",
+    "DSH.Desktop_0.2.15_x86_64.flatpak",
+    "DSH.Desktop_0.2.15_aarch64.flatpak",
+  ];
+  assert.deepEqual(publicInstallerInventoryProblems(complete), []);
+  assert.deepEqual(publicInstallerInventoryProblems(complete.slice(0, -1)), [
+    "release inventory flatpak count 1 != expected 2",
+  ]);
 });

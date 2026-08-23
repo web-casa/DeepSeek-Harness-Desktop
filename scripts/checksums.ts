@@ -14,6 +14,7 @@ import {
   isWindowsWixInstallerLocale,
   type WindowsWixInstallerLocale,
 } from "./lib/windows-installer-locales.ts";
+import { sha256SidecarContent } from "./lib/release-checksums.ts";
 
 const bundleArg = process.argv.indexOf("--bundle");
 const bundleType = bundleArg >= 0 ? process.argv[bundleArg + 1] : undefined;
@@ -50,6 +51,6 @@ for await (const chunk of stream) {
 }
 const digest = hash.digest("hex");
 const out = `${artifact}.sha256`;
-writeFileSync(out, `${digest}  ${basename(artifact)}\n`);
+writeFileSync(out, sha256SidecarContent(digest, basename(artifact)));
 ok(`${basename(artifact)} sha256 → ${digest}`);
 ok(`written ${out}`);
