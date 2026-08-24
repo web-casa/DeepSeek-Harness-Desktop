@@ -1,6 +1,6 @@
 name: dsh-desktop-community
 base: core24
-version: "0.2.16"
+version: "0.2.17"
 title: DSH Desktop (Community)
 summary: Community desktop packaging of DeepSeek Harness
 description: |
@@ -87,6 +87,7 @@ apps:
     plugs:
       - network
       - network-bind
+      - network-status
       - desktop
       - desktop-legacy
       - gsettings

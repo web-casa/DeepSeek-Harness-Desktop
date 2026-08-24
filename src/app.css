@@ -1,4 +1,8 @@
 :root {
+  /* The controller is intentionally dark. Tell native WebKitGTK form
+   * controls too; otherwise a light GTK select surface can combine with our
+   * light text token and make its selected value unreadable. */
+  color-scheme: dark;
   --bg: #0d1117;
   --panel: #141a23;
   --panel-2: #1a212d;
@@ -15,6 +19,20 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* WebKitGTK renders select popovers through native controls. Keep their
+ * color-scheme and fallback option colors aligned with the controller rather
+ * than relying on CSS inheritance that varies by Linux desktop theme. */
+select {
+  color-scheme: dark;
+  color: var(--text);
+  background-color: var(--panel-2);
+}
+
+select option {
+  color: var(--text);
+  background-color: var(--panel-2);
 }
 
 html,

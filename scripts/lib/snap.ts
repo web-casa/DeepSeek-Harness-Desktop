@@ -25,9 +25,17 @@ export const SNAP_COMMAND_CHAIN = [
   "snap/command-chain/gpu-2404-wrapper",
   "snap/command-chain/desktop-launch",
 ] as const;
+// `GTK_USE_PORTAL=1` is intentional: it keeps file pickers and URI opening
+// inside the host's reviewed XDG portal boundary. WebKitGTK/GLib also asks
+// the NetworkMonitor portal for connectivity/proxy state; Snap gates that
+// read-only request behind `network-status`, separately from network I/O.
+// Keep this minimum explicit so a future packaging cleanup cannot reintroduce
+// a white/error-only Harness window under strict confinement.
+export const SNAP_PORTAL_REQUIRED_APP_PLUGS = ["desktop", "network-status"] as const;
 export const SNAP_APP_PLUGS = [
   "network",
   "network-bind",
+  "network-status",
   "desktop",
   "desktop-legacy",
   "gsettings",
@@ -378,6 +386,11 @@ export function snapDefinitionProblems(input: SnapDefinitionInput): string[] {
   }
   if (/^\s*-\s*(?:home|removable-media)\s*$/m.test(recipe)) {
     problems.push("snap recipe must not request home or removable-media access");
+  }
+  for (const plug of SNAP_PORTAL_REQUIRED_APP_PLUGS) {
+    if (!hasExactLine(recipe, `      - ${plug}`)) {
+      problems.push(`snap recipe must enable ${plug} for the GTK/XDG portal runtime`);
+    }
   }
 
   if (/^\s*extensions:/m.test(recipe)) {

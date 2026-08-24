@@ -9,7 +9,7 @@ import {
 
 const metadata = `name: dsh-desktop-community
 title: DSH Desktop (Community)
-version: 0.2.16
+version: 0.2.17
 summary: DSH Desktop
 base: core24
 grade: stable
@@ -26,6 +26,7 @@ apps:
     plugs:
     - network
     - network-bind
+    - network-status
     - desktop
     - desktop-legacy
     - gsettings
@@ -69,42 +70,48 @@ environment:
 `;
 
 test("Snap metadata requires the reviewed strict native contract", () => {
-  assert.equal(snapArtifactName("0.2.16", "arm64"), "dsh-desktop-community_0.2.16_arm64.snap");
-  assert.deepEqual(snapMetadataProblems(metadata, { version: "0.2.16", architecture: "arm64" }), []);
+  assert.equal(snapArtifactName("0.2.17", "arm64"), "dsh-desktop-community_0.2.17_arm64.snap");
+  assert.deepEqual(snapMetadataProblems(metadata, { version: "0.2.17", architecture: "arm64" }), []);
   assert.ok(
     snapMetadataProblems(metadata.replace("confinement: strict", "confinement: classic"), {
-      version: "0.2.16",
+      version: "0.2.17",
       architecture: "arm64",
     }).some((problem) => problem.includes("classic")),
   );
   assert.ok(
     snapMetadataProblems(metadata.replace("- arm64", "- home"), {
-      version: "0.2.16",
+      version: "0.2.17",
       architecture: "arm64",
     }).some((problem) => problem.includes("forbidden")),
   );
   assert.ok(
     snapMetadataProblems(metadata.replace("gpu-2404-wrapper", "unexpected-wrapper"), {
-      version: "0.2.16",
+      version: "0.2.17",
       architecture: "arm64",
     }).some((problem) => problem.includes("command chain")),
   );
   assert.ok(
     snapMetadataProblems(metadata.replace("- command-chain\n", ""), {
-      version: "0.2.16",
+      version: "0.2.17",
       architecture: "arm64",
     }).some((problem) => problem.includes("assumes")),
   );
   assert.ok(
+    snapMetadataProblems(metadata.replace("    - network-status\n", ""), {
+      version: "0.2.17",
+      architecture: "arm64",
+    }).some((problem) => problem.includes("network-status for the GTK/XDG portal runtime")),
+  );
+  assert.ok(
     snapMetadataProblems(
       metadata.replaceAll("aarch64-linux-gnu", "x86_64-linux-gnu"),
-      { version: "0.2.16", architecture: "arm64" },
+      { version: "0.2.17", architecture: "arm64" },
     ).some((problem) => problem.includes("WebKit layout")),
   );
   const amd64Metadata = metadata
     .replace("- arm64", "- amd64")
     .replaceAll("aarch64-linux-gnu", "x86_64-linux-gnu");
-  assert.deepEqual(snapMetadataProblems(amd64Metadata, { version: "0.2.16", architecture: "amd64" }), []);
+  assert.deepEqual(snapMetadataProblems(amd64Metadata, { version: "0.2.17", architecture: "amd64" }), []);
 });
 
 test("Snap provenance binds architecture, version, hash, and source commit", () => {
@@ -112,7 +119,7 @@ test("Snap provenance binds architecture, version, hash, and source commit", () 
   const provenance = {
     schema: SNAP_PROVENANCE_SCHEMA,
     name: "dsh-desktop-community",
-    version: "0.2.16",
+    version: "0.2.17",
     arch: "arm64",
     snapArchitecture: "arm64",
     sourceCommit: "b".repeat(40),
@@ -122,7 +129,7 @@ test("Snap provenance binds architecture, version, hash, and source commit", () 
   };
   assert.deepEqual(
     snapProvenanceProblems(provenance, {
-      version: "0.2.16",
+      version: "0.2.17",
       arch: "arm64",
       snapArchitecture: "arm64",
       snapSha256: digest,
@@ -134,7 +141,7 @@ test("Snap provenance binds architecture, version, hash, and source commit", () 
     snapProvenanceProblems(
       { ...provenance, snap: { sha256: "d".repeat(64) } },
       {
-        version: "0.2.16",
+        version: "0.2.17",
         arch: "arm64",
         snapArchitecture: "arm64",
         snapSha256: digest,
