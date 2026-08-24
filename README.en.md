@@ -12,7 +12,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Downloads | [Releases](https://github.com/web-casa/DeepSeek-Harness-Desktop/releases) |
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
-| Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
+| Docs | [Changelog](CHANGELOG.md) · [中文更新日志](CHANGELOG.zh-CN.md) · [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
 | Current version | v0.2.18 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · [now on the Snap Store](https://snapcraft.io/dsh-desktop-community) · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
