@@ -26,6 +26,7 @@ apps:
     plugs:
     - network
     - network-bind
+    - network-status
     - desktop
     - desktop-legacy
     - gsettings
@@ -94,6 +95,12 @@ test("Snap metadata requires the reviewed strict native contract", () => {
       version: "0.2.16",
       architecture: "arm64",
     }).some((problem) => problem.includes("assumes")),
+  );
+  assert.ok(
+    snapMetadataProblems(metadata.replace("    - network-status\n", ""), {
+      version: "0.2.16",
+      architecture: "arm64",
+    }).some((problem) => problem.includes("network-status for the GTK/XDG portal runtime")),
   );
   assert.ok(
     snapMetadataProblems(

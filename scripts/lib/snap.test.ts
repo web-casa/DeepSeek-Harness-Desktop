@@ -12,6 +12,8 @@ import {
   SNAP_ICON,
   SNAP_LAUNCHER,
   SNAP_NAME,
+  SNAP_APP_PLUGS,
+  SNAP_PORTAL_REQUIRED_APP_PLUGS,
   SNAP_TITLE,
   SNAP_RELEASE_TARGETS,
   githubSnapMatrix,
@@ -107,12 +109,35 @@ test("Snap definition rejects weakened confinement, broad filesystem access, and
       expectedVersion: "0.2.16",
     }).some((problem) => problem.includes("must not download mutable")),
   );
+  assert.ok(
+    snapDefinitionProblems({
+      recipe: recipe.replace("      - network-status\n", ""),
+      launcher,
+      desktopEntry,
+      gpuWrapper,
+      desktopLauncher,
+      commandChainRunner,
+      expectedVersion: "0.2.16",
+    }).some((problem) => problem.includes("network-status for the GTK/XDG portal runtime")),
+  );
 });
 
 test("Snap matrix is exactly native amd64 and arm64", () => {
   assert.equal(SNAP_NAME, "dsh-desktop-community");
   assert.equal(SNAP_TITLE, "DSH Desktop (Community)");
   assert.equal(SNAP_ICON, "snap/gui/dsh-desktop-community.png");
+  assert.deepEqual(SNAP_PORTAL_REQUIRED_APP_PLUGS, ["desktop", "network-status"]);
+  assert.deepEqual(SNAP_APP_PLUGS, [
+    "network",
+    "network-bind",
+    "network-status",
+    "desktop",
+    "desktop-legacy",
+    "gsettings",
+    "opengl",
+    "wayland",
+    "x11",
+  ]);
   assert.deepEqual(SNAPCRAFT_REVISIONS, { amd64: "18514", arm64: "18519" });
   assert.deepEqual(SNAP_SOURCE_ASSUMES, ["snapd2.43", "common-data-dir"]);
   assert.deepEqual(SNAP_ASSUMES, ["snapd2.43", "common-data-dir", "command-chain"]);

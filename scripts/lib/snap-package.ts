@@ -10,6 +10,7 @@ import {
   SNAP_COMMAND_CHAIN,
   SNAP_DECLARED_PLUGS,
   SNAP_NAME,
+  SNAP_PORTAL_REQUIRED_APP_PLUGS,
   SNAP_TITLE,
   type SnapArchitecture,
 } from "./snap.ts";
@@ -155,6 +156,11 @@ export function snapMetadataProblems(
     const appPlugs = listField(app, "plugs");
     if (appPlugs.join(",") !== SNAP_APP_PLUGS.join(",")) {
       problems.push(`Snap metadata app plugs must be ${SNAP_APP_PLUGS.join(",")}`);
+    }
+    for (const plug of SNAP_PORTAL_REQUIRED_APP_PLUGS) {
+      if (!appPlugs.includes(plug)) {
+        problems.push(`Snap metadata must enable ${plug} for the GTK/XDG portal runtime`);
+      }
     }
   }
 

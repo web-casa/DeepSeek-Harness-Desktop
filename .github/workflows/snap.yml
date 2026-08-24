@@ -164,6 +164,11 @@ jobs:
           sudo snap connect "$instance:icon-themes" gtk-common-themes:icon-themes
           sudo snap connect "$instance:sound-themes" gtk-common-themes:sound-themes
           sudo snap connect "$instance:gnome-46-2404" gnome-46-2404:gnome-46-2404
+          # `network-status` must auto-connect: WebKitGTK/GLib uses the
+          # NetworkMonitor portal for connectivity/proxy state when
+          # GTK_USE_PORTAL=1. A missing connection otherwise leaves the
+          # embedded Harness window displaying a portal denial.
+          assert_connection network-status :network-status
           assert_connection gpu-2404 mesa-2404:gpu-2404
           assert_connection gtk-3-themes gtk-common-themes:gtk-3-themes
           assert_connection icon-themes gtk-common-themes:icon-themes
@@ -288,6 +293,9 @@ jobs:
               exit 1
             fi
           }
+          # Check the Store-installed package too; a local `--dangerous`
+          # install cannot prove the Store's automatic interface policy.
+          assert_connection network-status :network-status
           assert_connection gpu-2404 mesa-2404:gpu-2404
           assert_connection gtk-3-themes gtk-common-themes:gtk-3-themes
           assert_connection icon-themes gtk-common-themes:icon-themes

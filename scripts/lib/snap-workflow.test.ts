@@ -35,6 +35,11 @@ test("Snap CI builds source DEBs natively and validates an enforced strict insta
   assert.match(buildWorkflow, /sudo snap connect "\$instance:gnome-46-2404" gnome-46-2404:gnome-46-2404/);
   assert.match(buildWorkflow, /assert_connection gpu-2404 mesa-2404:gpu-2404/);
   assert.match(buildWorkflow, /assert_connection gnome-46-2404 gnome-46-2404:gnome-46-2404/);
+  assert.equal(
+    (buildWorkflow.match(/assert_connection network-status :network-status/g) ?? []).length,
+    2,
+    "both local strict-install and Store-candidate checks must require the portal NetworkMonitor interface",
+  );
   assert.match(snapDependencies, /amd64\) snapcraft_revision=18514/);
   assert.match(snapDependencies, /arm64\) snapcraft_revision=18519/);
   assert.match(snapDependencies, /snapcraft 9\.0\.1/);
