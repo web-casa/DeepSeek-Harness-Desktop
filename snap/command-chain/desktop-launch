@@ -1,0 +1,20 @@
+#!/bin/bash
+# Delegate desktop environment setup to the signed gnome-46-2404 content snap.
+# The local relay keeps the build recipe free of mutable extension Git sources.
+if [ -z "${SNAP:-}" ]; then
+  echo "DSH Desktop is not running inside a Snap context." >&2
+  exit 2
+fi
+
+launcher="${SNAP}/gnome-platform/command-chain/desktop-launch"
+runner="${SNAP}/snap/command-chain/run"
+if [ ! -f "$launcher" ] || [ ! -f "$runner" ]; then
+  echo "DSH Desktop requires the connected gnome-46-2404 platform content snap." >&2
+  exit 3
+fi
+
+# Do not set errexit or nounset in this relay. The signed desktop launcher
+# deliberately reads optional first-run state before it initializes it.
+set -- "$launcher" "$@"
+# shellcheck source=/dev/null
+source "$runner"

@@ -1,7 +1,7 @@
 {
   "name": "deepseek-harness-desktop",
   "private": true,
-  "version": "0.2.15",
+  "version": "0.2.16",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,6 +20,10 @@
     "release:flatpak": "node scripts/build-flatpak.ts",
     "release:verify-set": "node scripts/verify-release-set.ts",
     "release:preflight": "node scripts/release-preflight.ts",
+    "snap:definition": "node scripts/verify-snap-definition.ts",
+    "snap:plan": "node scripts/snap-plan.ts",
+    "snap:build": "node scripts/build-snap.ts",
+    "snap:verify": "node scripts/verify-snap.ts",
     "icons": "node scripts/gen-icon.ts && tauri icon src-tauri/icons/icon-source.png --output src-tauri/icons",
     "test:scripts": "node --test \"scripts/lib/*.test.ts\"",
     "test:frontend": "node --test \"tests/frontend/*.test.ts\"",

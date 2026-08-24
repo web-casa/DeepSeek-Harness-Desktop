@@ -12,7 +12,7 @@
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
 | 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| 当前版本 | v0.2.15 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · macOS 已签名/公证 · [English](README.en.md) |
+| 当前版本 | v0.2.16 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · Snap Store 上架链路已就绪（尚未公开）· macOS 已签名/公证 · [English](README.en.md) |
 
 > **macOS 用户**：v0.2.9 起，DMG 使用 Developer ID Application 签名并经
 > Apple 公证、staple 与 Gatekeeper 复验。请只从本仓库 Releases 下载；若官方
@@ -29,6 +29,11 @@
 | macOS | arm64 与 x64 `.dmg` |
 | Linux | x64 与 arm64 `.AppImage`、`.deb`、`.rpm`、`.flatpak` |
 
+Snap Store 包将使用名称 `dsh-desktop-community`（标题 **DSH Desktop
+(Community)**），并只提供严格沙箱的 x64/arm64 原生构建。当前上架和账户归属
+配置仍在完成中，尚未有可安装的公开 Snap；正式候选/稳定通道上线后会在此处更新
+安装命令。Snap 版由 Snap Store 与 `snapd` 更新，不启用应用内更新。
+
 每个公开安装包旁均有同名 `.sha256`。Microsoft Store 的 x64/arm64 MSIX
 保持为独立、未签名的 Partner Center workflow artifact，不会混入公开 Release；
 这类包由商店完成签名，不能作为普通侧载包使用。
@@ -44,7 +49,7 @@ Desktop 控制器的可用语言：两种包内的控制器都支持简体中文
 | | |
 |---|---|
 | 🔌 **插件生态** | Cordis 插件体系随包携带；插件市场浏览/搜索/一键安装；预设安全导入导出；离线 `.tgz` 侧载 |
-| 🔄 **自动更新**（Windows NSIS） | x64/ARM64 更新包各自由内嵌 minisign 公钥校验；MSI、Store、macOS 与 Linux 走其各自安全更新路径 |
+| 🔄 **自动更新**（Windows NSIS） | x64/ARM64 更新包各自由内嵌 minisign 公钥校验；MSI、Microsoft Store、Snap、macOS 与其他 Linux 格式走其各自安全更新路径 |
 | 💓 **挂死自愈** | 心跳检测 Harness「活着但无响应」并自动重启（退避+上限） |
 | 🛡️ **安全边界** | Harness 窗口零 IPC 权限；桌面命令仅授权本地窗口；环境消毒 |
 | 🔒 **隐私默认值** | 会话遥测默认关闭；子进程环境消毒（NODE_OPTIONS/loader 注入键等） |
@@ -174,9 +179,9 @@ deny.toml + supply-chain/   供应链策略与审计     .github/workflows/   CI
 
 ## 发布与版本
 
-- CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发六个**原生**构建目标（Windows x64/ARM64、macOS x64/arm64、Linux x64/arm64）及 Store MSIX x64/arm64，再经完整资产清单门禁创建 draft release、生成并校验 `latest.json`，最后才自动公开 Release。每一 lane 都会同时核对 Node、Rust host triple 与目标架构；Windows on ARM 另加 x64 兼容性安装 smoke，不把它误称为原生构建。
+- CI：push/PR 跑质量门 + 三平台冒烟；打 `v*` tag 触发六个**原生**构建目标（Windows x64/ARM64、macOS x64/arm64、Linux x64/arm64）及 Store MSIX x64/arm64，再经完整资产清单门禁创建 draft release、生成并校验 `latest.json`，最后才自动公开 Release。独立 Snap 工作流也从同一源码原生构建 x64/arm64 严格沙箱包：先验证本地 DEB，再验证重新封装的 Snap、其深链与持久化启动器，候选上传仍须受保护环境显式授权。每一 lane 都会同时核对 Node、Rust host triple 与目标架构；Windows on ARM 另加 x64 兼容性安装 smoke，不把它误称为原生构建。
 - Microsoft Store：`v*` tag 同时构建 x64/arm64 MSIX（`build-msix` job，Store 模式关闭应用内更新并限制插件为 cordis.run 审核列表）。MSIX 产物作为 workflow artifact 下载后上传 Partner Center，不发布到 GitHub Release。
 - Harness 升级走 [AGENTS.md](AGENTS.md)「启动契约」清单；发布流程见 [RELEASING.md](RELEASING.md)。
-- 当前发布版本：v0.2.15；包含六个原生构建目标、Windows x64/ARM64 安装包与中英文 MSI、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复。历史 v0.2.13 文件名中的 `_en-US` 只表示其安装向导为英文。
+- 当前发布版本：v0.2.16；包含六个原生构建目标、Windows x64/ARM64 安装包与中英文 MSI、macOS Developer ID 签名/公证、Cordis v4 市场契约、诊断韧性与安全插件恢复，以及严格 Snap x64/arm64 的候选上架链路。历史 v0.2.13 文件名中的 `_en-US` 只表示其安装向导为英文。
 - 已知边界：Windows GitHub 安装包尚未配置 Authenticode，可能触发 SmartScreen；应用内更新只接受与当前 CPU 架构及 NSIS 安装方式完全匹配的 payload，MSI 不会自动切换到 NSIS；macOS 仍待“公证后 updater archive + 原生升级 smoke”闭环；Linux 包当前以 SHA-256 保护，尚无独立软件仓库签名。
 - 许可：MIT；内置 Harness 及全部依赖的 LICENSE 随包附于 `runtime/harness/licenses/`。

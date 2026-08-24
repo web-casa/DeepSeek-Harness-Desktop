@@ -1,0 +1,26 @@
+#!/bin/bash
+# Keep GPU setup inside the signed Store-provided content interface.  This is
+# intentionally local code: the Snapcraft GNOME extension currently fetches a
+# mutable helper repository during builds, which is not acceptable here.
+if [ "$#" -eq 0 ]; then
+  echo "DSH Desktop GPU command chain is missing its next step." >&2
+  exit 1
+fi
+if [ -z "${SNAP:-}" ]; then
+  echo "DSH Desktop is not running inside a Snap context." >&2
+  exit 2
+fi
+
+provider="${SNAP}/gpu-2404/bin/gpu-2404-provider-wrapper"
+if [ ! -f "$provider" ]; then
+  echo "DSH Desktop requires the connected mesa-2404 GPU content provider." >&2
+  exit 3
+fi
+
+# The provider prepares GPU paths before continuing into the next command-chain
+# entry. Source it with the same Bash $0 hand-off used by Snapcraft 9.0.1's
+# reviewed GPU relay. Do not enable errexit/nounset here: the signed provider
+# owns its shell options and uses `exec "$@"` to continue the chain.
+BASH_ARGV0="$provider"
+# shellcheck source=/dev/null
+source "$provider"

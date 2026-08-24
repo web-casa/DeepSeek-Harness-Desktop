@@ -103,7 +103,85 @@ Release → 通过 GitHub API 逐一核对上传后资产名、服务端 SHA-256
   `src-tauri/gen/windows/AppxManifest.xml.template` 与 `bundle.config.json`；
   如 Partner Center 重建产品，必须同步这两处。
 
-### 3c. npm 发布所有权边界
+### 3c. Snap Store（严格沙箱，独立发布线）
+
+Snap 使用名称 **`dsh-desktop-community`**、商店标题 **DSH Desktop
+(Community)**。它不是 GitHub Release 的第 17 个公开资产，也不把 GitHub 的
+DEB 重新下载后包装：`.github/workflows/snap.yml` 在 Ubuntu 24.04 x64/ARM64
+原生 runner 上从 tag 对应 checkout 构建 Node、Harness、sidecar 和 **本地** DEB，
+先运行 `verify-bundle --bundle deb`，再以 Snapcraft `dump` 打包。最终 `.snap` 会被
+重新解包，逐项验证 strict confinement、无 `home`/`removable-media`、真实 CPU 架构、
+物化 Harness、`dsharness://` desktop entry、启动器以及 SHA-256 provenance；随后在
+CI 以 `snap install --dangerous --jailmode` 安装一次，确认它没有退化成 devmode，并
+显式连接 GNOME/GPU/主题 content provider 来验证严格沙箱内的运行时链路。这里不能
+误测“自动连接”：本地危险安装没有 Snap Store 的发布者 assertion，按 snapd 安全规则不
+允许跨发布者 content 自动连接。只有候选包上传 Store 后，受保护的 candidate job 才会
+重新从 Store 安装该 tag 的候选 branch，并断言 GNOME/GPU/主题连接确实由 Store 策略自动
+建立；若失败，必须先修复并重新通过 candidate 验证，再进行人工 stable promotion。
+
+为避免 Snapcraft GNOME extension 在当前版本中隐式拉取可变的 `gpu-snap` Git
+source，配方不使用 `extensions: [gnome]`。它明确声明相同的 core24 WebKit/GPU
+layouts、严格最小 app plugs，并把本仓审查过的 command-chain relay 打进包内；运行期
+只从 Snap Store 获取并由 snapd assertion 验证的 `gnome-46-2404` 与 `mesa-2404`
+content provider。不得为方便升级把它改回未固定的远程 part source。
+
+Snapcraft 会把有 `default-provider` 的 content plug 视作 build Snap；CI 因而在固定
+Snapcraft 之后由 `snapd` 安装已签名的 `mesa-2404`、`gtk-common-themes` 与
+`gnome-46-2404`，再以非 root 运行 `snapcraft pack --destructive-mode`。这些 provider
+不会进入成品包，也不构成可变 Git/HTTP 构建输入；它们与最终用户运行期一样由 Snap
+Store assertion 认证。
+
+运行期由 `snap/bin/launch-dsh-desktop` 无条件设置：
+
+```text
+DSH_HOME=$SNAP_USER_COMMON/harness
+XDG_DATA_HOME=$SNAP_USER_COMMON/xdg-data
+XDG_CONFIG_HOME=$SNAP_USER_COMMON/xdg-config
+XDG_CACHE_HOME=$SNAP_USER_COMMON/xdg-cache
+```
+
+所以用户数据跨 Snap revision 保留，包内 runtime 保持只读；启动器同时清除仅供
+开发测试的 `DSH_RUNTIME_DIR`。Snap 版不初始化 Tauri 通用更新器，控制器明确显示
+“Snap Store 与 snapd 管理更新”。
+
+**首次接通 Store 必须由 `web-casa` 长期管理的 Ubuntu One / Snapcraft 账号人工完成：**
+
+1. 在 Snapcraft Dashboard 检查并注册准确名称 `dsh-desktop-community`；这是不可逆
+   的外部动作，不由 PR、脚本或 tag 自动执行。
+2. 用该账号执行 `snapcraft whoami`，记录输出中的 `email:`；将其设置为两个受保护
+   GitHub Environment（`snap-candidate`、`snap-stable`）的
+   `SNAPCRAFT_EXPECTED_EMAIL` variable。
+3. 在受控机器上用 `snapcraft export-login` 生成**可过期且按 snap/channel 限制**的
+   登录文件（CLI 支持 `--snaps`、`--channels`、`--expires`），把其完整内容分别保存
+   为相应 Environment 的 `SNAPCRAFT_STORE_CREDENTIALS` secret；绝不提交文件、贴入
+   issue 或复用个人长期登录。候选凭据仅限 `dsh-desktop-community` / `candidate`；
+   stable 凭据才可覆盖 `candidate,stable`。
+4. 将仓库级 variable `SNAP_CANDIDATE_PUBLISH_REQUESTED=true` 作为 tag 上传的显式
+   发起开关；再仅在 `snap-candidate` Environment 设置
+   `SNAP_CANDIDATE_PUBLISH_ENABLED=true`。前者让 GitHub 能调度待审批 job，后者在
+   Environment 已获批准、凭据刚可见时再次 fail-closed 核验。tag build 成功后才会
+   下载同一 run 的两份已验证 artifact，并以该账号上传 candidate；每个 tag 使用
+   独立的短期 `latest/candidate/vMAJOR.MINOR.PATCH` branch，因此较新 tag 的
+   candidate 不会被误认为当前版本。PR 和普通 main 构建永远不读取 Store 凭据。
+5. 在干净的 x64 与 ARM64 主机分别安装并验证 candidate（启动、数据持久化、
+   `dsharness://`、插件 pending→显式 Activate）。确认后，从 `main` 手动运行
+   **Promote Snap candidate**，填写同一 `vMAJOR.MINOR.PATCH` tag；它先验证 tag
+   版本与 main 祖先关系，随后在 `snap-stable` 保护环境批准后只从对应的
+   `latest/candidate/vMAJOR.MINOR.PATCH` branch 用
+   `snapcraft promote --from-channel … --to-channel latest/stable --yes` 推进**完整
+   build set**，不逐架构盲目 release。
+6. stable 同样需要两个显式门：仓库级
+   `SNAP_STABLE_PROMOTION_REQUESTED=true` 允许手动 promotion job 被调度，且仅在
+   `snap-stable` Environment 设置 `SNAP_STABLE_PROMOTION_ENABLED=true` 才会在批准
+   后真正执行。关闭任一开关，即使存在 secret 也不能改动 stable；轮换或过期凭据后
+   重新执行上述身份核验。
+
+Snapcraft 客户端固定为 9.0.1 的架构专属 revision：amd64 `18514`、arm64 `18519`；
+Snapd 对 Store assertion 做签名验证。升级该工具必须同时更新 `scripts/lib/snap.ts`、
+`scripts/ci/install-linux-snap-deps.sh`、测试并重新审查输出。当前尚未完成上述
+外部账户步骤时，工作流仅构建/验证 `.snap` artifact，**不会注册名称、上传或发布**。
+
+### 3d. npm 发布所有权边界
 
 根 `package.json` 必须保持 `private: true`，它是 Desktop 构建工作区，不是 npm
 发布通道；`release:preflight` 会拒绝移除此保护。已确认的组织决策是：若将来确有
@@ -201,8 +279,8 @@ Desktop 工作区直接改为公开发布。
   原生 x64/ARM64 机器上完成从已安装应用升级的 smoke；不得把 DMG 的公证
   成功误当作 updater 已可安全启用。
 - **Linux updater 未启用**。AppImage、DEB、RPM 与 Flatpak 都由对应包格式的
-  手工/包管理器升级路径处理；在有受签名的软件源或 Flathub 发布闭环前，不
-  发布看似可用的通用应用内更新。
+  手工/包管理器升级路径处理；严格 Snap 在正式上架后由 Snap Store/`snapd`
+  事务性更新和回滚。任何一种 Linux 格式都不发布看似可用的通用应用内更新。
 - 迁移说明：v0.2.13 的 NSIS 客户端会优先识别新的精确 NSIS key；该版本的
   MSI 客户端则会因不再提供通用 Windows key 而提示“无适用更新”。这是有意
   fail-closed，用户需手动安装一次同架构的下一版 MSI，之后控制器会明确说明

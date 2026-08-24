@@ -788,7 +788,7 @@ fn read_versions(paths: &RuntimePaths) -> Versions {
         harness,
         node,
         sidecar: "unknown".to_string(),
-        distribution: crate::build_info::DISTRIBUTION.to_string(),
+        distribution: crate::build_info::distribution().to_string(),
     }
 }
 

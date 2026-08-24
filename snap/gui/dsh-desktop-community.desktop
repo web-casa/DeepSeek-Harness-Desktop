@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=DSH Desktop (Community)
+Comment=Community desktop packaging of DeepSeek Harness
+Exec=dsh-desktop-community %U
+Icon=${SNAP}/meta/gui/dsh-desktop-community.png
+Terminal=false
+Type=Application
+Categories=Development;
+MimeType=x-scheme-handler/dsharness;
+StartupNotify=true
+StartupWMClass=deepseek-harness-desktop

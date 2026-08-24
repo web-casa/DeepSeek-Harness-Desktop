@@ -15,7 +15,7 @@ export interface Versions {
   harness: string;
   node: string;
   sidecar: string;
-  distribution: "web" | "store";
+  distribution: "web" | "store" | "snap";
 }
 
 export interface StatusPayload {
@@ -73,6 +73,7 @@ export async function onEvent(
 
 export type UpdateUnsupportedReason =
   | "store"
+  | "snap"
   | "manual"
   | "architecture"
   | "msi"

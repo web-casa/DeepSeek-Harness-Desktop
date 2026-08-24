@@ -157,9 +157,10 @@ fn main() {
             Ok(())
         });
 
-    // Store builds are updated by the Microsoft Store only: the updater
-    // plugin is not initialized and update commands return unsupported.
-    let builder = if build_info::STORE_BUILD {
+    // Store and Snap builds are updated by their package managers only. Do
+    // not even initialize the generic updater plugin in those environments:
+    // it must never download a replacement for a package-manager-owned tree.
+    let builder = if build_info::STORE_BUILD || build_info::is_snap_runtime() {
         builder
     } else {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
