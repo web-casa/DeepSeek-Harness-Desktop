@@ -33,7 +33,7 @@ const commandChainRunner = readFileSync(new URL("../../snap/command-chain/run", 
 const buildInfo = readFileSync(new URL("../../src-tauri/src/build_info.rs", import.meta.url), "utf8");
 
 test("reviewed Snap definition is strict, native, and version-aligned", () => {
-  assert.equal(snapRecipeVersion(recipe), "0.2.16");
+  assert.equal(snapRecipeVersion(recipe), "0.2.17");
   assert.deepEqual(
     snapDefinitionProblems({
       recipe,
@@ -42,7 +42,7 @@ test("reviewed Snap definition is strict, native, and version-aligned", () => {
       gpuWrapper,
       desktopLauncher,
       commandChainRunner,
-      expectedVersion: "0.2.16",
+      expectedVersion: "0.2.17",
     }),
     [],
   );
@@ -62,7 +62,7 @@ test("Snap definition rejects weakened confinement, broad filesystem access, and
       gpuWrapper,
       desktopLauncher,
       commandChainRunner,
-      expectedVersion: "0.2.16",
+      expectedVersion: "0.2.17",
     }).some((problem) => problem.includes("classic or devmode")),
   );
   assert.ok(
@@ -73,7 +73,7 @@ test("Snap definition rejects weakened confinement, broad filesystem access, and
       gpuWrapper,
       desktopLauncher,
       commandChainRunner,
-      expectedVersion: "0.2.16",
+      expectedVersion: "0.2.17",
     }).some((problem) => problem.includes("launcher diverges")),
   );
   assert.ok(
@@ -84,7 +84,7 @@ test("Snap definition rejects weakened confinement, broad filesystem access, and
       gpuWrapper,
       desktopLauncher,
       commandChainRunner,
-      expectedVersion: "0.2.16",
+      expectedVersion: "0.2.17",
     }).some((problem) => problem.includes("desktop entry diverges")),
   );
   assert.ok(
@@ -95,7 +95,7 @@ test("Snap definition rejects weakened confinement, broad filesystem access, and
       gpuWrapper: gpuWrapper.replace("gpu-2404-provider-wrapper", "untrusted-wrapper"),
       desktopLauncher,
       commandChainRunner,
-      expectedVersion: "0.2.16",
+      expectedVersion: "0.2.17",
     }).some((problem) => problem.includes("GPU command-chain")),
   );
   assert.ok(
@@ -106,7 +106,7 @@ test("Snap definition rejects weakened confinement, broad filesystem access, and
       gpuWrapper,
       desktopLauncher,
       commandChainRunner,
-      expectedVersion: "0.2.16",
+      expectedVersion: "0.2.17",
     }).some((problem) => problem.includes("must not download mutable")),
   );
   assert.ok(
@@ -117,7 +117,7 @@ test("Snap definition rejects weakened confinement, broad filesystem access, and
       gpuWrapper,
       desktopLauncher,
       commandChainRunner,
-      expectedVersion: "0.2.16",
+      expectedVersion: "0.2.17",
     }).some((problem) => problem.includes("network-status for the GTK/XDG portal runtime")),
   );
 });

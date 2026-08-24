@@ -13,7 +13,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Current version | v0.2.16 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · Snap Store delivery is ready but not public yet · signed/notarized macOS · [中文](README.md) |
+| Current version | v0.2.17 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · Snap Store delivery is ready but not public yet · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
@@ -207,7 +207,7 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Current release: v0.2.16, including six native build targets, Windows
+- Current release: v0.2.17, including six native build targets, Windows
   x64/ARM64 installers and English/Simplified-Chinese MSI packages, macOS
   Developer ID signing/notarization, the Cordis v4 marketplace contract,
   diagnostic resilience, safe plugin recovery, and the strict Snap x64/arm64

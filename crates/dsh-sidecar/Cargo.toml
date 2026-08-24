@@ -1,6 +1,6 @@
 [package]
 name = "dsh-sidecar"
-version = "0.2.5"
+version = "0.2.6"
 description = "Minimal process supervisor for the DSH Desktop runtime"
 edition = "2021"
 license = "MIT"
