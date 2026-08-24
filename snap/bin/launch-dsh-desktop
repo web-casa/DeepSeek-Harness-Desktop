@@ -1,0 +1,18 @@
+#!/bin/sh
+# Snap launcher: make every mutable application path revision-independent.
+# Rust still creates and hardens DSH_HOME itself (0700 + no symlink policy).
+set -eu
+
+: "${SNAP:?Snap runtime variable is required}"
+: "${SNAP_USER_COMMON:?Snap common user data directory is required}"
+
+# Never permit a production Snap invocation to redirect the immutable bundled
+# runtime into a caller-controlled directory. DSH_RUNTIME_DIR remains a local
+# development/test override for non-Snap builds only.
+unset DSH_RUNTIME_DIR
+export DSH_HOME="$SNAP_USER_COMMON/harness"
+export XDG_DATA_HOME="$SNAP_USER_COMMON/xdg-data"
+export XDG_CONFIG_HOME="$SNAP_USER_COMMON/xdg-config"
+export XDG_CACHE_HOME="$SNAP_USER_COMMON/xdg-cache"
+
+exec "$SNAP/usr/bin/deepseek-harness-desktop" "$@"

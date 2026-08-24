@@ -34,10 +34,22 @@ Tauri 管窗口/托盘，sidecar 管 Harness 进程树，Harness Web UI 原样�
 | `crates/dsh-sidecar/Cargo.toml` | sidecar 版本 |
 | `runtime/package.json` + `package-lock.json` | harness pin（`npm install` 刷新锁） |
 | `.nvmrc` | CI 脚本 Node（== manifest.nodeVersion） |
+| `snap/snapcraft.yaml` | Snap Store 包版本（== desktopVersion） |
 
 `scripts/lib/node-distribution.ts` 是由 manifest 生成的下载路径白名单，不是第二
 个版本事实源；Node bump 时执行 `pnpm runtime:node:generate` 并提交结果。
 `release:preflight` 会拒绝未同步的生成文件。
+
+Snap 包只能由同一原生 job 从当前 checkout 生成的、已过
+`verify-bundle --bundle deb` 的本地 DEB 输入；不得下载/重包装 GitHub Release
+资产。`snap/bin/launch-dsh-desktop` 必须无条件将 `DSH_HOME` 与 XDG 数据目录
+固定到 `$SNAP_USER_COMMON`，并清除 `DSH_RUNTIME_DIR`；不得为方便调试放开
+`classic`、`devmode`、`home` 或 `removable-media`。
+
+Snap 的 part source 必须是当前 checkout 内的本地输入；不得重新引入会在构建期拉取
+可变 Git 分支的 `extensions: [gnome]`。GNOME/WebKit/GPU 运行期集成使用经过定义
+复核的本地 command-chain relay 与 Store 签名的 `gnome-46-2404` / `mesa-2404` content
+provider；变更它们须同时更新 `scripts/lib/snap.ts`、定义测试与最终包 verifier。
 
 发布前必跑 `pnpm release:preflight`（tag 推送时 CI 亦跑并做 tag 绑定）。
 

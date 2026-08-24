@@ -13,7 +13,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Current version | v0.2.15 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · signed/notarized macOS · [中文](README.md) |
+| Current version | v0.2.16 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · Snap Store delivery is ready but not public yet · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
@@ -32,6 +32,12 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | macOS | arm64 and x64 `.dmg` |
 | Linux | x64 and arm64 `.AppImage`, `.deb`, `.rpm`, `.flatpak` |
 
+The future Snap Store package is named `dsh-desktop-community` and titled
+**DSH Desktop (Community)**. It will be a strictly confined, native x64/arm64
+Snap. Account ownership and Store onboarding are still being completed, so
+there is no public install command yet. Once released, Snap Store/`snapd` —
+not the in-app updater — will manage updates.
+
 Every public installer has a same-name `.sha256` sidecar. The x64/arm64
 Microsoft Store MSIX packages remain separate, unsigned Partner Center
 workflow artifacts. They are Store-signing inputs, not public sideload files.
@@ -48,7 +54,7 @@ actual `ProductLanguage`, so the suffix is never merely cosmetic.
 | | |
 |---|---|
 | 🔌 **Plugin ecosystem** | Cordis plugins ship with the bundle; in-app marketplace search/install; safe preset import/export |
-| 🔄 **Auto-updater** (Windows NSIS) | x64 and ARM64 payloads are separately verified by an embedded minisign pubkey; MSI, Store, macOS and Linux retain their own safe update paths |
+| 🔄 **Auto-updater** (Windows NSIS) | x64 and ARM64 payloads are separately verified by an embedded minisign pubkey; MSI, Microsoft Store, Snap, macOS and other Linux formats retain their own safe update paths |
 | 💓 **Hung-process self-healing** | Heartbeat detects an unresponsive Harness and restarts it (backoff + cap) |
 | 🛡️ **Security boundary** | Harness window has zero IPC; app commands granted to the local window only; env sanitization |
 | 🔒 **Privacy defaults** | Session telemetry OFF; child env sanitized (NODE_OPTIONS, loader injection keys, …) |
@@ -188,7 +194,11 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   six **native** targets (Windows x64/ARM64, macOS x64/arm64, Linux x64/arm64)
   plus Store MSIX x64/arm64, then gates the complete inventory before creating
   a draft release, generating and validating `latest.json`, and only then
-  publishing the release. Every lane checks the Node/Rust host
+  publishing the release. A separate Snap workflow also builds strict native
+  x64/arm64 packages from the same source: it verifies the local DEB before
+  repackaging, then verifies the final Snap, deep link, and persistent-data
+  launcher; candidate upload still requires explicit protected-environment
+  approval. Every lane checks the Node/Rust host
   triple and payload architecture; Windows on ARM also runs an x64
   compatibility-install smoke without calling that build native.
 - Microsoft Store: `v*` tags also build x64/arm64 MSIX packages
@@ -197,11 +207,12 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Current release: v0.2.15, including six native build targets, Windows
+- Current release: v0.2.16, including six native build targets, Windows
   x64/ARM64 installers and English/Simplified-Chinese MSI packages, macOS
   Developer ID signing/notarization, the Cordis v4 marketplace contract,
-  diagnostic resilience, and safe plugin recovery. The historical v0.2.13
-  `_en-US` suffix means only that its installer UI was English.
+  diagnostic resilience, safe plugin recovery, and the strict Snap x64/arm64
+  candidate-delivery path. The historical v0.2.13 `_en-US` suffix means only
+  that its installer UI was English.
 - Known limits: Windows GitHub installers do not yet have Authenticode and may
   trigger SmartScreen; in-app updating accepts only a payload exactly matching
   the current CPU architecture and NSIS installer family (MSI never switches

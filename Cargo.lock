@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "deepseek-harness-desktop"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "dsh-sidecar",
  "flate2",

@@ -41,12 +41,18 @@ enum UpdateSupport {
 
 fn update_support(
     store_build: bool,
+    snap_runtime: bool,
     os: &str,
     arch: &str,
     bundle: Option<tauri::utils::config::BundleType>,
 ) -> UpdateSupport {
     if store_build {
         return UpdateSupport::Unsupported { reason: "store" };
+    }
+    if snap_runtime {
+        // `snapd` owns the mounted revision and transactional rollback. Never
+        // let the generic Tauri updater attempt to replace Snap-managed files.
+        return UpdateSupport::Unsupported { reason: "snap" };
     }
     if os != "windows" {
         // macOS requires a notarized updater archive and Linux must defer to
@@ -78,6 +84,7 @@ fn update_support(
 fn current_update_support() -> UpdateSupport {
     update_support(
         crate::build_info::STORE_BUILD,
+        crate::build_info::is_snap_runtime(),
         std::env::consts::OS,
         std::env::consts::ARCH,
         tauri::utils::platform::bundle_type(),
@@ -91,6 +98,7 @@ fn unsupported_update_response(reason: &str) -> Value {
 fn update_not_supported_error(reason: &str) -> String {
     match reason {
         "store" => "updates are managed by the Microsoft Store".to_string(),
+        "snap" => "updates are managed by the Snap Store and snapd".to_string(),
         "msi" => "this MSI installation uses matching MSI or Store updates; install the next MSI manually".to_string(),
         "manual" => "this platform uses its native package manager or a manually downloaded installer".to_string(),
         "architecture" => "in-app updates are unavailable for this CPU architecture".to_string(),
@@ -956,34 +964,44 @@ mod tests {
         use tauri::utils::config::BundleType;
 
         assert_eq!(
-            update_support(false, "windows", "x86_64", Some(BundleType::Nsis)),
+            update_support(false, false, "windows", "x86_64", Some(BundleType::Nsis)),
             UpdateSupport::InApp {
                 target: "windows-x86_64-nsis"
             }
         );
         assert_eq!(
-            update_support(false, "windows", "aarch64", Some(BundleType::Nsis)),
+            update_support(false, false, "windows", "aarch64", Some(BundleType::Nsis)),
             UpdateSupport::InApp {
                 target: "windows-aarch64-nsis"
             }
         );
         assert_eq!(
-            update_support(false, "windows", "x86_64", Some(BundleType::Msi)),
+            update_support(false, false, "windows", "x86_64", Some(BundleType::Msi)),
             UpdateSupport::Unsupported { reason: "msi" }
         );
         assert_eq!(
-            update_support(false, "windows", "i686", Some(BundleType::Nsis)),
+            update_support(false, false, "windows", "i686", Some(BundleType::Nsis)),
             UpdateSupport::Unsupported {
                 reason: "architecture"
             }
         );
         assert_eq!(
-            update_support(false, "linux", "x86_64", Some(BundleType::AppImage)),
+            update_support(false, false, "linux", "x86_64", Some(BundleType::AppImage)),
             UpdateSupport::Unsupported { reason: "manual" }
         );
         assert_eq!(
-            update_support(true, "windows", "x86_64", Some(BundleType::Nsis)),
+            update_support(true, false, "windows", "x86_64", Some(BundleType::Nsis)),
             UpdateSupport::Unsupported { reason: "store" }
+        );
+        // Store policy stays stronger than the runtime environment marker;
+        // a Store build must never be described as a Snap build.
+        assert_eq!(
+            update_support(true, true, "linux", "x86_64", Some(BundleType::AppImage)),
+            UpdateSupport::Unsupported { reason: "store" }
+        );
+        assert_eq!(
+            update_support(false, true, "linux", "x86_64", Some(BundleType::AppImage)),
+            UpdateSupport::Unsupported { reason: "snap" }
         );
     }
 

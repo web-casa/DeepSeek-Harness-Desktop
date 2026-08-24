@@ -1,0 +1,134 @@
+name: dsh-desktop-community
+base: core24
+version: "0.2.16"
+title: DSH Desktop (Community)
+summary: Community desktop packaging of DeepSeek Harness
+description: |
+  DSH Desktop packages the official DeepSeek Harness with a pinned Node runtime
+  in a native, community-maintained desktop shell. It is not an upstream
+  DeepSeek product and does not modify the Harness Web UI.
+grade: stable
+confinement: strict
+license: MIT
+icon: snap/gui/dsh-desktop-community.png
+website: https://dsharness.app
+source-code: https://github.com/web-casa/DeepSeek-Harness-Desktop
+issues: https://github.com/web-casa/DeepSeek-Harness-Desktop/issues
+
+# Do not use `extensions: [gnome]` here. In the reviewed Snapcraft 9.0.1 it
+# implicitly clones canonical/gpu-snap from a mutable branch for a cleanup
+# workaround. This explicit, source-free equivalent uses only signed Store
+# content providers at runtime and local command-chain relays in this repo.
+assumes:
+  - snapd2.43
+  - common-data-dir
+
+plugs:
+  desktop:
+    mount-host-font-cache: false
+  gpu-2404:
+    interface: content
+    target: $SNAP/gpu-2404
+    default-provider: mesa-2404
+  gtk-3-themes:
+    interface: content
+    target: $SNAP/data-dir/themes
+    default-provider: gtk-common-themes
+  icon-themes:
+    interface: content
+    target: $SNAP/data-dir/icons
+    default-provider: gtk-common-themes
+  sound-themes:
+    interface: content
+    target: $SNAP/data-dir/sounds
+    default-provider: gtk-common-themes
+  gnome-46-2404:
+    interface: content
+    target: $SNAP/gnome-platform
+    default-provider: gnome-46-2404
+
+layout:
+  /usr/share/libdrm:
+    bind: $SNAP/gpu-2404/libdrm
+  /usr/share/drirc.d:
+    symlink: $SNAP/gpu-2404/drirc.d
+  /usr/share/X11/XErrorDB:
+    symlink: $SNAP/gpu-2404/X11/XErrorDB
+  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/webkit2gtk-4.0:
+    bind: $SNAP/gnome-platform/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/webkit2gtk-4.0
+  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/webkit2gtk-4.1:
+    bind: $SNAP/gnome-platform/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/webkit2gtk-4.1
+  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libproxy:
+    bind: $SNAP/gnome-platform/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libproxy
+  /usr/share/xml/iso-codes:
+    bind: $SNAP/gnome-platform/usr/share/xml/iso-codes
+
+environment:
+  SNAP_DESKTOP_RUNTIME: $SNAP/gnome-platform
+  GTK_USE_PORTAL: "1"
+
+# Snapcraft builds each platform only on a runner of the same native CPU
+# architecture. The workflow independently asserts the Node and Rust host
+# triples before staging the source-built Debian payload.
+platforms:
+  amd64:
+    build-on: [amd64]
+    build-for: [amd64]
+  arm64:
+    build-on: [arm64]
+    build-for: [arm64]
+
+apps:
+  dsh-desktop-community:
+    command: bin/launch-dsh-desktop
+    command-chain:
+      - snap/command-chain/gpu-2404-wrapper
+      - snap/command-chain/desktop-launch
+    plugs:
+      - network
+      - network-bind
+      - desktop
+      - desktop-legacy
+      - gsettings
+      - opengl
+      - wayland
+      - x11
+
+# The input is a local DEB built from this exact checkout in the same native
+# CI job. It is deliberately not a downloaded GitHub Release asset.
+parts:
+  # The app command is deliberately a checked-in launcher rather than a
+  # generated wrapper: it fixes mutable paths to SNAP_USER_COMMON before the
+  # immutable DEB payload starts. Stage it explicitly; an apps command
+  # declaration alone does not copy a source file into the final Snap.
+  dsh-desktop-launcher:
+    plugin: dump
+    source: snap/bin
+    organize:
+      launch-dsh-desktop: bin/launch-dsh-desktop
+    stage:
+      - bin/launch-dsh-desktop
+    prime:
+      - bin/launch-dsh-desktop
+  # Explicitly stage only the three local command-chain scripts. Do not pull a Git
+  # helper at build time: all runtime providers are Store-signed content snaps.
+  dsh-desktop-command-chain:
+    plugin: dump
+    source: snap/command-chain
+    organize:
+      gpu-2404-wrapper: snap/command-chain/gpu-2404-wrapper
+      desktop-launch: snap/command-chain/desktop-launch
+      run: snap/command-chain/run
+    # A newly added source file must not silently enter the signed package.
+    stage:
+      - snap/command-chain/gpu-2404-wrapper
+      - snap/command-chain/desktop-launch
+      - snap/command-chain/run
+    prime:
+      - snap/command-chain/gpu-2404-wrapper
+      - snap/command-chain/desktop-launch
+      - snap/command-chain/run
+  dsh-desktop:
+    plugin: dump
+    source: target/snap/input/dsh-desktop.deb
+    source-type: deb

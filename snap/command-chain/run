@@ -1,0 +1,25 @@
+#!/bin/bash
+# Source the next trusted command-chain step so it can prepare environment
+# variables for the final application. The next path is supplied by snapd from
+# the reviewed command-chain metadata, never by the application URI argument.
+if [ "$#" -eq 0 ]; then
+  echo "DSH Desktop command chain is missing its next step." >&2
+  exit 1
+fi
+if [ -z "${SNAP:-}" ]; then
+  echo "DSH Desktop is not running inside a Snap context." >&2
+  exit 2
+fi
+if [ ! -f "$1" ]; then
+  echo "DSH Desktop command-chain step is unavailable: $1" >&2
+  exit 3
+fi
+
+# Match Snapcraft's standard relay exactly: BASH_ARGV0 changes Bash's $0 for
+# the sourced content-provider script after the executable path is removed
+# from its argument vector. In particular, do not inherit `set -u` into the
+# gnome-46 launcher: its first-run state variable is intentionally optional.
+BASH_ARGV0="$1"
+shift
+# shellcheck source=/dev/null
+source "$0"

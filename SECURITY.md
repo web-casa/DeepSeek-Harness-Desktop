@@ -68,6 +68,16 @@ DSH Desktop 是社区桌面打包层：Tauri 2 壳 + Rust `dsh-sidecar`
  公开下载计数外，本项目不采集、不上报任何使用数据，DSH 上游会话遥测默认
  关闭。更新包真实性由内嵌 minisign 公钥校验，与代码签名无关；macOS
  更新器在签名+公证落地前保持关闭。
+- **严格 Snap 边界（上架前已实现，尚未公开）**：`dsh-desktop-community` 只允许
+  strict confinement，拒绝 `classic`/`devmode`/`home`/`removable-media`；其启动器
+  固定用户数据到 `$SNAP_USER_COMMON`，清除 `DSH_RUNTIME_DIR`，并让 Snap Store/
+  `snapd` 管理更新。CI 从同一源码任务的已验证本地 DEB 生成 Snap，随后解包复核
+  runtime、架构、URI deep-link 和 SHA-256 provenance；Store 凭据仅可存在于候选/
+  stable 受保护环境，永不进入 PR 或普通 main job。
+- **Snap 图形运行时供应链**：配方不使用会隐式拉取可变 Git helper 的 GNOME
+  extension；GNOME/WebKit/GPU 配置、命令链和最终包内容均由本仓 verifier 固定检查。
+  运行期 content provider 仅为 snapd 验证 assertion 后提供的 `gnome-46-2404` 与
+  `mesa-2404`，而非 CI 下载的未校验脚本。
 
 ## 预设与插件信任模型
 

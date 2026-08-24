@@ -24,12 +24,14 @@ import {
   appImageToolDefinitionProblems,
 } from "./lib/appimage-tools.ts";
 import { FLATPAK_ID, flatpakContractProblems, flatpakMetadataProblems } from "./lib/flatpak.ts";
+import { snapDefinitionProblems, snapRecipeVersion } from "./lib/snap.ts";
 
 const PLATFORM_KEYS = ["win32-x64", "win32-arm64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
 const RELEASE_TAG_RE = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
 // Case-insensitive: the checksums we publish are lowercase, but a manual edit
 // must not slip through just because it used uppercase hex.
 const SHA256_RE = /^[0-9a-fA-F]{64}$/;
+const manifest = readManifest();
 
 function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(repoRoot, path), "utf8")) as Record<string, unknown>;
@@ -54,8 +56,6 @@ function cargoDepVersion(path: string, dep: string): string {
   return m[1];
 }
 
-const manifest = readManifest();
-
 // --- deny: release packaging contract ------------------------------------
 const packagingProblems = [
   ...releasePlanProblems(),
@@ -68,11 +68,23 @@ const packagingProblems = [
       "utf8",
     ),
   ),
+  ...snapDefinitionProblems({
+    recipe: readFileSync(join(repoRoot, "snap", "snapcraft.yaml"), "utf8"),
+    launcher: readFileSync(join(repoRoot, "snap", "bin", "launch-dsh-desktop"), "utf8"),
+    desktopEntry: readFileSync(
+      join(repoRoot, "snap", "gui", "dsh-desktop-community.desktop"),
+      "utf8",
+    ),
+    gpuWrapper: readFileSync(join(repoRoot, "snap", "command-chain", "gpu-2404-wrapper"), "utf8"),
+    desktopLauncher: readFileSync(join(repoRoot, "snap", "command-chain", "desktop-launch"), "utf8"),
+    commandChainRunner: readFileSync(join(repoRoot, "snap", "command-chain", "run"), "utf8"),
+    expectedVersion: manifest.desktopVersion,
+  }),
 ];
 if (packagingProblems.length > 0) {
   fail(`release packaging contract drift:\n- ${packagingProblems.join("\n- ")}`);
 }
-ok("release matrix, AppImage inputs, Flatpak permissions, and Store separation aligned");
+ok("release matrix, AppImage/Flatpak/Snap contracts, and Store separation aligned");
 
 // --- deny: command/capability contract ------------------------------------
 const commandContractProblems = repositoryCommandContractProblems(repoRoot);
@@ -87,6 +99,7 @@ const rootPkg = readJson("package.json") as { private?: boolean; version?: strin
 const tauriConf = readJson("src-tauri/tauri.conf.json") as { version?: string };
 const tauriCargo = cargoVersion("src-tauri/Cargo.toml");
 const sidecarCargo = cargoVersion("crates/dsh-sidecar/Cargo.toml");
+const snapRecipe = readFileSync(join(repoRoot, "snap", "snapcraft.yaml"), "utf8");
 const runtimePkg = readJson("runtime/package.json") as {
   dependencies?: Record<string, string>;
 };
@@ -96,13 +109,14 @@ const versionFiles: [string, string | undefined][] = [
   ["package.json", rootPkg.version],
   ["src-tauri/Cargo.toml", tauriCargo],
   ["src-tauri/tauri.conf.json", tauriConf.version],
+  ["snap/snapcraft.yaml", snapRecipeVersion(snapRecipe)],
 ];
 for (const [file, version] of versionFiles) {
   if (version !== desktopVersion) {
     fail(`version drift: ${file} says ${version}, manifest says ${desktopVersion}`);
   }
 }
-ok(`desktop version aligned: ${desktopVersion} (manifest/package.json/Cargo.toml/tauri.conf.json)`);
+ok(`desktop version aligned: ${desktopVersion} (manifest/package.json/Cargo.toml/tauri.conf.json/snapcraft.yaml)`);
 
 // The root package is the Desktop build workspace, not an npm distribution.
 // Public npm artifacts, if approved later, must use a separately reviewed

@@ -1,0 +1,89 @@
+name: Promote Snap candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        type: string
+        required: true
+        description: "Reviewed vMAJOR.MINOR.PATCH tag currently tested in candidate"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snap-stable-promotion
+  cancel-in-progress: false
+
+jobs:
+  promotion-plan:
+    name: Bind promotion request to main tag
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+
+      - name: Verify requested tag is canonical and checked out exactly
+        env:
+          SNAP_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ ! "$SNAP_RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release_tag must match vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          git fetch origin "refs/tags/$SNAP_RELEASE_TAG:refs/tags/$SNAP_RELEASE_TAG"
+          git checkout --detach "refs/tags/$SNAP_RELEASE_TAG"
+          node scripts/snap-plan.ts --expect-tag "$SNAP_RELEASE_TAG"
+
+  promote-stable:
+    name: Promote candidate build set to stable
+    needs: promotion-plan
+    # This manual workflow never enables itself merely by the presence of a
+    # credential. A protected stable environment plus this explicit variable
+    # is required before any Store channel mutation can happen.
+    if: needs.promotion-plan.result == 'success' && vars.SNAP_STABLE_PROMOTION_REQUESTED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: snap-stable
+    env:
+      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+      SNAPCRAFT_EXPECTED_EMAIL: ${{ vars.SNAPCRAFT_EXPECTED_EMAIL }}
+      SNAP_STABLE_PROMOTION_ENABLED: ${{ vars.SNAP_STABLE_PROMOTION_ENABLED }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+
+      - name: Install reviewed Snapcraft client
+        run: bash scripts/ci/install-linux-snap-deps.sh
+
+      - name: Require reviewed publisher and promote the complete candidate build set
+        env:
+          SNAP_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$SNAP_STABLE_PROMOTION_ENABLED" != "true" || -z "$SNAPCRAFT_STORE_CREDENTIALS" || -z "$SNAPCRAFT_EXPECTED_EMAIL" ]]; then
+            echo "::error::snap-stable requires environment SNAP_STABLE_PROMOTION_ENABLED=true plus SNAPCRAFT_STORE_CREDENTIALS and SNAPCRAFT_EXPECTED_EMAIL"
+            exit 1
+          fi
+          actual="$(snapcraft whoami)"
+          if ! grep -Fqx "email: $SNAPCRAFT_EXPECTED_EMAIL" <<< "$actual"; then
+            echo "::error::Snapcraft publisher does not match the reviewed web-casa account"
+            exit 1
+          fi
+          # Each tag publishes to its own short-lived candidate branch. This
+          # binds the stable operation to the tag proven in promotion-plan,
+          # rather than whichever revision happens to be on bare candidate.
+          candidate_channel="latest/candidate/$SNAP_RELEASE_TAG"
+          # `promote` operates on the branch's build set, refusing a partial
+          # architecture pair instead of independently releasing revisions.
+          snapcraft status dsh-desktop-community --arch amd64
+          snapcraft status dsh-desktop-community --arch arm64
+          snapcraft promote dsh-desktop-community --from-channel "$candidate_channel" --to-channel latest/stable --yes
+          snapcraft status dsh-desktop-community --arch amd64
+          snapcraft status dsh-desktop-community --arch arm64

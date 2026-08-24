@@ -1,0 +1,295 @@
+name: Snap packages
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer PR/main build may supersede an older one, but never cancel a tag
+# build: it is the only potential source of a reviewed candidate revision.
+concurrency:
+  group: snap-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  snap-plan:
+    name: Validate Snap plan
+    # Manual package proofs are intentionally limited to reviewed main. Tag
+    # builds use the immutable tag ref and first prove it is an ancestor of
+    # main before native jobs are allowed to start.
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Require public-repository free runner policy
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [[ "$REPOSITORY_PRIVATE" != "false" ]]; then
+            echo "::error::Native Snap builds use standard hosted runners under the public-repository free-runner policy. Re-review billing before continuing from a private repository."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+
+      - name: Verify strict Snap source definition
+        run: node scripts/verify-snap-definition.ts
+
+      - name: Bind a tag build to main and its source version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          SNAP_RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/snap-plan.ts --expect-tag "$SNAP_RELEASE_TAG"
+
+      - name: Emit reviewed native matrix
+        id: matrix
+        run: echo "matrix=$(node scripts/snap-plan.ts --github-matrix)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build Snap ${{ matrix.snapArchitecture }}
+    needs: snap-plan
+    if: needs.snap-plan.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.snap-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
+
+      - name: Install Tauri, strict-Snap, and verifier dependencies
+        timeout-minutes: 30
+        run: bash scripts/ci/install-linux-snap-deps.sh
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable (version via rust-toolchain.toml)
+
+      - name: Assert native build host
+        run: node scripts/verify-native-host.ts --target "${{ matrix.nativeTarget }}"
+
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # v2 (SHA-pinned)
+        with:
+          cache-directories: crates/dsh-sidecar/target
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10 (SHA-pinned)
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: runtime/package-lock.json
+
+      - name: Release preflight
+        run: node scripts/release-preflight.ts
+
+      - name: Frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Stage native runtime
+        run: |
+          node scripts/download-node.ts
+          node scripts/prepare-harness.ts
+          node scripts/build-sidecar.ts
+          node scripts/check-runtime-links.ts
+          node scripts/verify-runtime.ts
+          node scripts/verify-sideload.ts
+
+      # Linux updater archives are deliberately disabled; the Snap runtime is
+      # snapd-managed and the built package verifier confirms this policy.
+      - name: Build source DEB
+        run: >-
+          pnpm tauri build
+          --bundles deb
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/dsh-cache
+
+      - name: Build and verify strict Snap
+        run: node scripts/build-snap.ts --arch "${{ matrix.arch }}"
+
+      - name: Install the locally built package in enforced strict confinement
+        shell: bash
+        run: |
+          version="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version')"
+          package="target/snap/packages/${{ matrix.arch }}/$version/dsh-desktop-community_${version}_${{ matrix.snapArchitecture }}.snap"
+          # Each hosted runner is disposable, so exercise the canonical snap
+          # name instead of a parallel instance. Parallel instances still
+          # depend on snapd's experimental feature flag and inhibit automatic
+          # content connections on current snapd releases.
+          instance="dsh-desktop-community"
+          sudo snap remove --purge "$instance" >/dev/null 2>&1 || true
+          trap 'sudo snap remove --purge "$instance" >/dev/null 2>&1 || true' EXIT
+          # A sideloaded --dangerous snap has no Store publisher assertion, so
+          # snapd deliberately cannot auto-connect its cross-publisher content
+          # plugs. Install the signed providers and connect them explicitly to
+          # exercise the strict confinement graph locally. The later candidate
+          # step validates the production Store auto-connection separately.
+          for provider in mesa-2404 gtk-common-themes gnome-46-2404; do
+            if ! snap list "$provider" >/dev/null 2>&1; then
+              sudo snap install "$provider"
+            fi
+          done
+          sudo snap install --dangerous --jailmode --name="$instance" "$package"
+          snap list "$instance"
+          assert_connection() {
+            local plug="$1"
+            local slot="$2"
+            # `snap connections` prints Interface, Plug, Slot, Notes. The
+            # interface itself is column 1 (for example content[gpu-2404]);
+            # compare the canonical plug and slot in columns 2 and 3.
+            if ! snap connections "$instance" | awk -v plug="$instance:$plug" -v slot="$slot" '$2 == plug && $3 == slot { found = 1 } END { exit found ? 0 : 1 }'; then
+              snap connections "$instance" || true
+              echo "::error::required Snap content connection is absent: $instance:$plug -> $slot"
+              exit 1
+            fi
+          }
+          sudo snap connect "$instance:gpu-2404" mesa-2404:gpu-2404
+          sudo snap connect "$instance:gtk-3-themes" gtk-common-themes:gtk-3-themes
+          sudo snap connect "$instance:icon-themes" gtk-common-themes:icon-themes
+          sudo snap connect "$instance:sound-themes" gtk-common-themes:sound-themes
+          sudo snap connect "$instance:gnome-46-2404" gnome-46-2404:gnome-46-2404
+          assert_connection gpu-2404 mesa-2404:gpu-2404
+          assert_connection gtk-3-themes gtk-common-themes:gtk-3-themes
+          assert_connection icon-themes gtk-common-themes:icon-themes
+          assert_connection sound-themes gtk-common-themes:sound-themes
+          assert_connection gnome-46-2404 gnome-46-2404:gnome-46-2404
+          test -x "/snap/$instance/current/bin/launch-dsh-desktop"
+
+      - name: Upload verified Snap and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
+        with:
+          name: dsh-desktop-snap-${{ matrix.arch }}
+          path: |
+            target/snap/packages/${{ matrix.arch }}/**/*.snap
+            target/snap/packages/${{ matrix.arch }}/**/snap-provenance.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Disabled by default. Enabling the repository variable and approving the
+  # protected `snap-candidate` environment is an explicit external Store
+  # decision; PRs and ordinary main builds never receive credentials.
+  publish-candidate:
+    name: Publish verified pair to Snap candidate
+    needs: [snap-plan, build]
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.snap-plan.result == 'success' &&
+      needs.build.result == 'success' &&
+      vars.SNAP_CANDIDATE_PUBLISH_REQUESTED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: snap-candidate
+    env:
+      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+      SNAPCRAFT_EXPECTED_EMAIL: ${{ vars.SNAPCRAFT_EXPECTED_EMAIL }}
+      SNAP_CANDIDATE_PUBLISH_ENABLED: ${{ vars.SNAP_CANDIDATE_PUBLISH_ENABLED }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (SHA-pinned)
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Install reviewed Snapcraft client
+        run: bash scripts/ci/install-linux-snap-deps.sh
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0 (SHA-pinned)
+        with:
+          node-version-file: .nvmrc
+
+      - name: Require the reviewed web-casa publisher identity
+        run: |
+          if [[ "$SNAP_CANDIDATE_PUBLISH_ENABLED" != "true" || -z "$SNAPCRAFT_STORE_CREDENTIALS" || -z "$SNAPCRAFT_EXPECTED_EMAIL" ]]; then
+            echo "::error::snap-candidate requires environment SNAP_CANDIDATE_PUBLISH_ENABLED=true plus SNAPCRAFT_STORE_CREDENTIALS and SNAPCRAFT_EXPECTED_EMAIL"
+            exit 1
+          fi
+          actual="$(snapcraft whoami)"
+          if ! grep -Fqx "email: $SNAPCRAFT_EXPECTED_EMAIL" <<< "$actual"; then
+            echo "::error::Snapcraft publisher does not match the reviewed web-casa account"
+            exit 1
+          fi
+
+      - name: Download the complete native artifact pair
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4 (SHA-pinned)
+        with:
+          pattern: dsh-desktop-snap-*
+          path: snap-artifacts
+
+      - name: Re-verify exactly the amd64 and arm64 package pair before upload
+        run: |
+          version="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version')"
+          for spec in 'x64 amd64' 'arm64 arm64'; do
+            read -r arch snap_arch <<< "$spec"
+            artifact="snap-artifacts/dsh-desktop-snap-$arch"
+            mapfile -t packages < <(find "$artifact" -type f -name "dsh-desktop-community_${version}_${snap_arch}.snap" -print | sort)
+            mapfile -t provenance < <(find "$artifact" -type f -name snap-provenance.json -print | sort)
+            if [[ "${#packages[@]}" -ne 1 || "${#provenance[@]}" -ne 1 ]]; then
+              echo "::error::expected one $arch Snap and provenance artifact"
+              exit 1
+            fi
+            node scripts/verify-snap.ts --arch "$arch" --snap "${packages[0]}" --provenance "${provenance[0]}"
+          done
+
+      - name: Upload exactly the verified amd64 and arm64 packages to candidate
+        env:
+          SNAP_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # A tag-owned branch makes candidate an immutable review target for
+          # this release. It prevents a later tag's candidate pair from being
+          # accidentally promoted by the manual stable workflow.
+          candidate_channel="latest/candidate/$SNAP_RELEASE_TAG"
+          mapfile -t packages < <(find snap-artifacts -type f -name '*.snap' -print | sort)
+          if [[ "${#packages[@]}" -ne 2 ]]; then
+            echo "::error::expected exactly two Snap packages, found ${#packages[@]}"
+            exit 1
+          fi
+          for package in "${packages[@]}"; do
+            snapcraft upload --release "$candidate_channel" "$package"
+          done
+          snapcraft status dsh-desktop-community --arch amd64
+          snapcraft status dsh-desktop-community --arch arm64
+
+      - name: Verify the actual Store candidate auto-connects its signed content providers
+        env:
+          SNAP_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          candidate_channel="latest/candidate/$SNAP_RELEASE_TAG"
+          # This disposable runner has no existing copy of the application.
+          # Avoid snapd parallel instances: they remain experimental and can
+          # change content-interface auto-connection behavior.
+          instance="dsh-desktop-community"
+          sudo snap remove --purge "$instance" >/dev/null 2>&1 || true
+          trap 'sudo snap remove --purge "$instance" >/dev/null 2>&1 || true' EXIT
+          sudo snap install --channel "$candidate_channel" "$instance"
+          assert_connection() {
+            local plug="$1"
+            local slot="$2"
+            # `snap connections` prints Interface, Plug, Slot, Notes. The
+            # interface itself is column 1 (for example content[gpu-2404]);
+            # compare the canonical plug and slot in columns 2 and 3.
+            if ! snap connections "$instance" | awk -v plug="$instance:$plug" -v slot="$slot" '$2 == plug && $3 == slot { found = 1 } END { exit found ? 0 : 1 }'; then
+              snap connections "$instance" || true
+              echo "::error::Store candidate did not auto-connect required content provider: $instance:$plug -> $slot"
+              exit 1
+            fi
+          }
+          assert_connection gpu-2404 mesa-2404:gpu-2404
+          assert_connection gtk-3-themes gtk-common-themes:gtk-3-themes
+          assert_connection icon-themes gtk-common-themes:icon-themes
+          assert_connection sound-themes gtk-common-themes:sound-themes
+          assert_connection gnome-46-2404 gnome-46-2404:gnome-46-2404

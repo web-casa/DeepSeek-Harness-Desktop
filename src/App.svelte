@@ -227,6 +227,8 @@
     switch (reason) {
       case "store":
         return t("update.unsupportedStore");
+      case "snap":
+        return t("update.unsupportedSnap");
       case "msi":
         return t("update.unsupportedMsi");
       case "manual":
@@ -1208,7 +1210,7 @@
     if (!storeBuild) {
       try {
         const info = await checkUpdate();
-        if (info.available) updateInfo = info;
+        if (info.available || info.unsupportedReason === "snap") updateInfo = info;
       } catch {
         /* offline / draft release: stay silent */
       }
