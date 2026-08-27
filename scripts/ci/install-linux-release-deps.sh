@@ -22,7 +22,8 @@ apt_options=(
 sudo apt-get "${apt_options[@]}" update
 sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y \
   appstream binutils file flatpak libarchive-tools libayatana-appindicator3-dev \
-  librsvg2-dev libwebkit2gtk-4.1-dev ostree patchelf rpm xdg-utils
+  gstreamer1.0-plugins-base gstreamer1.0-tools librsvg2-dev libwebkit2gtk-4.1-dev ostree patchelf \
+  rpm squashfs-tools xdg-utils
 
 flatpak remote-add --user --if-not-exists \
   flathub https://dl.flathub.org/repo/flathub.flatpakrepo

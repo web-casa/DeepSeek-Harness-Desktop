@@ -1,7 +1,7 @@
 {
   "name": "deepseek-harness-desktop",
   "private": true,
-  "version": "0.2.17",
+  "version": "0.2.18",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,7 @@
     "runtime:all": "node scripts/download-node.ts && node scripts/prepare-harness.ts && node scripts/build-sidecar.ts",
     "runtime:verify": "node scripts/verify-runtime.ts",
     "release:appimage-tools": "node scripts/prepare-appimage-tools.ts",
+    "release:appimage-postprocess": "node scripts/postprocess-appimage.ts",
     "release:flatpak": "node scripts/build-flatpak.ts",
     "release:verify-set": "node scripts/verify-release-set.ts",
     "release:preflight": "node scripts/release-preflight.ts",

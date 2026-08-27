@@ -33,6 +33,14 @@ import {
 } from "./lib/windows-installer-locales.ts";
 import { DMG_TOOL_TIMEOUT_MS } from "./lib/macos-dmg.ts";
 import { FLATPAK_RUNTIME_REPO, flatpakMetadataProblems } from "./lib/flatpak.ts";
+import {
+  APPIMAGE_GDK_BACKEND_EXPORT,
+  APPIMAGE_GTK_HOOK_RELATIVE_PATH,
+} from "./lib/appimage-tools.ts";
+import {
+  APPIMAGE_GSTREAMER_PLUGIN_RELATIVE_PATH,
+  appImageRuntimeProblems,
+} from "./lib/appimage-runtime.ts";
 
 type RuntimePlatform = "win32" | "darwin" | "linux";
 type BinaryKind = "PE" | "Mach-O" | "ELF";
@@ -299,6 +307,64 @@ function verifyLinuxLayout(root: string, prefix: "usr" | "files", arch: ReleaseA
   const runtimeRoot = join(root, prefix, "lib", productName, "runtime");
   verifyRuntimeTree(mainBinary, runtimeRoot, "linux", arch);
   assertLinuxDeepLink(root);
+}
+
+function verifyAppImageGtkHook(root: string): void {
+  const hook = join(root, APPIMAGE_GTK_HOOK_RELATIVE_PATH);
+  assertFile(hook, "AppImage GTK hook");
+  const backendAssignments = readFileSync(hook, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^(?:export\s+)?GDK_BACKEND=/.test(line));
+  if (
+    backendAssignments.length !== 1 ||
+    !backendAssignments[0].startsWith(APPIMAGE_GDK_BACKEND_EXPORT)
+  ) {
+    throw new Error(
+      `AppImage GTK hook must preserve an explicitly selected GDK backend; expected exactly one assignment beginning ${JSON.stringify(APPIMAGE_GDK_BACKEND_EXPORT)}`,
+    );
+  }
+  ok("AppImage GTK hook preserves an explicitly selected GDK backend");
+}
+
+function verifyAppImageRuntimeCompatibility(root: string): void {
+  const problems = appImageRuntimeProblems(root);
+  if (problems.length > 0) {
+    throw new Error(`AppImage runtime compatibility contract failed:\n${problems.join("\n")}`);
+  }
+  ok("AppImage uses host desktop ABI libraries and bundles GStreamer plugins");
+}
+
+/**
+ * The compatibility contract intentionally keeps the bundled GStreamer
+ * plugins while resolving GLib/GObject from the host. Inspect the exact plugin
+ * WebKit requires (`appsink`) at its bundled path. This avoids scanning every
+ * optional media plugin from the build host, while still testing the dynamic
+ * linker boundary the WebKit path uses.
+ */
+function verifyAppImageGStreamerAppsink(root: string, scratch: string): void {
+  const appLib = join(root, "usr", "lib");
+  const pluginDirectory = join(root, APPIMAGE_GSTREAMER_PLUGIN_RELATIVE_PATH);
+  const appsink = readdirSync(pluginDirectory, { withFileTypes: true }).find(
+    (entry) => entry.isFile() && /^libgstapp\.so(?:\.\d+)*$/.test(entry.name),
+  );
+  if (!appsink) {
+    throw new Error("AppImage GStreamer appsink plugin disappeared after compatibility validation");
+  }
+  const libraryPath = [appLib, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
+  run("gst-inspect-1.0", [join(pluginDirectory, appsink.name)], "AppImage GStreamer appsink smoke", {
+    cwd: scratch,
+    env: {
+      ...process.env,
+      LD_LIBRARY_PATH: libraryPath,
+      GST_PLUGIN_SYSTEM_PATH: "",
+      GST_PLUGIN_SYSTEM_PATH_1_0: "",
+      GST_PLUGIN_PATH: "",
+      GST_PLUGIN_PATH_1_0: "",
+      GST_REGISTRY_1_0: join(scratch, "gstreamer-registry.bin"),
+    },
+  });
+  ok("AppImage bundled GStreamer appsink loads with host desktop ABI libraries");
 }
 
 function find7z(): string {
@@ -617,6 +683,9 @@ function verifyAppImage(artifact: string, arch: ReleaseArch): void {
     const root = join(extraction, "squashfs-root");
     if (!existsSync(root)) throw new Error("AppImage extraction did not create squashfs-root");
     verifyLinuxLayout(root, "usr", arch);
+    verifyAppImageGtkHook(root);
+    verifyAppImageRuntimeCompatibility(root);
+    verifyAppImageGStreamerAppsink(root, extraction);
   } finally {
     rmSync(extraction, { recursive: true, force: true });
   }
@@ -759,7 +828,25 @@ function runSelfTest(): void {
     rmSync(executable, { force: true });
     rmSync(plain, { force: true });
   }
-  ok("self-test: bundle parser, diagnostics, archive paths, and executable checks pass");
+
+  const appImageHookFixture = join(tmpDir, `appimage-gtk-hook-fixture-${process.pid}`);
+  const appImageHook = join(appImageHookFixture, APPIMAGE_GTK_HOOK_RELATIVE_PATH);
+  mkdirSync(dirname(appImageHook), { recursive: true });
+  writeFileSync(appImageHook, `${APPIMAGE_GDK_BACKEND_EXPORT} # fixture\n`);
+  try {
+    verifyAppImageGtkHook(appImageHookFixture);
+    writeFileSync(appImageHook, "export GDK_BACKEND=x11\n");
+    let rejected = false;
+    try {
+      verifyAppImageGtkHook(appImageHookFixture);
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) fail("self-test: AppImage GTK hook accepted a forced X11 backend");
+  } finally {
+    rmSync(appImageHookFixture, { recursive: true, force: true });
+  }
+  ok("self-test: bundle parser, diagnostics, archive paths, executable checks, and AppImage GTK hook checks pass");
 }
 
 if (process.argv.includes("--self-test")) {

@@ -6,12 +6,19 @@ export interface AppImageTool {
   sha256: string;
 }
 
+// Tauri's follow-up to the Wayland AppImage regression keeps X11 as the
+// compatibility fallback, while allowing a user to explicitly select a GTK
+// backend before launching the AppImage.
+export const APPIMAGE_GTK_HOOK_RELATIVE_PATH =
+  "apprun-hooks/linuxdeploy-plugin-gtk.sh";
+export const APPIMAGE_GDK_BACKEND_EXPORT = 'export GDK_BACKEND="${GDK_BACKEND:-x11}"';
+
 const sharedTools = [
   {
     cacheName: "linuxdeploy-plugin-gtk.sh",
     source:
-      "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/b5eb8d05b4c0ed40107fe2158c5d8527f94568ef/linuxdeploy-plugin-gtk.sh",
-    sha256: "cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a",
+      "https://raw.githubusercontent.com/tauri-apps/tauri/7164de39574d616b762ba658f797f9657ea03b20/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gtk.sh",
+    sha256: "fe83c123e65977752f83b347d0936d59d03dabe883141b208b04b2544ebf108d",
   },
   {
     cacheName: "linuxdeploy-plugin-gstreamer.sh",

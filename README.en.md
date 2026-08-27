@@ -13,7 +13,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Current version | v0.2.17 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · Snap Store delivery is ready but not public yet · signed/notarized macOS · [中文](README.md) |
+| Current version | v0.2.18 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · Snap Store delivery is ready but not public yet · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
@@ -31,6 +31,25 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Windows | Native x64 and ARM64: multilingual NSIS `*-setup.exe`, WiX `.msi` |
 | macOS | arm64 and x64 `.dmg` |
 | Linux | x64 and arm64 `.AppImage`, `.deb`, `.rpm`, `.flatpak` |
+
+> **Linux Wayland (AppImage)**: v0.2.17 has a known
+> [#43](https://github.com/web-casa/DeepSeek-Harness-Desktop/issues/43) compatibility
+> issue on some newer KDE/Wayland + Mesa combinations: it bundles the build
+> machine's Wayland, GLib/GIO, and `nghttp2` ABI libraries and lacks the
+> GStreamer plugin directory it declares. v0.2.18 uses the host desktop ABI
+> libraries and bundles GStreamer plugins. The
+> new GTK hook also preserves an explicit backend choice (defaulting to X11),
+> so you can try:
+>
+> ```bash
+> GDK_BACKEND=wayland ./<your-AppImage-file>.AppImage
+> ```
+>
+> The repaired AppImage targets Ubuntu 22.04 (the release-build baseline) or
+> newer as its host desktop ABI baseline; older systems are unsupported.
+> This does not override v0.2.17, which forces X11; upgrade to v0.2.18.
+> If v0.2.18 still has a problem, cross-check its `.deb`, `.rpm`, or `.flatpak`, and attach your desktop environment,
+> GPU/driver details, and redacted stderr. Do not delete `~/.dsh`.
 
 The future Snap Store package is named `dsh-desktop-community` and titled
 **DSH Desktop (Community)**. It will be a strictly confined, native x64/arm64
@@ -207,9 +226,9 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
   Partner Center upload, not GitHub Release assets.
 - Harness upgrades follow the startup-contract checklist in
   [AGENTS.md](AGENTS.md); the release flow lives in [RELEASING.md](RELEASING.md).
-- Current release: v0.2.17, including six native build targets, Windows
+- Current release: v0.2.18, including six native build targets, Windows
   x64/ARM64 installers and English/Simplified-Chinese MSI packages, macOS
-  Developer ID signing/notarization, the Cordis v4 marketplace contract,
+  Developer ID signing/notarization, the AppImage Wayland/GLib/GIO compatibility repair, the Cordis v4 marketplace contract,
   diagnostic resilience, safe plugin recovery, and the strict Snap x64/arm64
   candidate-delivery path. The historical v0.2.13 `_en-US` suffix means only
   that its installer UI was English.

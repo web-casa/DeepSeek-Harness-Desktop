@@ -476,6 +476,15 @@ jobs:
         env:
           XDG_CACHE_HOME: ${{ runner.temp }}/dsh-cache
 
+      # Tauri/linuxdeploy currently has no config surface for excluding its
+      # build-host desktop ABI payload. Repack the just-built AppImage with
+      # host-resolved Wayland/GLib/GIO/nghttp2 libraries and verify the
+      # now-required bundled GStreamer plugin directory before anything is
+      # checksummed or uploaded.
+      - name: Post-process AppImage runtime compatibility
+        if: matrix.appImageTools
+        run: node scripts/postprocess-appimage.ts --arch ${{ matrix.arch }}
+
       - name: Build Flatpak from the Tauri DEB
         if: matrix.flatpak
         run: node scripts/build-flatpak.ts --arch ${{ matrix.arch }}
