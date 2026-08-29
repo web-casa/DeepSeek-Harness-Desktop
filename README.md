@@ -11,7 +11,7 @@
 | 下载 | [Releases](https://github.com/web-casa/DeepSeek-Harness-Desktop/releases) |
 | 官网 | [dsharness.app](https://dsharness.app) |
 | 插件市场 | [cordis.run](https://cordis.run) |
-| 文档 | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
+| 文档 | [更新日志](CHANGELOG.zh-CN.md) · [English changelog](CHANGELOG.md) · [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
 | 当前版本 | v0.2.18 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · [Snap Store 已正式发布](https://snapcraft.io/dsh-desktop-community) · macOS 已签名/公证 · [English](README.en.md) |
 
 > **macOS 用户**：v0.2.9 起，DMG 使用 Developer ID Application 签名并经
