@@ -42,10 +42,10 @@
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^26.2.0",
-    "svelte": "^5.56.9",
+    "svelte": "^5.56.10",
     "svelte-check": "^4.7.6",
     "typescript": "^6.0.3",
-    "vite": "^8.2.1",
+    "vite": "^8.2.2",
     "@choochmeque/tauri-windows-bundle": "^0.1.28"
   },
   "packageManager": "pnpm@11.21.0"
