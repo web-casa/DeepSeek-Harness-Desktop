@@ -25,6 +25,16 @@ test("Rust CodeQL compiles both the sidecar and the Tauri security boundary", ()
   assert.match(codeqlWorkflow, /mkdir -p src-tauri\/resources\/runtime/);
 });
 
+test("CodeQL actions use one SHA-pinned v4 release", () => {
+  const actions = [...codeqlWorkflow.matchAll(
+    /uses: github\/codeql-action\/(?:init|autobuild|analyze)@([0-9a-f]{40})\s+# v(4\.[0-9]+\.[0-9]+) \(SHA-pinned\)/g,
+  )];
+  assert.equal(actions.length, 5);
+  assert.equal(new Set(actions.map((match) => match[1])).size, 1);
+  assert.equal(new Set(actions.map((match) => match[2])).size, 1);
+  assert.doesNotMatch(codeqlWorkflow, /github\/codeql-action\/[^@\s]+@v[0-9]/);
+});
+
 test("macOS shell path gate validates event SHAs and fails closed", () => {
   const start = workflow.indexOf("      - name: Detect macOS shell changes");
   const end = workflow.indexOf("      # The exact P0 acceptance chain", start);
