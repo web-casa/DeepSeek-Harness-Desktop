@@ -13,7 +13,7 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 | Website | [dsharness.app](https://dsharness.app) |
 | Plugin marketplace | [cordis.run](https://cordis.run) |
 | Docs | [SECURITY](SECURITY.md) · [FORKING](FORKING.md) · [RELEASING](RELEASING.md) · [AGENTS](AGENTS.md) |
-| Current version | v0.2.18 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · Snap Store delivery is ready but not public yet · signed/notarized macOS · [中文](README.md) |
+| Current version | v0.2.18 · Windows x64/ARM64 EXE/MSI · macOS x64/arm64 DMG · Linux x64/arm64 AppImage/DEB/RPM/Flatpak · [now on the Snap Store](https://snapcraft.io/dsh-desktop-community) · signed/notarized macOS · [中文](README.md) |
 
 > **macOS users**: starting with v0.2.9, DMGs are signed with Developer ID
 > Application, notarized by Apple, stapled, and rechecked with Gatekeeper.
@@ -51,11 +51,18 @@ intact; the desktop layer only handles lifecycle and the security boundary.
 > If v0.2.18 still has a problem, cross-check its `.deb`, `.rpm`, or `.flatpak`, and attach your desktop environment,
 > GPU/driver details, and redacted stderr. Do not delete `~/.dsh`.
 
-The future Snap Store package is named `dsh-desktop-community` and titled
-**DSH Desktop (Community)**. It will be a strictly confined, native x64/arm64
-Snap. Account ownership and Store onboarding are still being completed, so
-there is no public install command yet. Once released, Snap Store/`snapd` —
-not the in-app updater — will manage updates.
+The Snap Store package **`dsh-desktop-community`**, titled **DSH Desktop
+(Community)**, is publicly available as a strictly confined, native x64/arm64
+Snap:
+
+```bash
+sudo snap install dsh-desktop-community
+```
+
+The stable Snap channel may lag behind the GitHub Release; check the
+[Snap Store page](https://snapcraft.io/dsh-desktop-community) for its current
+version before installing. Snap Store/`snapd` — not the in-app updater —
+manages updates for this edition.
 
 Every public installer has a same-name `.sha256` sidecar. The x64/arm64
 Microsoft Store MSIX packages remain separate, unsigned Partner Center
@@ -229,8 +236,8 @@ deny.toml + supply-chain/   policy & audits   .github/workflows/   CI
 - Current release: v0.2.18, including six native build targets, Windows
   x64/ARM64 installers and English/Simplified-Chinese MSI packages, macOS
   Developer ID signing/notarization, the AppImage Wayland/GLib/GIO compatibility repair, the Cordis v4 marketplace contract,
-  diagnostic resilience, safe plugin recovery, and the strict Snap x64/arm64
-  candidate-delivery path. The historical v0.2.13 `_en-US` suffix means only
+  diagnostic resilience, safe plugin recovery, and a released strict Snap
+  Store channel for native x64/arm64. The historical v0.2.13 `_en-US` suffix means only
   that its installer UI was English.
 - Known limits: Windows GitHub installers do not yet have Authenticode and may
   trigger SmartScreen; in-app updating accepts only a payload exactly matching
