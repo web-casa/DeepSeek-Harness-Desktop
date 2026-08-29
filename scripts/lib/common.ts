@@ -54,6 +54,13 @@ export function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n/g, "\n");
 }
 
+/** Return the major from an exact, caret, or tilde semver triple. */
+export function semverMajor(value: string): number | null {
+  const match =
+    /^[~^]?((?:0|[1-9][0-9]*))\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.exec(value);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
 // npm version gate shared by every script that runs `npm ci` in runtime/.
 // runtime/.npmrc relies on strict-allow-scripts/allow-scripts, an npm 11
 // feature: OLDER npm silently ignores unknown config keys (fail open — every

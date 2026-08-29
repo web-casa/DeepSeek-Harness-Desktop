@@ -17,6 +17,7 @@ import {
   ok,
   info,
   assertNpmInAuditedRange,
+  semverMajor,
 } from "./lib/common.ts";
 import { repositoryCommandContractProblems } from "./lib/command-contract.ts";
 import { releasePlanProblems } from "./lib/release-artifacts.ts";
@@ -95,7 +96,11 @@ ok("command permission contract aligned; Harness capability remains empty");
 
 // --- deny: version alignment ---------------------------------------------
 const desktopVersion = manifest.desktopVersion;
-const rootPkg = readJson("package.json") as { private?: boolean; version?: string };
+const rootPkg = readJson("package.json") as {
+  private?: boolean;
+  version?: string;
+  devDependencies?: Record<string, string>;
+};
 const tauriConf = readJson("src-tauri/tauri.conf.json") as { version?: string };
 const tauriCargo = cargoVersion("src-tauri/Cargo.toml");
 const sidecarCargo = cargoVersion("crates/dsh-sidecar/Cargo.toml");
@@ -179,6 +184,26 @@ if (extraKeys.length > 0) {
   fail(`nodeSha256 has unexpected keys: ${extraKeys.join(", ")}`);
 }
 ok(`node checksum table covers exactly ${PLATFORM_KEYS.length} platforms (64-hex each)`);
+
+// TypeScript must not expose Node APIs newer than the build and bundled
+// runtime. Dependabot groups can otherwise advance @types/node independently
+// and let code compile against APIs that do not exist in the shipped Node.
+const nodeTypesRange = rootPkg.devDependencies?.["@types/node"];
+const runtimeNodeMajor = semverMajor(manifest.nodeVersion);
+const nodeTypesMajor = semverMajor(nodeTypesRange ?? "");
+if (runtimeNodeMajor === null) {
+  fail(`runtime-manifest.json has unsupported nodeVersion ${JSON.stringify(manifest.nodeVersion)}`);
+}
+if (nodeTypesMajor === null) {
+  fail(`package.json has unsupported @types/node range ${JSON.stringify(nodeTypesRange)}`);
+}
+if (nodeTypesMajor !== runtimeNodeMajor) {
+  fail(
+    `Node type/runtime major drift: package.json uses @types/node ${nodeTypesRange}, ` +
+      `runtime manifest uses Node ${manifest.nodeVersion}`,
+  );
+}
+ok(`Node type/runtime major aligned: ${nodeTypesMajor}`);
 
 // Generated source literals define the outbound Node-download boundary. They
 // must be regenerated from the manifest on every Node bump; do this check

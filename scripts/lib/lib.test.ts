@@ -8,7 +8,7 @@ import { quarantinePresent, parseSltListing } from "./bundle-checks.ts";
 import { isParseableReadyLine } from "./heartbeat-sim.ts";
 import { isPackageRoot } from "./licenses.ts";
 import { nodeRelease } from "./node-distribution.ts";
-import { normalizeLineEndings, readManifest } from "./common.ts";
+import { normalizeLineEndings, readManifest, semverMajor } from "./common.ts";
 
 test("node release allowlist stays aligned with the runtime manifest", () => {
   const manifest = readManifest();
@@ -28,6 +28,15 @@ test("normalizeLineEndings: generated-file comparisons tolerate Windows checkout
   assert.equal(normalizeLineEndings("one\r\ntwo\r\n"), "one\ntwo\n");
   assert.equal(normalizeLineEndings("one\ntwo\n"), "one\ntwo\n");
   assert.equal(normalizeLineEndings("one\rtwo"), "one\rtwo");
+});
+
+test("semverMajor accepts only supported exact, caret, and tilde triples", () => {
+  assert.equal(semverMajor("24.19.0"), 24);
+  assert.equal(semverMajor("^24.13.3"), 24);
+  assert.equal(semverMajor("~24.13.3"), 24);
+  assert.equal(semverMajor(">=24"), null);
+  assert.equal(semverMajor("024.13.3"), null);
+  assert.equal(semverMajor("24.13"), null);
 });
 
 test("expectedSigned: platform secret presence decides", () => {
