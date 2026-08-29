@@ -820,7 +820,7 @@ mod tests {
     use super::{
         ensure_no_plugin_recovery_at, is_zip_content_type, manual_plugin_install_allowed,
         market_pnpm_args, parse_pnpm_major, plugin_mutation_status_allowed, plugin_path_env,
-        redact, remove_pnpm_args, sweep_sideload_dir, sweep_sideloads_root,
+        plugin_pnpm_env, redact, remove_pnpm_args, sweep_sideload_dir, sweep_sideloads_root,
         sweep_stale_sideloads_paths, update_support, UpdateSupport,
     };
 
@@ -1088,6 +1088,7 @@ mod tests {
             "--global=false",
             "--node-linker=hoisted",
             "--config.auto-install-peers=false",
+            "--config.update-notifier=false",
             "--package-import-method=copy",
             "--virtual-store-dir=node_modules/.pnpm",
             "--config.enable-global-virtual-store=false",
@@ -1123,8 +1124,25 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--ignore-workspace"));
         assert!(args
             .iter()
+            .any(|arg| arg == "--config.update-notifier=false"));
+        assert!(args
+            .iter()
             .any(|arg| arg == "--store-dir=existing-profile-store"));
         assert!(!args.iter().any(|arg| arg == "plugin"));
+    }
+
+    #[test]
+    fn generic_plugin_pnpm_environment_disables_self_update_advice() {
+        let store = std::path::Path::new("existing-profile-store");
+        let env = plugin_pnpm_env(Some(store));
+        assert!(env.contains(&(
+            "PNPM_CONFIG_UPDATE_NOTIFIER".to_string(),
+            "false".to_string(),
+        )));
+        assert!(env.contains(&(
+            "PNPM_CONFIG_STORE_DIR".to_string(),
+            store.to_string_lossy().to_string(),
+        )));
     }
 
     #[test]
@@ -1769,6 +1787,7 @@ fn isolated_pnpm_args(store_dir: Option<&std::path::Path>) -> Vec<String> {
         "--global=false".to_string(),
         "--node-linker=hoisted".to_string(),
         "--config.auto-install-peers=false".to_string(),
+        "--config.update-notifier=false".to_string(),
         "--package-import-method=copy".to_string(),
         "--virtual-store-dir=node_modules/.pnpm".to_string(),
         "--yes".to_string(),
@@ -1778,6 +1797,20 @@ fn isolated_pnpm_args(store_dir: Option<&std::path::Path>) -> Vec<String> {
         args.push(format!("--store-dir={}", store_dir.display()));
     }
     args
+}
+
+fn plugin_pnpm_env(store_dir: Option<&std::path::Path>) -> Vec<(String, String)> {
+    let mut env = vec![(
+        "PNPM_CONFIG_UPDATE_NOTIFIER".to_string(),
+        "false".to_string(),
+    )];
+    if let Some(store_dir) = store_dir {
+        env.push((
+            "PNPM_CONFIG_STORE_DIR".to_string(),
+            store_dir.to_string_lossy().to_string(),
+        ));
+    }
+    env
 }
 
 fn market_pnpm_args(
@@ -1877,15 +1910,10 @@ fn plugin_spawn_spec(
         ),
         ("PATH".to_string(), path_env.to_string_lossy().to_string()),
     ];
-    if let Some(store_dir) = store_dir {
-        // PlatformChild removes inherited pnpm_config_* keys, then applies
-        // these Desktop-owned overrides. Reusing only pnpm's recorded store
-        // avoids both config injection and ERR_PNPM_UNEXPECTED_STORE.
-        env.push((
-            "PNPM_CONFIG_STORE_DIR".to_string(),
-            store_dir.to_string_lossy().to_string(),
-        ));
-    }
+    // PlatformChild removes inherited pnpm_config_* keys, then applies these
+    // Desktop-owned overrides. Reuse only pnpm's recorded store and suppress
+    // self-update advice for the immutable bundled CLI.
+    env.extend(plugin_pnpm_env(store_dir.as_deref()));
     #[cfg(windows)]
     {
         env.push(("ComSpec".to_string(), trusted_windows_comspec()?));
