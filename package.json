@@ -35,17 +35,17 @@
     "verify:sideload": "node scripts/verify-sideload.ts"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1",
-    "@tauri-apps/plugin-opener": "^2.5.4"
+    "@tauri-apps/api": "^2.12.0",
+    "@tauri-apps/plugin-opener": "^2.7.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
-    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/cli": "^2.12.0",
     "@types/node": "^24.13.3",
-    "svelte": "^5.56.10",
+    "svelte": "^5.57.1",
     "svelte-check": "^4.7.6",
     "typescript": "^6.0.3",
-    "vite": "^8.2.2",
+    "vite": "^8.3.1",
     "@choochmeque/tauri-windows-bundle": "^0.1.28"
   },
   "packageManager": "pnpm@11.21.0"
