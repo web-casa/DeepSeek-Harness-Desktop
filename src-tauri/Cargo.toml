@@ -19,7 +19,7 @@ tauri-plugin-deep-link = "2"
 # Keep the portable flate2/miniz backend used elsewhere in the application.
 # zip's broader `deflate` meta-feature would also pull zopfli and zlib-rs;
 # neither is needed for opening or creating the small preset/diagnostic ZIPs.
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # zip's deflate-flate2 feature intentionally leaves flate2's backend to the
 # application. Select its portable miniz_oxide backend explicitly: Linux
 # happens to gain it through PNG, but the Windows graph does not.
